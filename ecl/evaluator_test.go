@@ -20,6 +20,11 @@ type testProvider struct {
 	exists      map[string]bool
 	all         []string
 	refsets     map[string][]string // key: refsetID, value: member concept IDs
+
+	// Relationships per concept: key = source conceptID, value = list of
+	// outbound attribute relationships. Used by RelationshipTargets,
+	// RelationshipSources, and PropertiesByGroup.
+	relationships map[string][]Relationship
 }
 
 // Hierarchy --------------------------------------------------------------
@@ -104,18 +109,58 @@ func (p *testProvider) RefsetMembers(_ context.Context, refsetIDs []string) (Set
 	return out, nil
 }
 
-// Stubs (not used in Phase 3.2) ------------------------------------------
+// Relationships (Phase 3.3 – 3.5) ---------------------------------------
 
-func (p *testProvider) RelationshipTargets(_ context.Context, _ Set, _ Set) (Set, error) {
-	return NewSet(), nil
+func (p *testProvider) RelationshipTargets(_ context.Context, sourceIDs Set, typeIDs Set) (Set, error) {
+	out := NewSet().(*mapSet)
+	if sourceIDs == nil || typeIDs == nil {
+		return out, nil
+	}
+	sourceIDs.Iter(func(src string) bool {
+		for _, r := range p.relationships[src] {
+			if typeIDs.Contains(r.TypeID) {
+				out.m[r.TargetID] = struct{}{}
+			}
+		}
+		return true
+	})
+	return out, nil
 }
-func (p *testProvider) RelationshipSources(_ context.Context, _ Set, _ Set) (Set, error) {
-	return NewSet(), nil
+
+func (p *testProvider) RelationshipSources(_ context.Context, targetIDs Set, typeIDs Set) (Set, error) {
+	out := NewSet().(*mapSet)
+	if targetIDs == nil || typeIDs == nil {
+		return out, nil
+	}
+	for src, rels := range p.relationships {
+		for _, r := range rels {
+			if !typeIDs.Contains(r.TypeID) {
+				continue
+			}
+			if targetIDs.Contains(r.TargetID) {
+				out.m[src] = struct{}{}
+				break
+			}
+		}
+	}
+	return out, nil
 }
+
+func (p *testProvider) PropertiesByGroup(_ context.Context, conceptID string) (map[int][]Relationship, error) {
+	rels, ok := p.relationships[conceptID]
+	if !ok {
+		return nil, nil
+	}
+	groups := make(map[int][]Relationship)
+	for _, r := range rels {
+		groups[r.GroupNum] = append(groups[r.GroupNum], r)
+	}
+	return groups, nil
+}
+
+// Stubs (not used in Phases 3.2 – 3.5) -----------------------------------
+
 func (p *testProvider) ConcreteValues(_ context.Context, _ string, _ string) ([]ConcreteValue, error) {
-	return nil, nil
-}
-func (p *testProvider) PropertiesByGroup(_ context.Context, _ string) (map[int][]Relationship, error) {
 	return nil, nil
 }
 func (p *testProvider) MatchDescription(_ context.Context, _ DescriptionFilterOpts) (Set, error) {
@@ -177,10 +222,37 @@ func newFixture() *testProvider {
 			"73211009":           true,
 			"404684004":          true,
 			"900000000000497000": true, // refset concept itself exists
+			// attribute type and target concepts used in relationship tests
+			"363698007": true, // Finding site (attribute type)
+			"116676008": true, // Associated morphology (attribute type)
+			"74281007":  true, // Myocardium (target)
+			"55641003":  true, // Infarct (target)
+			"113331007": true, // Endocrine system (target)
 		},
 		all: []string{"138875005", "404684003", "22298006", "64572001", "73211009", "404684004"},
 		refsets: map[string][]string{
 			"900000000000497000": {"22298006", "64572001", "73211009"},
+		},
+		// Attribute relationships for refinement / dot tests.
+		//
+		//   22298006  (MI)       group 1: 363698007 = 74281007
+		//                        group 1: 116676008 = 55641003
+		//   73211009  (diabetes) group 1: 363698007 = 113331007
+		//   404684004 (other)    group 1: 363698007 = 74281007
+		//                        group 2: 116676008 = 55641003
+		//                        (two attrs but in DIFFERENT groups)
+		relationships: map[string][]Relationship{
+			"22298006": {
+				{TypeID: "363698007", TargetID: "74281007", GroupNum: 1},
+				{TypeID: "116676008", TargetID: "55641003", GroupNum: 1},
+			},
+			"73211009": {
+				{TypeID: "363698007", TargetID: "113331007", GroupNum: 1},
+			},
+			"404684004": {
+				{TypeID: "363698007", TargetID: "74281007", GroupNum: 1},
+				{TypeID: "116676008", TargetID: "55641003", GroupNum: 2},
+			},
 		},
 	}
 }
