@@ -122,7 +122,45 @@ func TestParse_SingleConcept(t *testing.T) {
 	assert.Equal(t, "404684003", ref.ID)
 }
 
+func TestParse_RefsetContainingAny(t *testing.T) {
+	expr, err := Parse("^R 900000000000497000")
+	require.NoError(t, err)
+	rc, ok := expr.(*ast.RefsetContainingAny)
+	require.True(t, ok)
+	ref, ok := rc.Operand.(*ast.ConceptRef)
+	require.True(t, ok)
+	assert.Equal(t, "900000000000497000", ref.ID)
+}
+
+func TestParse_DescriptionFilter(t *testing.T) {
+	expr, err := Parse(`<< 404684003 {{ D term = "diabetes" }}`)
+	require.NoError(t, err)
+	filt, ok := expr.(*ast.Filtered)
+	require.True(t, ok, "expected *ast.Filtered, got %T", expr)
+	assert.NotEmpty(t, filt.Filters, "expected at least one filter clause")
+	// Operand should be the hierarchy expression that was filtered.
+	_, ok = filt.Operand.(*ast.DescendantOrSelfOf)
+	assert.True(t, ok, "expected filtered operand to be DescendantOrSelfOf")
+}
+
 func TestParse_Error(t *testing.T) {
 	_, err := Parse("<<< invalid")
 	assert.Error(t, err)
+}
+
+func TestParse_ErrorEmpty(t *testing.T) {
+	_, err := Parse("")
+	assert.Error(t, err, "empty input should produce a syntax error")
+}
+
+func TestParse_ErrorInvalidString(t *testing.T) {
+	_, err := Parse("invalid ecl string !!!")
+	require.Error(t, err)
+	// Error message should carry line/column info.
+	assert.Contains(t, err.Error(), "1:")
+}
+
+func TestParse_ErrorMissingOperand(t *testing.T) {
+	_, err := Parse("<< ")
+	assert.Error(t, err, "hierarchy operator without operand should fail")
 }

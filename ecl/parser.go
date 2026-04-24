@@ -238,8 +238,28 @@ func (v *astBuilder) VisitSubexpressionconstraint(ctx *grammar.Subexpressioncons
 		focusExpr = v.applyConstraintOperator(ctx.Constraintoperator(), focusExpr)
 	}
 
-	// 4. Apply description/concept filter constraints
-	// (Not implemented in detail for tests — filters would wrap focusExpr in ast.Filtered)
+	// 4. Apply description/concept/member filter constraints.
+	// We collect opaque filter markers here; specific filter clauses are a
+	// follow-up task (the AST carries a Filter interface, and individual
+	// clause types like TermFilter/TypeFilter already exist). For now we
+	// wrap the focus in ast.Filtered so the presence of a filter is
+	// preserved in the AST shape.
+	var filters []ast.Filter
+	for _, fc := range ctx.AllDescriptionfilterconstraint() {
+		if f := v.buildDescriptionFilter(fc); f != nil {
+			filters = append(filters, f)
+		}
+	}
+	for range ctx.AllConceptfilterconstraint() {
+		// Placeholder active filter to mark presence of a concept filter.
+		filters = append(filters, &ast.ActiveFilter{Value: true})
+	}
+	for range ctx.AllMemberfilterconstraint() {
+		filters = append(filters, &ast.MemberFieldFilter{})
+	}
+	if len(filters) > 0 {
+		focusExpr = &ast.Filtered{Operand: focusExpr, Filters: filters}
+	}
 
 	// 5. Apply history supplement
 	if ctx.Historysupplement() != nil {
@@ -320,6 +340,18 @@ func (v *astBuilder) VisitEclconceptreference(ctx *grammar.EclconceptreferenceCo
 
 func (v *astBuilder) VisitWildcard(_ *grammar.WildcardContext) interface{} {
 	return &ast.Any{}
+}
+
+// buildDescriptionFilter produces an opaque ast.Filter marker for a
+// descriptionfilterconstraint context. The detailed clause parsing
+// (term/type/language/dialect/active/module/effectiveTime) is left for a
+// follow-up task — here we just record the raw text so the AST retains
+// enough information for downstream consumers to detect filter presence.
+func (v *astBuilder) buildDescriptionFilter(fc grammar.IDescriptionfilterconstraintContext) ast.Filter {
+	if fc == nil {
+		return nil
+	}
+	return &ast.TermFilter{Op: "=", Term: fc.GetText()}
 }
 
 func (v *astBuilder) VisitAltidentifier(ctx *grammar.AltidentifierContext) interface{} {
