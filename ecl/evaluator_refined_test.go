@@ -2,7 +2,6 @@ package ecl
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -137,12 +136,15 @@ func TestEvaluate_Refinement_Reverse(t *testing.T) {
 // Error handling / deferred features
 // ------------------------------------------------------------------------
 
-func TestEvaluate_Refinement_ConcreteOperator_NotImplemented(t *testing.T) {
+// Concrete-value comparisons are implemented in Phase 5.2. When no concept in
+// the focus set has a matching concrete value, the result is an empty set (no
+// error). Fixture concept 363698007 is a concept-valued attribute (no concrete
+// numeric values), so >= #5 legitimately matches nothing.
+func TestEvaluate_Refinement_ConcreteOperator_NoMatch(t *testing.T) {
 	p := newFixture()
 	expr, err := Parse("<< 404684003 : 363698007 >= #5")
 	require.NoError(t, err, "parse should succeed for numeric comparison")
-	_, err = Evaluate(context.Background(), expr, p)
-	require.Error(t, err)
-	assert.True(t, strings.Contains(err.Error(), "not yet implemented"),
-		"concrete-value operator should report not yet implemented, got: %v", err)
+	got, err := Evaluate(context.Background(), expr, p)
+	require.NoError(t, err)
+	assert.Equal(t, 0, got.Len(), "no fixture concept has a numeric value for 363698007")
 }

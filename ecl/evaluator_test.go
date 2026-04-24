@@ -2,7 +2,6 @@ package ecl
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,6 +24,14 @@ type testProvider struct {
 	// outbound attribute relationships. Used by RelationshipTargets,
 	// RelationshipSources, and PropertiesByGroup.
 	relationships map[string][]Relationship
+
+	// Historical associations: key = inactive conceptID, value = replacement
+	// concept IDs (e.g. SAME-AS / REPLACED-BY targets).
+	historical map[string][]string
+
+	// Concrete values: key = sourceID, inner key = typeID, value = list of
+	// concrete attribute values.
+	concreteValues map[string]map[string][]ConcreteValue
 }
 
 // Hierarchy --------------------------------------------------------------
@@ -158,18 +165,38 @@ func (p *testProvider) PropertiesByGroup(_ context.Context, conceptID string) (m
 	return groups, nil
 }
 
-// Stubs (not used in Phases 3.2 – 3.5) -----------------------------------
+// Concrete values / history (Phase 5) -----------------------------------
 
-func (p *testProvider) ConcreteValues(_ context.Context, _ string, _ string) ([]ConcreteValue, error) {
+func (p *testProvider) ConcreteValues(_ context.Context, sourceID string, typeID string) ([]ConcreteValue, error) {
+	if p.concreteValues == nil {
+		return nil, nil
+	}
+	if byType, ok := p.concreteValues[sourceID]; ok {
+		return byType[typeID], nil
+	}
 	return nil, nil
 }
+
+func (p *testProvider) HistoricalAssociations(_ context.Context, conceptIDs Set, _ string) (Set, error) {
+	out := NewSet().(*mapSet)
+	if conceptIDs == nil || p.historical == nil {
+		return out, nil
+	}
+	conceptIDs.Iter(func(id string) bool {
+		for _, h := range p.historical[id] {
+			out.m[h] = struct{}{}
+		}
+		return true
+	})
+	return out, nil
+}
+
+// Stubs (not exercised by Phase 3 – 5 tests) -----------------------------
+
 func (p *testProvider) MatchDescription(_ context.Context, _ DescriptionFilterOpts) (Set, error) {
 	return NewSet(), nil
 }
 func (p *testProvider) FilterConcepts(_ context.Context, _ Set, _ ConceptFilterOpts) (Set, error) {
-	return NewSet(), nil
-}
-func (p *testProvider) HistoricalAssociations(_ context.Context, _ Set, _ string) (Set, error) {
 	return NewSet(), nil
 }
 
@@ -225,9 +252,10 @@ func newFixture() *testProvider {
 			// attribute type and target concepts used in relationship tests
 			"363698007": true, // Finding site (attribute type)
 			"116676008": true, // Associated morphology (attribute type)
-			"74281007":  true, // Myocardium (target)
-			"55641003":  true, // Infarct (target)
-			"113331007": true, // Endocrine system (target)
+			"74281007":   true, // Myocardium (target)
+			"55641003":   true, // Infarct (target)
+			"113331007":  true, // Endocrine system (target)
+			"1142139005": true, // Count attribute (for concrete-value tests)
 		},
 		all: []string{"138875005", "404684003", "22298006", "64572001", "73211009", "404684004"},
 		refsets: map[string][]string{
@@ -252,6 +280,18 @@ func newFixture() *testProvider {
 			"404684004": {
 				{TypeID: "363698007", TargetID: "74281007", GroupNum: 1},
 				{TypeID: "116676008", TargetID: "55641003", GroupNum: 2},
+			},
+		},
+		// Historical associations: 404684004 is (pretend) inactive and has
+		// been replaced by 22298006 (MI). See Phase 5.1 tests.
+		historical: map[string][]string{
+			"404684004": {"22298006"},
+		},
+		// Concrete values: 22298006 (MI) has a pretend "Count" attribute
+		// (1142139005) with integer value 2. See Phase 5.2 tests.
+		concreteValues: map[string]map[string][]ConcreteValue{
+			"22298006": {
+				"1142139005": {{Kind: "integer", Value: "2"}},
 			},
 		},
 	}
@@ -383,12 +423,3 @@ func TestEvaluate_Nested(t *testing.T) {
 		got.Slice())
 }
 
-func TestEvaluate_NotImplemented_Top(t *testing.T) {
-	p := newFixture()
-	expr, err := Parse("!!> 404684003")
-	require.NoError(t, err, "parse of top operator should succeed")
-	_, err = Evaluate(context.Background(), expr, p)
-	require.Error(t, err)
-	assert.True(t, strings.Contains(err.Error(), "not yet implemented"),
-		"error should say 'not yet implemented', got: %v", err)
-}

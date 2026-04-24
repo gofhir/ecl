@@ -3,6 +3,7 @@ package ecl
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/gofhir/ecl/ecl/ast"
 )
@@ -173,24 +174,54 @@ func Evaluate(ctx context.Context, expr ast.Expression, provider DataProvider) (
 	case *ast.Filtered:
 		return evaluateFiltered(ctx, e, provider)
 
-	// ── Deferred to later phases ─────────────────────────────────────────
+	// ── History supplements (Phase 5.1) ──────────────────────────────────
 
 	case *ast.HistorySupplement:
-		return nil, fmt.Errorf("HistorySupplement: not yet implemented (Phase 5.1)")
+		base, err := Evaluate(ctx, e.Operand, provider)
+		if err != nil {
+			return nil, fmt.Errorf("evaluating %T operand: %w", expr, err)
+		}
+		// Empty or unspecified profile defaults to HISTORY-MAX per spec.
+		profile := e.Profile
+		if profile == "" {
+			profile = "HISTORY-MAX"
+		}
+		historical, err := provider.HistoricalAssociations(ctx, base, profile)
+		if err != nil {
+			return nil, fmt.Errorf("HistoricalAssociations: %w", err)
+		}
+		if historical == nil {
+			return base, nil
+		}
+		return base.Union(historical), nil
 
 	// ── v2.2 (Phase 6) ───────────────────────────────────────────────────
 
 	case *ast.Top:
-		return nil, fmt.Errorf("Top: not yet implemented (Phase 6, v2.2)")
+		base, err := Evaluate(ctx, e.Operand, provider)
+		if err != nil {
+			return nil, fmt.Errorf("evaluating %T operand: %w", expr, err)
+		}
+		return topOfSet(ctx, base, provider)
 
 	case *ast.Bottom:
-		return nil, fmt.Errorf("Bottom: not yet implemented (Phase 6, v2.2)")
+		base, err := Evaluate(ctx, e.Operand, provider)
+		if err != nil {
+			return nil, fmt.Errorf("evaluating %T operand: %w", expr, err)
+		}
+		return bottomOfSet(ctx, base, provider)
 
 	case *ast.RefsetContainingAny:
-		return nil, fmt.Errorf("RefsetContainingAny: not yet implemented (Phase 6, v2.2)")
+		// Pragmatic: treat ^R like MemberOf. The operand resolves to refset
+		// IDs; we return the union of members across those refsets.
+		refsetIDs, err := Evaluate(ctx, e.Operand, provider)
+		if err != nil {
+			return nil, fmt.Errorf("evaluating %T: %w", expr, err)
+		}
+		return provider.RefsetMembers(ctx, toIDSlice(refsetIDs))
 
 	case *ast.AltIdentifier:
-		return nil, fmt.Errorf("AltIdentifier: not yet implemented (Phase 6, v2.2)")
+		return nil, fmt.Errorf("AltIdentifier not yet implemented (requires alternate identifier resolution): %s#%s", e.Scheme, e.Code)
 
 	default:
 		return nil, fmt.Errorf("unsupported AST node type: %T", expr)
@@ -283,19 +314,27 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 		return nil, fmt.Errorf("attribute cardinality other than [1..*] not yet implemented")
 	}
 
-	switch attr.Op {
-	case "=", "!=":
-		// expression comparison → proceed below
-	case "<", "<=", ">", ">=":
-		return nil, fmt.Errorf("concrete-value comparison operator %q not yet implemented (Phase 5.2)", attr.Op)
-	default:
-		return nil, fmt.Errorf("unsupported attribute operator %q", attr.Op)
-	}
-
 	// Resolve attribute type IDs (the attribute name may be an ECL expression).
 	typeIDs, err := Evaluate(ctx, attr.Name, provider)
 	if err != nil {
 		return nil, fmt.Errorf("evaluating attribute name: %w", err)
+	}
+
+	// Concrete value comparison: Value is IntegerValue / DecimalValue /
+	// StringValue / BooleanValue, not a concept-valued expression. Route to
+	// the concrete-value comparator. Numeric operators <, <=, >, >= always
+	// target concrete values. For =/!= it depends on the Value type.
+	if isConcreteValue(attr.Value) {
+		return filterByConcreteValue(ctx, focus, attr, typeIDs, provider)
+	}
+
+	switch attr.Op {
+	case "=", "!=":
+		// concept-valued expression comparison → proceed below
+	case "<", "<=", ">", ">=":
+		return nil, fmt.Errorf("concrete-value operator %q requires a concrete value (got %T)", attr.Op, attr.Value)
+	default:
+		return nil, fmt.Errorf("unsupported attribute operator %q", attr.Op)
 	}
 
 	// Resolve the value set. A bare wildcard (*) means "any value".
@@ -395,16 +434,21 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 		if !isDefaultCardinality(a.Cardinality) {
 			return nil, fmt.Errorf("attribute cardinality other than [1..*] not yet implemented")
 		}
-		switch a.Op {
-		case "=", "!=":
-		case "<", "<=", ">", ">=":
-			return nil, fmt.Errorf("concrete-value comparison operator %q not yet implemented (Phase 5.2)", a.Op)
-		default:
-			return nil, fmt.Errorf("unsupported attribute operator %q", a.Op)
-		}
 		typeIDs, err := Evaluate(ctx, a.Name, provider)
 		if err != nil {
 			return nil, fmt.Errorf("evaluating attribute name: %w", err)
+		}
+		if isConcreteValue(a.Value) {
+			// Concrete-value sub-clauses inside grouped refinements are not
+			// supported yet (would need per-group concrete-value lookup).
+			return nil, fmt.Errorf("concrete-value comparison inside a group not yet implemented")
+		}
+		switch a.Op {
+		case "=", "!=":
+		case "<", "<=", ">", ">=":
+			return nil, fmt.Errorf("concrete-value operator %q requires a concrete value", a.Op)
+		default:
+			return nil, fmt.Errorf("unsupported attribute operator %q", a.Op)
 		}
 		c := attrClause{op: a.Op, typeIDs: typeIDs}
 		if _, isAny := a.Value.(*ast.Any); isAny {
@@ -664,4 +708,198 @@ func buildConceptFilterOpts(ctx context.Context, filters []ast.Filter, provider 
 		}
 	}
 	return opts, nil
+}
+
+// ---------------------------------------------------------------------------
+// Concrete value comparisons (Phase 5.2)
+// ---------------------------------------------------------------------------
+
+// isConcreteValue reports whether an Attribute.Value is a concrete literal
+// (integer, decimal, string, or boolean) rather than a concept-valued
+// expression.
+func isConcreteValue(e ast.Expression) bool {
+	switch e.(type) {
+	case *ast.IntegerValue, *ast.DecimalValue, *ast.StringValue, *ast.BooleanValue:
+		return true
+	}
+	return false
+}
+
+// filterByConcreteValue filters focus by a concrete-value attribute clause.
+// It iterates per-concept, calling provider.ConcreteValues for each attribute
+// type ID. If any stored concrete value satisfies the comparison, the concept
+// is kept (or excluded, for the "!=" operator).
+//
+// Only numeric comparisons (=, !=, <, <=, >, >=) are implemented for
+// IntegerValue and DecimalValue. String and boolean comparisons currently
+// return "not yet implemented" so callers get a clear signal.
+func filterByConcreteValue(ctx context.Context, focus Set, attr *ast.Attribute, typeIDs Set, provider DataProvider) (Set, error) {
+	if focus == nil || focus.Len() == 0 {
+		return focus, nil
+	}
+	if attr.Reverse {
+		return nil, fmt.Errorf("reverse attribute with concrete value not yet implemented")
+	}
+
+	// Extract the literal value. Numeric operators require a numeric literal.
+	var (
+		haveNumeric bool
+		numeric     float64
+		haveString  bool
+		strVal      string
+		haveBool    bool
+		boolVal     bool
+	)
+	switch v := attr.Value.(type) {
+	case *ast.IntegerValue:
+		haveNumeric = true
+		numeric = float64(v.Value)
+	case *ast.DecimalValue:
+		haveNumeric = true
+		numeric = v.Value
+	case *ast.StringValue:
+		haveString = true
+		strVal = v.Value
+	case *ast.BooleanValue:
+		haveBool = true
+		boolVal = v.Value
+	default:
+		return nil, fmt.Errorf("filterByConcreteValue: unexpected value type %T", attr.Value)
+	}
+
+	switch attr.Op {
+	case "=", "!=":
+		// supported for numeric; string/boolean numeric-op paths share =/!=.
+	case "<", "<=", ">", ">=":
+		if !haveNumeric {
+			return nil, fmt.Errorf("operator %q requires a numeric concrete value (got %T)", attr.Op, attr.Value)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported concrete-value operator %q", attr.Op)
+	}
+
+	if haveString || haveBool {
+		return nil, fmt.Errorf("string/boolean concrete-value comparisons not yet implemented")
+	}
+	// Silence unused-variable warnings for deferred paths.
+	_ = strVal
+	_ = boolVal
+
+	typeIDList := typeIDs.Slice()
+
+	out := NewSet().(*mapSet)
+	var iterErr error
+	focus.Iter(func(id string) bool {
+		matched := false
+		for _, typeID := range typeIDList {
+			values, err := provider.ConcreteValues(ctx, id, typeID)
+			if err != nil {
+				iterErr = fmt.Errorf("ConcreteValues(%s, %s): %w", id, typeID, err)
+				return false
+			}
+			for _, cv := range values {
+				// Only numeric kinds apply here. Other kinds are skipped
+				// silently for this clause (the concept may still match via
+				// another relationship).
+				if cv.Kind != "integer" && cv.Kind != "decimal" {
+					continue
+				}
+				f, parseErr := strconv.ParseFloat(cv.Value, 64)
+				if parseErr != nil {
+					continue
+				}
+				if compareFloat(f, attr.Op, numeric) {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				break
+			}
+		}
+		// compareFloat already applied the operator directly, so "matched"
+		// means at least one stored value satisfied the comparison. No extra
+		// inversion for "!=".
+		if matched {
+			out.m[id] = struct{}{}
+		}
+		return true
+	})
+	if iterErr != nil {
+		return nil, iterErr
+	}
+	return out, nil
+}
+
+// compareFloat applies the given operator to a (stored) and b (expected).
+func compareFloat(a float64, op string, b float64) bool {
+	switch op {
+	case "=":
+		return a == b
+	case "!=":
+		return a != b
+	case "<":
+		return a < b
+	case "<=":
+		return a <= b
+	case ">":
+		return a > b
+	case ">=":
+		return a >= b
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
+// Top / Bottom of set (Phase 6.1, v2.2)
+// ---------------------------------------------------------------------------
+
+// topOfSet returns the concepts in baseSet that have no parent in baseSet
+// (i.e. the roots of the sub-graph induced by baseSet).
+func topOfSet(ctx context.Context, baseSet Set, provider DataProvider) (Set, error) {
+	if baseSet == nil || baseSet.Len() == 0 {
+		return baseSet, nil
+	}
+	out := NewSet().(*mapSet)
+	var iterErr error
+	baseSet.Iter(func(id string) bool {
+		parents, err := provider.Parents(ctx, []string{id}, false)
+		if err != nil {
+			iterErr = fmt.Errorf("Parents(%s): %w", id, err)
+			return false
+		}
+		if parents == nil || parents.Intersect(baseSet).Len() == 0 {
+			out.m[id] = struct{}{}
+		}
+		return true
+	})
+	if iterErr != nil {
+		return nil, iterErr
+	}
+	return out, nil
+}
+
+// bottomOfSet returns the concepts in baseSet that have no child in baseSet
+// (i.e. the leaves of the sub-graph induced by baseSet).
+func bottomOfSet(ctx context.Context, baseSet Set, provider DataProvider) (Set, error) {
+	if baseSet == nil || baseSet.Len() == 0 {
+		return baseSet, nil
+	}
+	out := NewSet().(*mapSet)
+	var iterErr error
+	baseSet.Iter(func(id string) bool {
+		children, err := provider.Children(ctx, []string{id}, false)
+		if err != nil {
+			iterErr = fmt.Errorf("Children(%s): %w", id, err)
+			return false
+		}
+		if children == nil || children.Intersect(baseSet).Len() == 0 {
+			out.m[id] = struct{}{}
+		}
+		return true
+	})
+	if iterErr != nil {
+		return nil, iterErr
+	}
+	return out, nil
 }
