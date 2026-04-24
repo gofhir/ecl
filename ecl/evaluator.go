@@ -168,10 +168,12 @@ func Evaluate(ctx context.Context, expr ast.Expression, provider DataProvider) (
 		}
 		return provider.RelationshipTargets(ctx, source, typeIDs)
 
-	// ── Deferred to later phases ─────────────────────────────────────────
+	// ── Filters (Phase 4) ────────────────────────────────────────────────
 
 	case *ast.Filtered:
-		return nil, fmt.Errorf("Filtered: not yet implemented (Phase 4)")
+		return evaluateFiltered(ctx, e, provider)
+
+	// ── Deferred to later phases ─────────────────────────────────────────
 
 	case *ast.HistorySupplement:
 		return nil, fmt.Errorf("HistorySupplement: not yet implemented (Phase 5.1)")
@@ -489,4 +491,177 @@ func isDefaultCardinality(c *ast.Cardinality) bool {
 		return true
 	}
 	return c.Min == 1 && c.Max == -1
+}
+
+// ---------------------------------------------------------------------------
+// Filtered constraints (Phase 4)
+// ---------------------------------------------------------------------------
+
+// evaluateFiltered evaluates a *ast.Filtered by:
+//  1. evaluating the operand to a base set,
+//  2. grouping filter clauses into description/concept/member families,
+//  3. delegating to provider.MatchDescription / provider.FilterConcepts,
+//  4. intersecting the results with the base set.
+//
+// Member filters are not yet supported (they require refset field projection,
+// which is deferred to a later phase).
+func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvider) (Set, error) {
+	base, err := Evaluate(ctx, e.Operand, provider)
+	if err != nil {
+		return nil, fmt.Errorf("evaluating Filtered operand: %w", err)
+	}
+	descFilters, conceptFilters, memberFilters := categorizeFilters(e.Filters)
+
+	if len(memberFilters) > 0 {
+		return nil, fmt.Errorf("member filter: not yet implemented (requires refset field projection)")
+	}
+
+	result := base
+
+	// Description filters — build a single DescriptionFilterOpts from all
+	// clauses, then call MatchDescription once. The result is a set of concept
+	// IDs whose descriptions match; intersect with the current base.
+	if len(descFilters) > 0 {
+		opts, err := buildDescriptionFilterOpts(ctx, descFilters, provider)
+		if err != nil {
+			return nil, err
+		}
+		matches, err := provider.MatchDescription(ctx, opts)
+		if err != nil {
+			return nil, fmt.Errorf("MatchDescription: %w", err)
+		}
+		if result == nil {
+			result = matches
+		} else {
+			result = result.Intersect(matches)
+		}
+	}
+
+	// Concept filters — build ConceptFilterOpts and delegate.
+	if len(conceptFilters) > 0 {
+		opts, err := buildConceptFilterOpts(ctx, conceptFilters, provider)
+		if err != nil {
+			return nil, err
+		}
+		filtered, err := provider.FilterConcepts(ctx, result, opts)
+		if err != nil {
+			return nil, fmt.Errorf("FilterConcepts: %w", err)
+		}
+		result = filtered
+	}
+
+	return result, nil
+}
+
+// categorizeFilters splits a flat list of filters into description, concept,
+// and member families. Ambiguous filters (active/module/effectiveTime) default
+// to the concept family — this is the most common usage in practice.
+func categorizeFilters(filters []ast.Filter) (desc, concept, member []ast.Filter) {
+	for _, f := range filters {
+		switch f.(type) {
+		case *ast.TermFilter, *ast.TypeFilter, *ast.LanguageFilter, *ast.DialectFilter:
+			desc = append(desc, f)
+		case *ast.DefinitionStatusFilter:
+			concept = append(concept, f)
+		case *ast.MemberFieldFilter:
+			member = append(member, f)
+		case *ast.ActiveFilter, *ast.ModuleFilter, *ast.EffectiveTimeFilter:
+			// Ambiguous — default to concept family. Description-level
+			// active/module/effectiveTime is rare in practice.
+			concept = append(concept, f)
+		}
+	}
+	return desc, concept, member
+}
+
+// buildDescriptionFilterOpts accumulates description filter clauses into a
+// single DescriptionFilterOpts. Multiple clauses of the same kind are
+// simplified by taking the last one (rarely seen in practice).
+func buildDescriptionFilterOpts(ctx context.Context, filters []ast.Filter, provider DataProvider) (DescriptionFilterOpts, error) {
+	var opts DescriptionFilterOpts
+	for _, f := range filters {
+		switch x := f.(type) {
+		case *ast.TermFilter:
+			if x.Op == "!=" {
+				return opts, fmt.Errorf("term filter with '!=' operator not yet implemented")
+			}
+			opts.Term = x.Term
+		case *ast.TypeFilter:
+			if x.Op == "!=" {
+				return opts, fmt.Errorf("type filter with '!=' operator not yet implemented")
+			}
+			// Resolve the first type SCTID. Multi-type sets simplify to the
+			// first concept.
+			if len(x.Types) > 0 {
+				ids, err := Evaluate(ctx, x.Types[0], provider)
+				if err != nil {
+					return opts, fmt.Errorf("evaluating type filter: %w", err)
+				}
+				if ids != nil && ids.Len() > 0 {
+					opts.TypeID = ids.Slice()[0]
+				} else if ref, ok := x.Types[0].(*ast.ConceptRef); ok {
+					// Fallback to the literal ID even if provider didn't find
+					// it (tokens like FSN/SYN map to well-known SCTIDs that
+					// test providers may not enumerate in ConceptExists).
+					opts.TypeID = ref.ID
+				}
+			}
+		case *ast.LanguageFilter:
+			if x.Op == "!=" {
+				return opts, fmt.Errorf("language filter with '!=' operator not yet implemented")
+			}
+			if len(x.Languages) > 0 {
+				opts.Language = x.Languages[0]
+			}
+		case *ast.DialectFilter:
+			return opts, fmt.Errorf("dialect filter: not yet implemented")
+		}
+	}
+	return opts, nil
+}
+
+// buildConceptFilterOpts accumulates concept filter clauses into ConceptFilterOpts.
+func buildConceptFilterOpts(ctx context.Context, filters []ast.Filter, provider DataProvider) (ConceptFilterOpts, error) {
+	var opts ConceptFilterOpts
+	for _, f := range filters {
+		switch x := f.(type) {
+		case *ast.ActiveFilter:
+			b := x.Value
+			opts.Active = &b
+		case *ast.DefinitionStatusFilter:
+			if x.Op == "!=" {
+				return opts, fmt.Errorf("definitionStatus filter with '!=' operator not yet implemented")
+			}
+			if x.Value != nil {
+				ids, err := Evaluate(ctx, x.Value, provider)
+				if err != nil {
+					return opts, fmt.Errorf("evaluating definitionStatus filter: %w", err)
+				}
+				if ids != nil && ids.Len() > 0 {
+					opts.DefinitionStatusID = ids.Slice()[0]
+				} else if ref, ok := x.Value.(*ast.ConceptRef); ok {
+					opts.DefinitionStatusID = ref.ID
+				}
+			}
+		case *ast.ModuleFilter:
+			if x.Op == "!=" {
+				return opts, fmt.Errorf("module filter with '!=' operator not yet implemented")
+			}
+			if x.Module != nil {
+				ids, err := Evaluate(ctx, x.Module, provider)
+				if err != nil {
+					return opts, fmt.Errorf("evaluating module filter: %w", err)
+				}
+				if ids != nil && ids.Len() > 0 {
+					opts.ModuleID = ids.Slice()[0]
+				} else if ref, ok := x.Module.(*ast.ConceptRef); ok {
+					opts.ModuleID = ref.ID
+				}
+			}
+		case *ast.EffectiveTimeFilter:
+			opts.EffectiveTime = x.Value
+			opts.EffectiveTimeOp = x.Op
+		}
+	}
+	return opts, nil
 }

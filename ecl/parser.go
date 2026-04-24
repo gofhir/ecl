@@ -238,24 +238,18 @@ func (v *astBuilder) VisitSubexpressionconstraint(ctx *grammar.Subexpressioncons
 		focusExpr = v.applyConstraintOperator(ctx.Constraintoperator(), focusExpr)
 	}
 
-	// 4. Apply description/concept/member filter constraints.
-	// We collect opaque filter markers here; specific filter clauses are a
-	// follow-up task (the AST carries a Filter interface, and individual
-	// clause types like TermFilter/TypeFilter already exist). For now we
-	// wrap the focus in ast.Filtered so the presence of a filter is
-	// preserved in the AST shape.
+	// 4. Apply description/concept/member filter constraints. Each constraint
+	// can contain multiple sub-clauses (term, type, language, active, module,
+	// etc.) which we extract into typed ast.Filter nodes.
 	var filters []ast.Filter
 	for _, fc := range ctx.AllDescriptionfilterconstraint() {
-		if f := v.buildDescriptionFilter(fc); f != nil {
-			filters = append(filters, f)
-		}
+		filters = append(filters, v.buildDescriptionFilterClauses(fc)...)
 	}
-	for range ctx.AllConceptfilterconstraint() {
-		// Placeholder active filter to mark presence of a concept filter.
-		filters = append(filters, &ast.ActiveFilter{Value: true})
+	for _, fc := range ctx.AllConceptfilterconstraint() {
+		filters = append(filters, v.buildConceptFilterClauses(fc)...)
 	}
-	for range ctx.AllMemberfilterconstraint() {
-		filters = append(filters, &ast.MemberFieldFilter{})
+	for _, fc := range ctx.AllMemberfilterconstraint() {
+		filters = append(filters, v.buildMemberFilterClauses(fc)...)
 	}
 	if len(filters) > 0 {
 		focusExpr = &ast.Filtered{Operand: focusExpr, Filters: filters}
@@ -342,16 +336,490 @@ func (v *astBuilder) VisitWildcard(_ *grammar.WildcardContext) interface{} {
 	return &ast.Any{}
 }
 
-// buildDescriptionFilter produces an opaque ast.Filter marker for a
-// descriptionfilterconstraint context. The detailed clause parsing
-// (term/type/language/dialect/active/module/effectiveTime) is left for a
-// follow-up task — here we just record the raw text so the AST retains
-// enough information for downstream consumers to detect filter presence.
-func (v *astBuilder) buildDescriptionFilter(fc grammar.IDescriptionfilterconstraintContext) ast.Filter {
+// buildDescriptionFilterClauses extracts typed filter clauses from a
+// descriptionfilterconstraint context. Supported sub-rules:
+//   - termfilter             → *ast.TermFilter
+//   - typefilter             → *ast.TypeFilter
+//   - languagefilter         → *ast.LanguageFilter
+//   - dialectfilter          → *ast.DialectFilter (best-effort — see evaluator)
+//   - activefilter           → *ast.ActiveFilter
+//   - modulefilter           → *ast.ModuleFilter
+//   - effectivetimefilter    → *ast.EffectiveTimeFilter
+//
+// descriptionidfilter and acceptabilityfilter sub-rules are currently not
+// emitted — they require additional AST types and are deferred.
+func (v *astBuilder) buildDescriptionFilterClauses(fc grammar.IDescriptionfilterconstraintContext) []ast.Filter {
 	if fc == nil {
 		return nil
 	}
-	return &ast.TermFilter{Op: "=", Term: fc.GetText()}
+	concrete, ok := fc.(*grammar.DescriptionfilterconstraintContext)
+	if !ok {
+		return nil
+	}
+	var out []ast.Filter
+	for _, df := range concrete.AllDescriptionfilter() {
+		d, ok := df.(*grammar.DescriptionfilterContext)
+		if !ok {
+			continue
+		}
+		if c := d.Termfilter(); c != nil {
+			if f := v.buildTermFilter(c); f != nil {
+				out = append(out, f)
+			}
+			continue
+		}
+		if c := d.Typefilter(); c != nil {
+			if f := v.buildTypeFilter(c); f != nil {
+				out = append(out, f)
+			}
+			continue
+		}
+		if c := d.Languagefilter(); c != nil {
+			if f := v.buildLanguageFilter(c); f != nil {
+				out = append(out, f)
+			}
+			continue
+		}
+		if c := d.Dialectfilter(); c != nil {
+			// Preserve presence — evaluator will flag as not-yet-implemented.
+			out = append(out, &ast.DialectFilter{Op: "=", Dialects: nil})
+			_ = c
+			continue
+		}
+		if c := d.Activefilter(); c != nil {
+			if f := v.buildActiveFilter(c); f != nil {
+				out = append(out, f)
+			}
+			continue
+		}
+		if c := d.Modulefilter(); c != nil {
+			if f := v.buildModuleFilter(c); f != nil {
+				out = append(out, f)
+			}
+			continue
+		}
+		if c := d.Effectivetimefilter(); c != nil {
+			if f := v.buildEffectiveTimeFilter(c); f != nil {
+				out = append(out, f)
+			}
+			continue
+		}
+		// descriptionidfilter not modelled — skip.
+	}
+	return out
+}
+
+// buildConceptFilterClauses extracts typed clauses from a conceptfilterconstraint.
+func (v *astBuilder) buildConceptFilterClauses(fc grammar.IConceptfilterconstraintContext) []ast.Filter {
+	if fc == nil {
+		return nil
+	}
+	concrete, ok := fc.(*grammar.ConceptfilterconstraintContext)
+	if !ok {
+		return nil
+	}
+	var out []ast.Filter
+	for _, cf := range concrete.AllConceptfilter() {
+		c, ok := cf.(*grammar.ConceptfilterContext)
+		if !ok {
+			continue
+		}
+		if x := c.Definitionstatusfilter(); x != nil {
+			if f := v.buildDefinitionStatusFilter(x); f != nil {
+				out = append(out, f)
+			}
+			continue
+		}
+		if x := c.Modulefilter(); x != nil {
+			if f := v.buildModuleFilter(x); f != nil {
+				out = append(out, f)
+			}
+			continue
+		}
+		if x := c.Effectivetimefilter(); x != nil {
+			if f := v.buildEffectiveTimeFilter(x); f != nil {
+				out = append(out, f)
+			}
+			continue
+		}
+		if x := c.Activefilter(); x != nil {
+			if f := v.buildActiveFilter(x); f != nil {
+				out = append(out, f)
+			}
+			continue
+		}
+	}
+	return out
+}
+
+// buildMemberFilterClauses extracts clauses from a memberfilterconstraint.
+func (v *astBuilder) buildMemberFilterClauses(fc grammar.IMemberfilterconstraintContext) []ast.Filter {
+	if fc == nil {
+		return nil
+	}
+	concrete, ok := fc.(*grammar.MemberfilterconstraintContext)
+	if !ok {
+		return nil
+	}
+	var out []ast.Filter
+	for _, mf := range concrete.AllMemberfilter() {
+		m, ok := mf.(*grammar.MemberfilterContext)
+		if !ok {
+			continue
+		}
+		if x := m.Modulefilter(); x != nil {
+			if f := v.buildModuleFilter(x); f != nil {
+				out = append(out, f)
+			}
+			continue
+		}
+		if x := m.Effectivetimefilter(); x != nil {
+			if f := v.buildEffectiveTimeFilter(x); f != nil {
+				out = append(out, f)
+			}
+			continue
+		}
+		if x := m.Activefilter(); x != nil {
+			if f := v.buildActiveFilter(x); f != nil {
+				out = append(out, f)
+			}
+			continue
+		}
+		if x := m.Memberfieldfilter(); x != nil {
+			if f := v.buildMemberFieldFilter(x); f != nil {
+				out = append(out, f)
+			}
+			continue
+		}
+	}
+	return out
+}
+
+// --- Individual clause builders ---------------------------------------------
+
+func (v *astBuilder) buildTermFilter(ctx grammar.ITermfilterContext) *ast.TermFilter {
+	concrete, ok := ctx.(*grammar.TermfilterContext)
+	if !ok {
+		return nil
+	}
+	op := "="
+	if concrete.Stringcomparisonoperator() != nil {
+		op = v.extractComparisonOp(concrete.Stringcomparisonoperator().GetText())
+	}
+	var term string
+	if c := concrete.Typedsearchterm(); c != nil {
+		term = extractTypedSearchTermText(c)
+	} else if c := concrete.Typedsearchtermset(); c != nil {
+		// Take the first term in the set; multi-term sets are treated as the
+		// first term for now (evaluator documents the simplification).
+		term = stripWrappingQuotes(c.GetText())
+	}
+	return &ast.TermFilter{Op: op, Term: term}
+}
+
+// extractTypedSearchTermText returns the raw search term string without the
+// surrounding quotes. Falls back to the trimmed context text when the
+// expected sub-rule shape is not present.
+func extractTypedSearchTermText(ctx grammar.ITypedsearchtermContext) string {
+	concrete, ok := ctx.(*grammar.TypedsearchtermContext)
+	if !ok {
+		return stripWrappingQuotes(ctx.GetText())
+	}
+	if s := concrete.Matchsearchtermset(); s != nil {
+		return stripWrappingQuotes(s.GetText())
+	}
+	if s := concrete.Wildsearchtermset(); s != nil {
+		return stripWrappingQuotes(s.GetText())
+	}
+	return stripWrappingQuotes(concrete.GetText())
+}
+
+// stripWrappingQuotes removes a single layer of surrounding " quotes if present
+// and trims whitespace that commonly surrounds the quoted content.
+func stripWrappingQuotes(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		s = s[1 : len(s)-1]
+	}
+	return strings.TrimSpace(s)
+}
+
+func (v *astBuilder) buildTypeFilter(ctx grammar.ITypefilterContext) *ast.TypeFilter {
+	concrete, ok := ctx.(*grammar.TypefilterContext)
+	if !ok {
+		return nil
+	}
+	if tid := concrete.Typeidfilter(); tid != nil {
+		tc, ok := tid.(*grammar.TypeidfilterContext)
+		if !ok {
+			return nil
+		}
+		op := "="
+		if tc.Booleancomparisonoperator() != nil {
+			op = v.extractComparisonOp(tc.Booleancomparisonoperator().GetText())
+		}
+		tf := &ast.TypeFilter{Op: op}
+		if sc := tc.Subexpressionconstraint(); sc != nil {
+			if e := v.visitExpr(sc); e != nil {
+				tf.Types = []ast.Expression{e}
+			}
+		} else if crs := tc.Eclconceptreferenceset(); crs != nil {
+			if crsCtx, ok := crs.(*grammar.EclconceptreferencesetContext); ok {
+				for _, cr := range crsCtx.AllEclconceptreference() {
+					if e := v.visitExpr(cr); e != nil {
+						tf.Types = append(tf.Types, e)
+					}
+				}
+			}
+		}
+		return tf
+	}
+	if ttf := concrete.Typetokenfilter(); ttf != nil {
+		tc, ok := ttf.(*grammar.TypetokenfilterContext)
+		if !ok {
+			return nil
+		}
+		op := "="
+		if tc.Booleancomparisonoperator() != nil {
+			op = v.extractComparisonOp(tc.Booleancomparisonoperator().GetText())
+		}
+		tf := &ast.TypeFilter{Op: op}
+		// Map tokens to SCTIDs: syn→900000000000013009, fsn→900000000000003001,
+		// def→900000000000550004. We model these as ConceptRef so consumers
+		// can dispatch on ID.
+		addToken := func(tok grammar.ITypetokenContext) {
+			if tok == nil {
+				return
+			}
+			tt, ok := tok.(*grammar.TypetokenContext)
+			if !ok {
+				return
+			}
+			var id string
+			switch {
+			case tt.Synonym() != nil:
+				id = "900000000000013009"
+			case tt.Fullyspecifiedname() != nil:
+				id = "900000000000003001"
+			case tt.Definition() != nil:
+				id = "900000000000550004"
+			}
+			if id != "" {
+				tf.Types = append(tf.Types, &ast.ConceptRef{ID: id})
+			}
+		}
+		if single := tc.Typetoken(); single != nil {
+			addToken(single)
+		}
+		if set := tc.Typetokenset(); set != nil {
+			if setCtx, ok := set.(*grammar.TypetokensetContext); ok {
+				for _, tok := range setCtx.AllTypetoken() {
+					addToken(tok)
+				}
+			}
+		}
+		return tf
+	}
+	return nil
+}
+
+func (v *astBuilder) buildLanguageFilter(ctx grammar.ILanguagefilterContext) *ast.LanguageFilter {
+	concrete, ok := ctx.(*grammar.LanguagefilterContext)
+	if !ok {
+		return nil
+	}
+	op := "="
+	if concrete.Booleancomparisonoperator() != nil {
+		op = v.extractComparisonOp(concrete.Booleancomparisonoperator().GetText())
+	}
+	lf := &ast.LanguageFilter{Op: op}
+	if lc := concrete.Languagecode(); lc != nil {
+		lf.Languages = append(lf.Languages, lc.GetText())
+	}
+	if lcs := concrete.Languagecodeset(); lcs != nil {
+		if lcsCtx, ok := lcs.(*grammar.LanguagecodesetContext); ok {
+			for _, code := range lcsCtx.AllLanguagecode() {
+				lf.Languages = append(lf.Languages, code.GetText())
+			}
+		}
+	}
+	return lf
+}
+
+func (v *astBuilder) buildActiveFilter(ctx grammar.IActivefilterContext) *ast.ActiveFilter {
+	concrete, ok := ctx.(*grammar.ActivefilterContext)
+	if !ok {
+		return nil
+	}
+	active := true
+	if av := concrete.Activevalue(); av != nil {
+		if avCtx, ok := av.(*grammar.ActivevalueContext); ok {
+			switch {
+			case avCtx.Activetruevalue() != nil:
+				active = true
+			case avCtx.Activefalsevalue() != nil:
+				active = false
+			case avCtx.Wildcard() != nil:
+				// Wildcard means "either" — represented as true here with a
+				// note; evaluator may treat wildcard specially in the future.
+				active = true
+			}
+		}
+	}
+	// The grammar allows "!=" but the AST ActiveFilter only carries a Value.
+	// If operator is "!=", we invert the recorded boolean so downstream code
+	// still gets the correct semantics for the common case (active = false).
+	if concrete.Booleancomparisonoperator() != nil {
+		if v.extractComparisonOp(concrete.Booleancomparisonoperator().GetText()) == "!=" {
+			active = !active
+		}
+	}
+	return &ast.ActiveFilter{Value: active}
+}
+
+func (v *astBuilder) buildModuleFilter(ctx grammar.IModulefilterContext) *ast.ModuleFilter {
+	concrete, ok := ctx.(*grammar.ModulefilterContext)
+	if !ok {
+		return nil
+	}
+	op := "="
+	if concrete.Booleancomparisonoperator() != nil {
+		op = v.extractComparisonOp(concrete.Booleancomparisonoperator().GetText())
+	}
+	mf := &ast.ModuleFilter{Op: op}
+	if sc := concrete.Subexpressionconstraint(); sc != nil {
+		mf.Module = v.visitExpr(sc)
+	} else if crs := concrete.Eclconceptreferenceset(); crs != nil {
+		// Pick the first ref from the set; multi-module sets represented as
+		// a single module is a simplification (most ECL uses single module).
+		if crsCtx, ok := crs.(*grammar.EclconceptreferencesetContext); ok {
+			refs := crsCtx.AllEclconceptreference()
+			if len(refs) > 0 {
+				mf.Module = v.visitExpr(refs[0])
+			}
+		}
+	}
+	return mf
+}
+
+func (v *astBuilder) buildEffectiveTimeFilter(ctx grammar.IEffectivetimefilterContext) *ast.EffectiveTimeFilter {
+	concrete, ok := ctx.(*grammar.EffectivetimefilterContext)
+	if !ok {
+		return nil
+	}
+	op := "="
+	if concrete.Timecomparisonoperator() != nil {
+		op = concrete.Timecomparisonoperator().GetText()
+	}
+	var value string
+	if tv := concrete.Timevalue(); tv != nil {
+		value = stripWrappingQuotes(tv.GetText())
+	} else if tvs := concrete.Timevalueset(); tvs != nil {
+		value = stripWrappingQuotes(tvs.GetText())
+	}
+	return &ast.EffectiveTimeFilter{Op: op, Value: value}
+}
+
+func (v *astBuilder) buildDefinitionStatusFilter(ctx grammar.IDefinitionstatusfilterContext) *ast.DefinitionStatusFilter {
+	concrete, ok := ctx.(*grammar.DefinitionstatusfilterContext)
+	if !ok {
+		return nil
+	}
+	if idf := concrete.Definitionstatusidfilter(); idf != nil {
+		if idCtx, ok := idf.(*grammar.DefinitionstatusidfilterContext); ok {
+			op := "="
+			if idCtx.Booleancomparisonoperator() != nil {
+				op = v.extractComparisonOp(idCtx.Booleancomparisonoperator().GetText())
+			}
+			f := &ast.DefinitionStatusFilter{Op: op}
+			if sc := idCtx.Subexpressionconstraint(); sc != nil {
+				f.Value = v.visitExpr(sc)
+			} else if crs := idCtx.Eclconceptreferenceset(); crs != nil {
+				if crsCtx, ok := crs.(*grammar.EclconceptreferencesetContext); ok {
+					refs := crsCtx.AllEclconceptreference()
+					if len(refs) > 0 {
+						f.Value = v.visitExpr(refs[0])
+					}
+				}
+			}
+			return f
+		}
+	}
+	if tf := concrete.Definitionstatustokenfilter(); tf != nil {
+		if tCtx, ok := tf.(*grammar.DefinitionstatustokenfilterContext); ok {
+			op := "="
+			if tCtx.Booleancomparisonoperator() != nil {
+				op = v.extractComparisonOp(tCtx.Booleancomparisonoperator().GetText())
+			}
+			f := &ast.DefinitionStatusFilter{Op: op}
+			addToken := func(tok grammar.IDefinitionstatustokenContext) {
+				dt, ok := tok.(*grammar.DefinitionstatustokenContext)
+				if !ok {
+					return
+				}
+				var id string
+				if dt.Primitivetoken() != nil {
+					id = "900000000000074008" // primitive
+				} else if dt.Definedtoken() != nil {
+					id = "900000000000073002" // defined
+				}
+				if id != "" {
+					f.Value = &ast.ConceptRef{ID: id}
+				}
+			}
+			if single := tCtx.Definitionstatustoken(); single != nil {
+				addToken(single)
+			} else if set := tCtx.Definitionstatustokenset(); set != nil {
+				if setCtx, ok := set.(*grammar.DefinitionstatustokensetContext); ok {
+					toks := setCtx.AllDefinitionstatustoken()
+					if len(toks) > 0 {
+						addToken(toks[0])
+					}
+				}
+			}
+			return f
+		}
+	}
+	return nil
+}
+
+func (v *astBuilder) buildMemberFieldFilter(ctx grammar.IMemberfieldfilterContext) *ast.MemberFieldFilter {
+	concrete, ok := ctx.(*grammar.MemberfieldfilterContext)
+	if !ok {
+		return nil
+	}
+	f := &ast.MemberFieldFilter{}
+	if fn := concrete.Refsetfieldname(); fn != nil {
+		f.FieldName = fn.GetText()
+	}
+	switch {
+	case concrete.Expressioncomparisonoperator() != nil:
+		f.Op = v.extractComparisonOp(concrete.Expressioncomparisonoperator().GetText())
+		if sc := concrete.Subexpressionconstraint(); sc != nil {
+			f.Value = v.visitExpr(sc)
+		}
+	case concrete.Numericcomparisonoperator() != nil:
+		f.Op = v.extractComparisonOp(concrete.Numericcomparisonoperator().GetText())
+		if nv := concrete.Numericvalue(); nv != nil {
+			f.Value = v.visitNumericValue(nv)
+		}
+	case concrete.Stringcomparisonoperator() != nil:
+		f.Op = v.extractComparisonOp(concrete.Stringcomparisonoperator().GetText())
+		if ts := concrete.Typedsearchterm(); ts != nil {
+			f.Value = &ast.StringValue{Value: extractTypedSearchTermText(ts)}
+		}
+	case concrete.Booleancomparisonoperator() != nil:
+		f.Op = v.extractComparisonOp(concrete.Booleancomparisonoperator().GetText())
+		if bv := concrete.Booleanvalue(); bv != nil {
+			f.Value = v.visitBooleanValue(bv)
+		}
+	case concrete.Timecomparisonoperator() != nil:
+		f.Op = concrete.Timecomparisonoperator().GetText()
+		if tv := concrete.Timevalue(); tv != nil {
+			f.Value = &ast.StringValue{Value: stripWrappingQuotes(tv.GetText())}
+		}
+	}
+	return f
 }
 
 func (v *astBuilder) VisitAltidentifier(ctx *grammar.AltidentifierContext) interface{} {
