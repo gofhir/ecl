@@ -144,6 +144,35 @@ func TestParse_DescriptionFilter(t *testing.T) {
 	assert.True(t, ok, "expected filtered operand to be DescendantOrSelfOf")
 }
 
+func TestParse_TermFilter_MatchTypes(t *testing.T) {
+	cases := []struct {
+		name      string
+		input     string
+		matchType string
+	}{
+		{"default match", `<< 404684003 {{ D term = "diabetes" }}`, "match"},
+		{"explicit match", `<< 404684003 {{ D term = match: "diabetes" }}`, "match"},
+		{"wild", `<< 404684003 {{ D term = wild: "diabet*" }}`, "wild"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			expr, err := Parse(tc.input)
+			require.NoError(t, err)
+			filt, ok := expr.(*ast.Filtered)
+			require.True(t, ok)
+			var tf *ast.TermFilter
+			for _, f := range filt.Filters {
+				if x, ok := f.(*ast.TermFilter); ok {
+					tf = x
+					break
+				}
+			}
+			require.NotNil(t, tf, "expected a TermFilter clause")
+			assert.Equal(t, tc.matchType, tf.MatchType)
+		})
+	}
+}
+
 func TestParse_Error(t *testing.T) {
 	_, err := Parse("<<< invalid")
 	assert.Error(t, err)

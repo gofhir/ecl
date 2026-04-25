@@ -144,9 +144,16 @@ type Filter interface {
 }
 
 // TermFilter represents a description term filter ({{ term = "..." }}).
+//
+// MatchType captures the search style declared by the grammar:
+//   - "match" (default): substring/word match
+//   - "wild":            glob-style wildcard match
+//   - "regex":           regular-expression match (extension; not in the
+//     official grammar but reserved for implementations that support it)
 type TermFilter struct {
-	Op   string // "=" or "!="
-	Term string
+	Op        string // "=" or "!="
+	Term      string
+	MatchType string // "match", "wild", "regex"
 }
 
 // TypeFilter represents a description type filter.

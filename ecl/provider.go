@@ -36,6 +36,7 @@ type DataProvider interface {
 
 	// RelationshipSources returns the union of source concept IDs of relationships
 	// whose target is in targetIDs and type is in typeIDs (for reverse flag "R").
+	// When targetIDs is nil, all targets are considered (wildcard).
 	RelationshipSources(ctx context.Context, targetIDs Set, typeIDs Set) (Set, error)
 
 	// ConcreteValues returns concrete values for the given source concept and attribute type.
@@ -60,17 +61,39 @@ type DataProvider interface {
 	// RefsetMembers returns the concept IDs that are members of any of the given refsets.
 	RefsetMembers(ctx context.Context, refsetIDs []string) (Set, error)
 
+	// RefsetsContainingMembers returns the set of refset IDs that contain
+	// any of the given concept IDs as a member. Used to evaluate the ^R
+	// (refset containing any) operator. This is the inverse direction of
+	// RefsetMembers: given concepts, find the refsets they belong to.
+	RefsetsContainingMembers(ctx context.Context, conceptIDs []string) (Set, error)
+
 	// ── History supplements (v2.0) ─────────────────────────────────────────
 	// HistoricalAssociations expands a set of inactive concepts to their
 	// historical replacements according to the given profile (MIN, MOD, MAX, ALL).
 	HistoricalAssociations(ctx context.Context, conceptIDs Set, profile string) (Set, error)
+
+	// ── Alternate identifiers (v2.2) ──────────────────────────────────────
+	// ResolveIdentifier resolves an alternate identifier (scheme#code) to
+	// SNOMED CT concept IDs.
+	ResolveIdentifier(ctx context.Context, scheme string, code string) (Set, error)
+
+	// ── Dialect filter ────────────────────────────────────────────────────
+	// MatchDialect returns concept IDs whose descriptions match the dialect
+	// filter constraints.
+	MatchDialect(ctx context.Context, concepts Set, filter DialectFilterOpts) (Set, error)
+
+	// ── Member filter ─────────────────────────────────────────────────────
+	// RefsetMembersFiltered returns concept IDs from refset members that match
+	// the member field filter.
+	RefsetMembersFiltered(ctx context.Context, refsetIDs []string, filter MemberFilterOpts) (Set, error)
 }
 
 // Relationship is a single attribute relationship of a concept.
 type Relationship struct {
-	TypeID   string
-	TargetID string
-	GroupNum int
+	TypeID        string
+	TargetID      string // "" when ConcreteValue is set
+	GroupNum      int
+	ConcreteValue *ConcreteValue // nil for concept-valued relationships
 }
 
 // ConcreteValue is a concrete (non-concept) attribute value.
@@ -82,7 +105,9 @@ type ConcreteValue struct {
 }
 
 // DescriptionFilterOpts describes which descriptions to match.
-// Empty fields are ignored (no filter on that dimension).
+// Empty / nil slice fields are ignored (no filter on that dimension).
+// Slice fields use any-of semantics: a description matches if it has
+// any one of the listed values.
 type DescriptionFilterOpts struct {
 	// Term is a substring or phrase to match (case-insensitive).
 	Term string
@@ -90,17 +115,18 @@ type DescriptionFilterOpts struct {
 	// MatchType is "match", "wild" (glob), or "regex". Default "match".
 	MatchType string
 
-	// TypeID filters by description type (SCTID), e.g. synonym, FSN.
-	TypeID string
+	// TypeIDs filters by description type SCTIDs (any-of). Empty = no filter.
+	// Examples: 900000000000003001 (FSN), 900000000000013009 (synonym).
+	TypeIDs []string
 
-	// Language filters by language code (e.g., "en", "es").
-	Language string
+	// Languages filters by language codes (any-of). Empty = no filter.
+	Languages []string
 
 	// Active filters by description active flag. Nil = don't filter.
 	Active *bool
 
-	// ModuleID filters by module SCTID.
-	ModuleID string
+	// ModuleIDs filters by module SCTIDs (any-of).
+	ModuleIDs []string
 
 	// EffectiveTime filters by effectiveTime (YYYYMMDD) with comparison operator.
 	EffectiveTime   string
@@ -108,17 +134,39 @@ type DescriptionFilterOpts struct {
 }
 
 // ConceptFilterOpts describes concept-level metadata filters.
+// Slice fields use any-of semantics.
 type ConceptFilterOpts struct {
 	// Active filters by concept active flag. Nil = don't filter.
 	Active *bool
 
-	// DefinitionStatusID filters by definitionStatus SCTID.
-	DefinitionStatusID string
+	// DefinitionStatusIDs filters by definitionStatus SCTIDs (any-of).
+	DefinitionStatusIDs []string
 
-	// ModuleID filters by module SCTID.
-	ModuleID string
+	// ModuleIDs filters by module SCTIDs (any-of).
+	ModuleIDs []string
 
 	// EffectiveTime + Op as in DescriptionFilterOpts.
 	EffectiveTime   string
 	EffectiveTimeOp string
+}
+
+// DialectFilterOpts describes dialect filter constraints for descriptions.
+type DialectFilterOpts struct {
+	Dialects []DialectEntryOpts
+	Negate   bool
+}
+
+// DialectEntryOpts pairs a set of dialect refsets with an optional set of
+// acceptabilities. Match if (any DialectID) AND (any AcceptabilityID); empty
+// AcceptabilityIDs means any acceptability.
+type DialectEntryOpts struct {
+	DialectIDs       []string // SCTIDs of dialect language refsets (any-of)
+	AcceptabilityIDs []string // optional; nil/empty = any acceptability
+}
+
+// MemberFilterOpts describes member-level field filter constraints.
+type MemberFilterOpts struct {
+	FieldName string
+	Op        string // "=" or "!="
+	ValueSet  Set    // pre-resolved concept IDs
 }

@@ -71,7 +71,19 @@ func (m *mockProvider) FilterConcepts(context.Context, ecl.Set, ecl.ConceptFilte
 func (m *mockProvider) RefsetMembers(context.Context, []string) (ecl.Set, error) {
 	panic("not used")
 }
+func (m *mockProvider) RefsetsContainingMembers(context.Context, []string) (ecl.Set, error) {
+	panic("not used")
+}
 func (m *mockProvider) HistoricalAssociations(context.Context, ecl.Set, string) (ecl.Set, error) {
+	panic("not used")
+}
+func (m *mockProvider) ResolveIdentifier(context.Context, string, string) (ecl.Set, error) {
+	panic("not used")
+}
+func (m *mockProvider) MatchDialect(context.Context, ecl.Set, ecl.DialectFilterOpts) (ecl.Set, error) {
+	panic("not used")
+}
+func (m *mockProvider) RefsetMembersFiltered(context.Context, []string, ecl.MemberFilterOpts) (ecl.Set, error) {
 	panic("not used")
 }
 

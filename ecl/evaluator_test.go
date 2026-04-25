@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gofhir/ecl/ecl/ast"
 )
 
 // testProvider is a map-backed DataProvider used by evaluator tests.
@@ -32,6 +34,9 @@ type testProvider struct {
 	// Concrete values: key = sourceID, inner key = typeID, value = list of
 	// concrete attribute values.
 	concreteValues map[string]map[string][]ConcreteValue
+
+	// Alternate identifiers: scheme → code → conceptIDs.
+	altIdentifiers map[string]map[string][]string
 }
 
 // Hierarchy --------------------------------------------------------------.
@@ -116,11 +121,42 @@ func (p *testProvider) RefsetMembers(_ context.Context, refsetIDs []string) (Set
 	return out, nil
 }
 
+func (p *testProvider) RefsetsContainingMembers(_ context.Context, conceptIDs []string) (Set, error) {
+	out := NewSet().(*mapSet)
+	if len(conceptIDs) == 0 {
+		return out, nil
+	}
+	want := make(map[string]struct{}, len(conceptIDs))
+	for _, id := range conceptIDs {
+		want[id] = struct{}{}
+	}
+	for refsetID, members := range p.refsets {
+		for _, m := range members {
+			if _, ok := want[m]; ok {
+				out.m[refsetID] = struct{}{}
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
 // Relationships (Phase 3.3 – 3.5) ---------------------------------------.
 
 func (p *testProvider) RelationshipTargets(_ context.Context, sourceIDs, typeIDs Set) (Set, error) {
 	out := NewSet().(*mapSet)
-	if sourceIDs == nil || typeIDs == nil {
+	if typeIDs == nil {
+		return out, nil
+	}
+	if sourceIDs == nil {
+		// Wildcard: iterate all relationships and collect targets of matching types.
+		for _, rels := range p.relationships {
+			for _, r := range rels {
+				if typeIDs.Contains(r.TypeID) {
+					out.m[r.TargetID] = struct{}{}
+				}
+			}
+		}
 		return out, nil
 	}
 	sourceIDs.Iter(func(src string) bool {
@@ -136,7 +172,7 @@ func (p *testProvider) RelationshipTargets(_ context.Context, sourceIDs, typeIDs
 
 func (p *testProvider) RelationshipSources(_ context.Context, targetIDs, typeIDs Set) (Set, error) {
 	out := NewSet().(*mapSet)
-	if targetIDs == nil || typeIDs == nil {
+	if typeIDs == nil {
 		return out, nil
 	}
 	for src, rels := range p.relationships {
@@ -144,7 +180,7 @@ func (p *testProvider) RelationshipSources(_ context.Context, targetIDs, typeIDs
 			if !typeIDs.Contains(r.TypeID) {
 				continue
 			}
-			if targetIDs.Contains(r.TargetID) {
+			if targetIDs == nil || targetIDs.Contains(r.TargetID) {
 				out.m[src] = struct{}{}
 				break
 			}
@@ -199,6 +235,23 @@ func (p *testProvider) MatchDescription(_ context.Context, _ DescriptionFilterOp
 func (p *testProvider) FilterConcepts(_ context.Context, _ Set, _ ConceptFilterOpts) (Set, error) {
 	return NewSet(), nil
 }
+func (p *testProvider) ResolveIdentifier(_ context.Context, scheme, code string) (Set, error) {
+	if p.altIdentifiers == nil {
+		return NewSet(), nil
+	}
+	if byCode, ok := p.altIdentifiers[scheme]; ok {
+		if ids, ok := byCode[code]; ok {
+			return NewSetFromSlice(ids), nil
+		}
+	}
+	return NewSet(), nil
+}
+func (p *testProvider) MatchDialect(_ context.Context, _ Set, _ DialectFilterOpts) (Set, error) {
+	return NewSet(), nil
+}
+func (p *testProvider) RefsetMembersFiltered(_ context.Context, _ []string, _ MemberFilterOpts) (Set, error) {
+	return NewSet(), nil
+}
 
 var _ DataProvider = (*testProvider)(nil)
 
@@ -218,9 +271,9 @@ var _ DataProvider = (*testProvider)(nil)
 func newFixture() *testProvider {
 	return &testProvider{
 		descendants: map[string][]string{
-			"138875005": {"404684003", "22298006", "64572001", "73211009", "404684004"},
-			"404684003": {"22298006", "64572001", "73211009", "404684004"},
-			"64572001":  {"73211009", "404684004"},
+			"138875005": {"404684003", "22298006", "64572001", "73211009", "404684004", "111111001"},
+			"404684003": {"22298006", "64572001", "73211009", "404684004", "111111001"},
+			"64572001":  {"73211009", "404684004", "111111001"},
 		},
 		ancestors: map[string][]string{
 			"22298006":  {"404684003", "138875005"},
@@ -228,11 +281,12 @@ func newFixture() *testProvider {
 			"73211009":  {"64572001", "404684003", "138875005"},
 			"404684004": {"64572001", "404684003", "138875005"},
 			"404684003": {"138875005"},
+			"111111001": {"64572001", "404684003", "138875005"},
 		},
 		children: map[string][]string{
 			"138875005": {"404684003"},
 			"404684003": {"22298006", "64572001"},
-			"64572001":  {"73211009", "404684004"},
+			"64572001":  {"73211009", "404684004", "111111001"},
 		},
 		parents: map[string][]string{
 			"404684003": {"138875005"},
@@ -240,6 +294,7 @@ func newFixture() *testProvider {
 			"64572001":  {"404684003"},
 			"73211009":  {"64572001"},
 			"404684004": {"64572001"},
+			"111111001": {"64572001"},
 		},
 		exists: map[string]bool{
 			"138875005":          true,
@@ -248,6 +303,7 @@ func newFixture() *testProvider {
 			"64572001":           true,
 			"73211009":           true,
 			"404684004":          true,
+			"111111001":          true,
 			"900000000000497000": true, // refset concept itself exists
 			// attribute type and target concepts used in relationship tests
 			"363698007":  true, // Finding site (attribute type)
@@ -256,8 +312,10 @@ func newFixture() *testProvider {
 			"55641003":   true, // Infarct (target)
 			"113331007":  true, // Endocrine system (target)
 			"1142139005": true, // Count attribute (for concrete-value tests)
+			"1149367008": true, // String attribute type
+			"1149366004": true, // Boolean attribute type
 		},
-		all: []string{"138875005", "404684003", "22298006", "64572001", "73211009", "404684004"},
+		all: []string{"138875005", "404684003", "22298006", "64572001", "73211009", "404684004", "111111001", "74281007", "113331007", "55641003"},
 		refsets: map[string][]string{
 			"900000000000497000": {"22298006", "64572001", "73211009"},
 		},
@@ -273,9 +331,11 @@ func newFixture() *testProvider {
 			"22298006": {
 				{TypeID: "363698007", TargetID: "74281007", GroupNum: 1},
 				{TypeID: "116676008", TargetID: "55641003", GroupNum: 1},
+				{TypeID: "1142139005", TargetID: "", GroupNum: 1, ConcreteValue: &ConcreteValue{Kind: "integer", Value: "2"}},
 			},
 			"73211009": {
 				{TypeID: "363698007", TargetID: "113331007", GroupNum: 1},
+				{TypeID: "363698007", TargetID: "74281007", GroupNum: 1},
 			},
 			"404684004": {
 				{TypeID: "363698007", TargetID: "74281007", GroupNum: 1},
@@ -292,6 +352,13 @@ func newFixture() *testProvider {
 		concreteValues: map[string]map[string][]ConcreteValue{
 			"22298006": {
 				"1142139005": {{Kind: "integer", Value: "2"}},
+				"1149367008": {{Kind: "string", Value: "severe"}},
+				"1149366004": {{Kind: "boolean", Value: "true"}},
+			},
+		},
+		altIdentifiers: map[string]map[string][]string{
+			"LOINC": {
+				"1234-5": {"22298006"},
 			},
 		},
 	}
@@ -327,7 +394,7 @@ func TestEvaluate_DescendantOf(t *testing.T) {
 	p := newFixture()
 	got := evalECL(t, "< 404684003", p)
 	assert.ElementsMatch(t,
-		[]string{"22298006", "64572001", "73211009", "404684004"},
+		[]string{"22298006", "64572001", "73211009", "404684004", "111111001"},
 		got.Slice())
 }
 
@@ -335,7 +402,7 @@ func TestEvaluate_DescendantOrSelfOf(t *testing.T) {
 	p := newFixture()
 	got := evalECL(t, "<< 404684003", p)
 	assert.ElementsMatch(t,
-		[]string{"404684003", "22298006", "64572001", "73211009", "404684004"},
+		[]string{"404684003", "22298006", "64572001", "73211009", "404684004", "111111001"},
 		got.Slice())
 }
 
@@ -374,17 +441,17 @@ func TestEvaluate_ParentOf(t *testing.T) {
 func TestEvaluate_Wildcard(t *testing.T) {
 	p := newFixture()
 	got := evalECL(t, "*", p)
-	assert.Equal(t, 6, got.Len())
+	assert.Equal(t, 10, got.Len())
 }
 
 func TestEvaluate_And(t *testing.T) {
 	p := newFixture()
-	// << 404684003 = {404684003, 22298006, 64572001, 73211009, 404684004}
-	// << 64572001  = {64572001, 73211009, 404684004}
-	// intersection = {64572001, 73211009, 404684004}
+	// << 404684003 = {404684003, 22298006, 64572001, 73211009, 404684004, 111111001}
+	// << 64572001  = {64572001, 73211009, 404684004, 111111001}
+	// intersection = {64572001, 73211009, 404684004, 111111001}
 	got := evalECL(t, "<< 404684003 AND << 64572001", p)
 	assert.ElementsMatch(t,
-		[]string{"64572001", "73211009", "404684004"},
+		[]string{"64572001", "73211009", "404684004", "111111001"},
 		got.Slice())
 }
 
@@ -398,8 +465,8 @@ func TestEvaluate_Or(t *testing.T) {
 
 func TestEvaluate_Minus(t *testing.T) {
 	p := newFixture()
-	// << 404684003 = {404684003, 22298006, 64572001, 73211009, 404684004}
-	// << 64572001  = {64572001, 73211009, 404684004}
+	// << 404684003 = {404684003, 22298006, 64572001, 73211009, 404684004, 111111001}
+	// << 64572001  = {64572001, 73211009, 404684004, 111111001}
 	// difference   = {404684003, 22298006}
 	got := evalECL(t, "<< 404684003 MINUS << 64572001", p)
 	assert.ElementsMatch(t,
@@ -415,10 +482,26 @@ func TestEvaluate_MemberOf_Simple(t *testing.T) {
 		got.Slice())
 }
 
+func TestEvaluate_MemberOf_FieldProjectionRejected(t *testing.T) {
+	// Field projection cannot be expressed through Set; the evaluator must
+	// reject it explicitly rather than silently dropping the projection.
+	p := newFixture()
+	_, err := Evaluate(
+		t.Context(),
+		&ast.MemberOf{
+			Operand: &ast.ConceptRef{ID: "900000000000497000"},
+			Fields:  []string{"referencedComponentId"},
+		},
+		p,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "field projection")
+}
+
 func TestEvaluate_Nested(t *testing.T) {
 	p := newFixture()
 	got := evalECL(t, "(<< 64572001)", p)
 	assert.ElementsMatch(t,
-		[]string{"64572001", "73211009", "404684004"},
+		[]string{"64572001", "73211009", "404684004", "111111001"},
 		got.Slice())
 }

@@ -25,8 +25,10 @@ type testDescription struct {
 // and active-flag overrides, and implements MatchDescription / FilterConcepts.
 type filterTestProvider struct {
 	*testProvider
-	descriptions map[string][]testDescription // conceptID → descriptions
-	activeFlag   map[string]bool              // conceptID → active? (default true)
+	descriptions map[string][]testDescription              // conceptID → descriptions
+	activeFlag   map[string]bool                           // conceptID → active? (default true)
+	dialects     map[string]map[string][]string            // dialectID → acceptabilityID → conceptIDs
+	memberFields map[string]map[string]map[string][]string // refsetID → fieldName → fieldValue → conceptIDs
 }
 
 func newFilterFixture() *filterTestProvider {
@@ -55,6 +57,21 @@ func newFilterFixture() *filterTestProvider {
 			// Mark 404684004 as inactive for the active filter test.
 			"404684004": false,
 		},
+		dialects: map[string]map[string][]string{
+			"900000000000509007": { // US English
+				"900000000000548007": {"22298006", "73211009"}, // preferred
+				"900000000000549004": {"64572001"},             // acceptable
+			},
+		},
+		memberFields: map[string]map[string]map[string][]string{
+			"900000000000497000": {
+				"referencedComponentId": {
+					"22298006": {"22298006"},
+					"64572001": {"64572001"},
+					"73211009": {"73211009"},
+				},
+			},
+		},
 	}
 }
 
@@ -76,10 +93,10 @@ func (p *filterTestProvider) MatchDescription(_ context.Context, f DescriptionFi
 			if f.Term != "" && !strings.Contains(strings.ToLower(d.Term), needle) {
 				continue
 			}
-			if f.TypeID != "" && d.TypeID != f.TypeID {
+			if len(f.TypeIDs) > 0 && !containsStr(f.TypeIDs, d.TypeID) {
 				continue
 			}
-			if f.Language != "" && d.Language != f.Language {
+			if len(f.Languages) > 0 && !containsStr(f.Languages, d.Language) {
 				continue
 			}
 			if f.Active != nil && d.Active != *f.Active {
@@ -111,6 +128,88 @@ func (p *filterTestProvider) FilterConcepts(_ context.Context, concepts Set, f C
 	return out, nil
 }
 
+// MatchDialect returns concept IDs whose descriptions match the given dialect
+// filter constraints using the test fixture's dialect data.
+func (p *filterTestProvider) MatchDialect(_ context.Context, concepts Set, f DialectFilterOpts) (Set, error) {
+	out := NewSet().(*mapSet)
+	if p.dialects == nil || concepts == nil {
+		return out, nil
+	}
+	concepts.Iter(func(id string) bool {
+		for _, d := range f.Dialects {
+			for _, dialectID := range d.DialectIDs {
+				byAccept, ok := p.dialects[dialectID]
+				if !ok {
+					continue
+				}
+				if len(d.AcceptabilityIDs) == 0 {
+					// Any acceptability.
+					for _, ids := range byAccept {
+						for _, cid := range ids {
+							if cid == id {
+								out.m[id] = struct{}{}
+								return true
+							}
+						}
+					}
+					continue
+				}
+				for _, acceptID := range d.AcceptabilityIDs {
+					ids, ok := byAccept[acceptID]
+					if !ok {
+						continue
+					}
+					for _, cid := range ids {
+						if cid == id {
+							out.m[id] = struct{}{}
+							return true
+						}
+					}
+				}
+			}
+		}
+		return true
+	})
+	return out, nil
+}
+
+// containsStr reports whether haystack contains needle.
+func containsStr(haystack []string, needle string) bool {
+	for _, h := range haystack {
+		if h == needle {
+			return true
+		}
+	}
+	return false
+}
+
+// RefsetMembersFiltered returns concept IDs from refset members that match
+// the given member field filter constraints using the test fixture's data.
+func (p *filterTestProvider) RefsetMembersFiltered(_ context.Context, refsetIDs []string, filter MemberFilterOpts) (Set, error) {
+	out := NewSet().(*mapSet)
+	if p.memberFields == nil {
+		return out, nil
+	}
+	for _, rid := range refsetIDs {
+		if byField, ok := p.memberFields[rid]; ok {
+			if byValue, ok := byField[filter.FieldName]; ok {
+				for val, conceptIDs := range byValue {
+					matches := filter.ValueSet != nil && filter.ValueSet.Contains(val)
+					if filter.Op == "!=" {
+						matches = !matches
+					}
+					if matches {
+						for _, cid := range conceptIDs {
+							out.m[cid] = struct{}{}
+						}
+					}
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
 var _ DataProvider = (*filterTestProvider)(nil)
 
 // ------------------------------------------------------------------------
@@ -136,6 +235,18 @@ func TestEvaluate_DescriptionFilter_Language(t *testing.T) {
 	assert.ElementsMatch(t, []string{"22298006"}, got.Slice())
 }
 
+func TestEvaluate_DescriptionFilter_Language_MultiValue(t *testing.T) {
+	// Multi-value any-of: matches descriptions in either language.
+	// Without the fix, this would silently take only the first language.
+	p := newFilterFixture()
+	got := evalECL(t, `<< 404684003 {{ language = (en OR es) }}`, p)
+	// All 5 concepts with descriptions match (every one has at least an en
+	// description; 22298006 also has es).
+	assert.ElementsMatch(t,
+		[]string{"22298006", "73211009", "64572001", "404684004", "404684003"},
+		got.Slice())
+}
+
 func TestEvaluate_DescriptionFilter_Term_NoMatch(t *testing.T) {
 	p := newFilterFixture()
 	got := evalECL(t, `<< 404684003 {{ term = "nonexistent" }}`, p)
@@ -157,21 +268,45 @@ func TestEvaluate_CombinedFilters(t *testing.T) {
 	assert.ElementsMatch(t, []string{"22298006"}, got.Slice())
 }
 
-func TestEvaluate_MemberFilter_NotImplemented(t *testing.T) {
+func TestEvaluate_DescriptionFilter_Term_Negated(t *testing.T) {
 	p := newFilterFixture()
-	// A member filter uses a refset field filter inside {{ M ... }}.
-	// A member field filter on an arbitrary refset field should trigger the
-	// "member filter: not yet implemented" error from the evaluator.
+	// term != "infarction" → concepts whose descriptions do NOT contain "infarction".
+	// Only MI (22298006) has "infarction" in its term.
+	got := evalECL(t, `<< 404684003 {{ term != "infarction" }}`, p)
+	assert.False(t, got.Contains("22298006"), "22298006 has 'infarction' in term")
+	assert.True(t, got.Contains("73211009"), "73211009 should remain")
+	assert.True(t, got.Contains("64572001"), "64572001 should remain")
+}
+
+func TestEvaluate_DescriptionFilter_Language_Negated(t *testing.T) {
+	p := newFilterFixture()
+	// language != es → concepts that do NOT have a Spanish description.
+	// Only MI (22298006) has a Spanish description.
+	got := evalECL(t, `<< 404684003 {{ language != es }}`, p)
+	assert.False(t, got.Contains("22298006"), "22298006 has Spanish desc")
+	assert.True(t, got.Contains("73211009"))
+}
+
+func TestEvaluate_MemberFilter(t *testing.T) {
+	p := newFilterFixture()
 	expr, err := Parse(`^ 900000000000497000 {{ M referencedComponentId = 22298006 }}`)
 	if err != nil {
-		// If the grammar doesn't accept this exact shape, skip — the goal is
-		// to confirm that WHEN parsed, the evaluator returns a clear error.
 		t.Skipf("member filter example did not parse: %v", err)
 	}
-	_, err = Evaluate(context.Background(), expr, p)
-	require.Error(t, err)
-	assert.True(t,
-		strings.Contains(err.Error(), "not yet implemented") ||
-			strings.Contains(err.Error(), "member filter"),
-		"expected member filter not-yet-implemented error, got: %v", err)
+	got, err := Evaluate(context.Background(), expr, p)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"22298006"}, got.Slice())
+}
+
+func TestEvaluate_DialectFilter(t *testing.T) {
+	p := newFilterFixture()
+	expr, err := Parse(`<< 404684003 {{ dialect = 900000000000509007 }}`)
+	if err != nil {
+		t.Skipf("parser does not accept dialect filter syntax: %v", err)
+	}
+	got, err := Evaluate(context.Background(), expr, p)
+	require.NoError(t, err)
+	assert.True(t, got.Contains("22298006"))
+	assert.True(t, got.Contains("73211009"))
+	assert.True(t, got.Contains("64572001"))
 }

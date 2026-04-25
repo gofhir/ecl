@@ -61,7 +61,23 @@ func (m *mockProvider) RefsetMembers(_ context.Context, _ []string) (Set, error)
 	return NewSet(), nil
 }
 
+func (m *mockProvider) RefsetsContainingMembers(_ context.Context, _ []string) (Set, error) {
+	return NewSet(), nil
+}
+
 func (m *mockProvider) HistoricalAssociations(_ context.Context, _ Set, _ string) (Set, error) {
+	return NewSet(), nil
+}
+
+func (m *mockProvider) ResolveIdentifier(_ context.Context, _, _ string) (Set, error) {
+	return NewSet(), nil
+}
+
+func (m *mockProvider) MatchDialect(_ context.Context, _ Set, _ DialectFilterOpts) (Set, error) {
+	return NewSet(), nil
+}
+
+func (m *mockProvider) RefsetMembersFiltered(_ context.Context, _ []string, _ MemberFilterOpts) (Set, error) {
 	return NewSet(), nil
 }
 

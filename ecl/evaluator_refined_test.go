@@ -15,9 +15,9 @@ import (
 func TestEvaluate_SimpleRefinement_Eq(t *testing.T) {
 	p := newFixture()
 	// All descendants-or-self of Clinical finding with Finding site = Myocardium.
-	// Both MI (22298006) and 404684004 have finding site = myocardium.
+	// MI (22298006), 404684004, and diabetes (73211009) have finding site = myocardium.
 	got := evalECL(t, "<< 404684003 : 363698007 = 74281007", p)
-	assert.ElementsMatch(t, []string{"22298006", "404684004"}, got.Slice())
+	assert.ElementsMatch(t, []string{"22298006", "404684004", "73211009"}, got.Slice())
 }
 
 func TestEvaluate_SimpleRefinement_Eq_HierarchicalValue(t *testing.T) {
@@ -25,7 +25,7 @@ func TestEvaluate_SimpleRefinement_Eq_HierarchicalValue(t *testing.T) {
 	// Finding site = << 74281007 (myocardium or any descendant). In this
 	// fixture myocardium has no descendants, so same result as flat equality.
 	got := evalECL(t, "<< 404684003 : 363698007 = << 74281007", p)
-	assert.ElementsMatch(t, []string{"22298006", "404684004"}, got.Slice())
+	assert.ElementsMatch(t, []string{"22298006", "404684004", "73211009"}, got.Slice())
 }
 
 func TestEvaluate_SimpleRefinement_NotEq(t *testing.T) {
@@ -34,11 +34,11 @@ func TestEvaluate_SimpleRefinement_NotEq(t *testing.T) {
 	// Per our AND-across-focus semantics, "!=" matches concepts that do not
 	// have an outbound 363698007 relationship to 74281007.
 	//   MI (22298006)       — has 363698007=74281007  → excluded
-	//   diabetes (73211009) — has 363698007=113331007 → included (no rel to 74281007)
+	//   diabetes (73211009) — has 363698007=74281007  → excluded
 	//   404684004           — has 363698007=74281007  → excluded
-	//   64572001, 404684003 — no such relationship    → included
+	//   64572001, 404684003, 111111001 — no such relationship → included
 	got := evalECL(t, "<< 404684003 : 363698007 != 74281007", p)
-	assert.ElementsMatch(t, []string{"404684003", "64572001", "73211009"}, got.Slice())
+	assert.ElementsMatch(t, []string{"404684003", "64572001", "111111001"}, got.Slice())
 }
 
 func TestEvaluate_Refinement_MultipleAttrs_AND(t *testing.T) {
@@ -78,7 +78,7 @@ func TestEvaluate_GroupedRefinement_SingleAttr(t *testing.T) {
 	// A grouped clause with a single attribute is effectively the same as the
 	// ungrouped equivalent.
 	got := evalECL(t, "<< 404684003 : { 363698007 = 74281007 }", p)
-	assert.ElementsMatch(t, []string{"22298006", "404684004"}, got.Slice())
+	assert.ElementsMatch(t, []string{"22298006", "404684004", "73211009"}, got.Slice())
 }
 
 // ------------------------------------------------------------------------
@@ -133,6 +133,25 @@ func TestEvaluate_Refinement_Reverse(t *testing.T) {
 }
 
 // ------------------------------------------------------------------------
+// Grouped refinement with concrete values
+// ------------------------------------------------------------------------.
+
+func TestEvaluate_GroupedRefinement_ConcreteValue(t *testing.T) {
+	p := newFixture()
+	// Grouped: finding site = myocardium AND count >= 1, both in same group.
+	// 22298006 has all three in group 1.
+	got := evalECL(t, `<< 404684003 : { 363698007 = 74281007, 1142139005 >= #1 }`, p)
+	assert.ElementsMatch(t, []string{"22298006"}, got.Slice())
+}
+
+func TestEvaluate_GroupedRefinement_ConcreteValue_NoMatch(t *testing.T) {
+	p := newFixture()
+	// count > 5 — 22298006 has value 2, which is NOT > 5.
+	got := evalECL(t, `<< 404684003 : { 363698007 = 74281007, 1142139005 > #5 }`, p)
+	assert.Equal(t, 0, got.Len())
+}
+
+// ------------------------------------------------------------------------
 // Error handling / deferred features
 // ------------------------------------------------------------------------.
 
@@ -147,4 +166,66 @@ func TestEvaluate_Refinement_ConcreteOperator_NoMatch(t *testing.T) {
 	got, err := Evaluate(context.Background(), expr, p)
 	require.NoError(t, err)
 	assert.Equal(t, 0, got.Len(), "no fixture concept has a numeric value for 363698007")
+}
+
+// ------------------------------------------------------------------------
+// Attribute cardinality [min..max]
+// ------------------------------------------------------------------------.
+
+func TestEvaluate_Cardinality_ZeroToZero(t *testing.T) {
+	p := newFixture()
+	// [0..0] 363698007 = * → concepts with NO finding-site relationship.
+	got := evalECL(t, `<< 404684003 : [0..0] 363698007 = *`, p)
+	assert.True(t, got.Contains("111111001"), "111111001 has no finding-site")
+	assert.True(t, got.Contains("404684003"), "404684003 has no finding-site")
+	assert.True(t, got.Contains("64572001"), "64572001 has no finding-site")
+	assert.False(t, got.Contains("22298006"), "22298006 has finding-site")
+}
+
+func TestEvaluate_Cardinality_ExactlyTwo(t *testing.T) {
+	p := newFixture()
+	// [2..2] 363698007 = * → concepts with exactly 2 finding-site relationships.
+	got := evalECL(t, `<< 404684003 : [2..2] 363698007 = *`, p)
+	assert.ElementsMatch(t, []string{"73211009"}, got.Slice())
+}
+
+func TestEvaluate_Cardinality_ZeroToOne(t *testing.T) {
+	p := newFixture()
+	// [0..1] → 0 or 1 finding-site. Excludes 73211009 (has 2).
+	got := evalECL(t, `<< 404684003 : [0..1] 363698007 = *`, p)
+	assert.False(t, got.Contains("73211009"), "73211009 has 2 finding-sites")
+	assert.True(t, got.Contains("22298006"), "22298006 has 1 finding-site")
+	assert.True(t, got.Contains("111111001"), "111111001 has 0 finding-sites")
+}
+
+func TestEvaluate_Cardinality_OneToUnbounded(t *testing.T) {
+	p := newFixture()
+	// [1..*] is the default — at least 1 match.
+	got := evalECL(t, `<< 404684003 : [1..*] 363698007 = *`, p)
+	assert.True(t, got.Contains("22298006"))
+	assert.True(t, got.Contains("73211009"))
+	assert.False(t, got.Contains("111111001"), "111111001 has 0")
+}
+
+func TestEvaluate_GroupedRefinement_Reverse(t *testing.T) {
+	p := newFixture()
+	// { R 363698007 = << 404684003 } means: in the focus, keep concepts that
+	// are the TARGET of a 363698007 relationship from a source in << 404684003,
+	// within a single relationship group.
+	// 74281007 is targeted by 22298006 (group 1) and 404684004 (group 1).
+	// Both sources are in << 404684003.
+	got := evalECL(t, `* : { R 363698007 = << 404684003 }`, p)
+	assert.True(t, got.Contains("74281007"))
+}
+
+func TestEvaluate_Refinement_Reverse_Wildcard(t *testing.T) {
+	p := newFixture()
+	// R 363698007 = * → concepts that are the target of ANY 363698007 relationship.
+	// In the fixture: 74281007 (target of 22298006 and 404684004),
+	// 113331007 (target of 73211009), 55641003 (target of 22298006 and 404684004 via 116676008).
+	// But we filter on type 363698007 only.
+	got := evalECL(t, `* : R 363698007 = *`, p)
+	assert.True(t, got.Contains("74281007"), "74281007 is target of 363698007")
+	assert.True(t, got.Contains("113331007"), "113331007 is target of 363698007")
+	assert.False(t, got.Contains("22298006"), "22298006 is a source, not a target of 363698007")
 }
