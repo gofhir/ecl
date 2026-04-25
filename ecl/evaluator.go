@@ -897,10 +897,6 @@ func filterByConcreteValue(ctx context.Context, focus Set, attr *ast.Attribute, 
 	if focus == nil || focus.Len() == 0 {
 		return focus, nil
 	}
-	if attr.Reverse {
-		return nil, fmt.Errorf("reverse attribute with concrete value not yet implemented")
-	}
-
 	// Extract the literal value. Numeric operators require a numeric literal.
 	var (
 		haveNumeric bool

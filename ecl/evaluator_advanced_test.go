@@ -186,6 +186,17 @@ func TestEvaluate_RefsetContainingAny(t *testing.T) {
 // TestEvaluate_AltIdentifier_NotImplemented confirms that alternate
 // identifiers parse but the evaluator returns a clear "not yet implemented"
 // error rather than silently producing the wrong result.
+func TestEvaluate_ConcreteValue_Reverse(t *testing.T) {
+	p := newFixture()
+	// R 1142139005 = #2 on a concrete-value attribute.
+	// Concrete values have no "target concept" to reverse through.
+	// Per ECL spec, R on concrete values means: find concepts that have
+	// this concrete value — same as forward evaluation.
+	// 22298006 has 1142139005=2, so it matches.
+	got := evalECL(t, `* : R 1142139005 = #2`, p)
+	assert.True(t, got.Contains("22298006"), "22298006 has concrete value 1142139005=2")
+}
+
 func TestEvaluate_AltIdentifier_NotImplemented(t *testing.T) {
 	p := newFixture()
 	expr, err := Parse(`LOINC#1234-5`)
