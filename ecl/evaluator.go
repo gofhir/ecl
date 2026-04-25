@@ -222,7 +222,7 @@ func Evaluate(ctx context.Context, expr ast.Expression, provider DataProvider) (
 		return provider.RefsetMembers(ctx, toIDSlice(refsetIDs))
 
 	case *ast.AltIdentifier:
-		return nil, fmt.Errorf("AltIdentifier not yet implemented (requires alternate identifier resolution): %s#%s", e.Scheme, e.Code)
+		return provider.ResolveIdentifier(ctx, e.Scheme, e.Code)
 
 	default:
 		return nil, fmt.Errorf("unsupported AST node type: %T", expr)

@@ -2,7 +2,6 @@ package ecl
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -197,18 +196,16 @@ func TestEvaluate_ConcreteValue_Reverse(t *testing.T) {
 	assert.True(t, got.Contains("22298006"), "22298006 has concrete value 1142139005=2")
 }
 
-func TestEvaluate_AltIdentifier_NotImplemented(t *testing.T) {
+func TestEvaluate_AltIdentifier(t *testing.T) {
 	p := newFixture()
 	expr, err := Parse(`LOINC#1234-5`)
 	if err != nil {
-		// Alternate grammar forms — try a quoted variant.
 		expr, err = Parse(`"LOINC"#"1234-5"`)
 		if err != nil {
 			t.Skipf("parser does not accept alternate identifier syntax: %v", err)
 		}
 	}
-	_, err = Evaluate(context.Background(), expr, p)
-	require.Error(t, err)
-	assert.True(t, strings.Contains(err.Error(), "not yet implemented"),
-		"error should say 'not yet implemented', got: %v", err)
+	got, err := Evaluate(context.Background(), expr, p)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"22298006"}, got.Slice())
 }

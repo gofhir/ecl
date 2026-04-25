@@ -32,6 +32,9 @@ type testProvider struct {
 	// Concrete values: key = sourceID, inner key = typeID, value = list of
 	// concrete attribute values.
 	concreteValues map[string]map[string][]ConcreteValue
+
+	// Alternate identifiers: scheme → code → conceptIDs.
+	altIdentifiers map[string]map[string][]string
 }
 
 // Hierarchy --------------------------------------------------------------.
@@ -210,7 +213,15 @@ func (p *testProvider) MatchDescription(_ context.Context, _ DescriptionFilterOp
 func (p *testProvider) FilterConcepts(_ context.Context, _ Set, _ ConceptFilterOpts) (Set, error) {
 	return NewSet(), nil
 }
-func (p *testProvider) ResolveIdentifier(_ context.Context, _ string, _ string) (Set, error) {
+func (p *testProvider) ResolveIdentifier(_ context.Context, scheme, code string) (Set, error) {
+	if p.altIdentifiers == nil {
+		return NewSet(), nil
+	}
+	if byCode, ok := p.altIdentifiers[scheme]; ok {
+		if ids, ok := byCode[code]; ok {
+			return NewSetFromSlice(ids), nil
+		}
+	}
 	return NewSet(), nil
 }
 func (p *testProvider) MatchDialect(_ context.Context, _ Set, _ DialectFilterOpts) (Set, error) {
@@ -321,6 +332,11 @@ func newFixture() *testProvider {
 				"1142139005": {{Kind: "integer", Value: "2"}},
 				"1149367008": {{Kind: "string", Value: "severe"}},
 				"1149366004": {{Kind: "boolean", Value: "true"}},
+			},
+		},
+		altIdentifiers: map[string]map[string][]string{
+			"LOINC": {
+				"1234-5": {"22298006"},
 			},
 		},
 	}
