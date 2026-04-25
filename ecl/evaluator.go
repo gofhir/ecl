@@ -350,17 +350,19 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 	// focus. The "!=" semantics (no such inbound relationship) are the
 	// complement within the focus.
 	if attr.Reverse {
+		var inbound Set
+		var err error
 		if valueIsAny {
-			return nil, fmt.Errorf("reverse attribute with wildcard value not yet implemented")
+			inbound, err = provider.RelationshipTargets(ctx, nil, typeIDs)
+		} else {
+			inbound, err = provider.RelationshipTargets(ctx, valueSet, typeIDs)
 		}
-		inbound, err := provider.RelationshipTargets(ctx, valueSet, typeIDs)
 		if err != nil {
 			return nil, fmt.Errorf("reverse attribute lookup: %w", err)
 		}
 		if attr.Op == "=" {
 			return focus.Intersect(inbound), nil
 		}
-		// "!=": focus minus those that have an inbound relationship.
 		return focus.Minus(inbound), nil
 	}
 

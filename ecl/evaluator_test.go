@@ -120,7 +120,18 @@ func (p *testProvider) RefsetMembers(_ context.Context, refsetIDs []string) (Set
 
 func (p *testProvider) RelationshipTargets(_ context.Context, sourceIDs, typeIDs Set) (Set, error) {
 	out := NewSet().(*mapSet)
-	if sourceIDs == nil || typeIDs == nil {
+	if typeIDs == nil {
+		return out, nil
+	}
+	if sourceIDs == nil {
+		// Wildcard: iterate all relationships and collect targets of matching types.
+		for _, rels := range p.relationships {
+			for _, r := range rels {
+				if typeIDs.Contains(r.TypeID) {
+					out.m[r.TargetID] = struct{}{}
+				}
+			}
+		}
 		return out, nil
 	}
 	sourceIDs.Iter(func(src string) bool {
@@ -271,7 +282,7 @@ func newFixture() *testProvider {
 			"1149367008": true, // String attribute type
 			"1149366004": true, // Boolean attribute type
 		},
-		all: []string{"138875005", "404684003", "22298006", "64572001", "73211009", "404684004", "111111001"},
+		all: []string{"138875005", "404684003", "22298006", "64572001", "73211009", "404684004", "111111001", "74281007", "113331007", "55641003"},
 		refsets: map[string][]string{
 			"900000000000497000": {"22298006", "64572001", "73211009"},
 		},
@@ -391,7 +402,7 @@ func TestEvaluate_ParentOf(t *testing.T) {
 func TestEvaluate_Wildcard(t *testing.T) {
 	p := newFixture()
 	got := evalECL(t, "*", p)
-	assert.Equal(t, 7, got.Len())
+	assert.Equal(t, 10, got.Len())
 }
 
 func TestEvaluate_And(t *testing.T) {

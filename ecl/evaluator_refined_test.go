@@ -187,3 +187,15 @@ func TestEvaluate_Cardinality_OneToUnbounded(t *testing.T) {
 	assert.True(t, got.Contains("73211009"))
 	assert.False(t, got.Contains("111111001"), "111111001 has 0")
 }
+
+func TestEvaluate_Refinement_Reverse_Wildcard(t *testing.T) {
+	p := newFixture()
+	// R 363698007 = * → concepts that are the target of ANY 363698007 relationship.
+	// In the fixture: 74281007 (target of 22298006 and 404684004),
+	// 113331007 (target of 73211009), 55641003 (target of 22298006 and 404684004 via 116676008).
+	// But we filter on type 363698007 only.
+	got := evalECL(t, `* : R 363698007 = *`, p)
+	assert.True(t, got.Contains("74281007"), "74281007 is target of 363698007")
+	assert.True(t, got.Contains("113331007"), "113331007 is target of 363698007")
+	assert.False(t, got.Contains("22298006"), "22298006 is a source, not a target of 363698007")
+}
