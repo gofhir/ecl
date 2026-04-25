@@ -28,6 +28,7 @@ type filterTestProvider struct {
 	descriptions map[string][]testDescription // conceptID → descriptions
 	activeFlag   map[string]bool              // conceptID → active? (default true)
 	dialects     map[string]map[string][]string // dialectID → acceptabilityID → conceptIDs
+	memberFields map[string]map[string]map[string][]string // refsetID → fieldName → fieldValue → conceptIDs
 }
 
 func newFilterFixture() *filterTestProvider {
@@ -60,6 +61,15 @@ func newFilterFixture() *filterTestProvider {
 			"900000000000509007": { // US English
 				"900000000000548007": {"22298006", "73211009"}, // preferred
 				"900000000000549004": {"64572001"},              // acceptable
+			},
+		},
+		memberFields: map[string]map[string]map[string][]string{
+			"900000000000497000": {
+				"referencedComponentId": {
+					"22298006":  {"22298006"},
+					"64572001":  {"64572001"},
+					"73211009":  {"73211009"},
+				},
 			},
 		},
 	}
@@ -153,6 +163,33 @@ func (p *filterTestProvider) MatchDialect(_ context.Context, concepts Set, f Dia
 	return out, nil
 }
 
+// RefsetMembersFiltered returns concept IDs from refset members that match
+// the given member field filter constraints using the test fixture's data.
+func (p *filterTestProvider) RefsetMembersFiltered(_ context.Context, refsetIDs []string, filter MemberFilterOpts) (Set, error) {
+	out := NewSet().(*mapSet)
+	if p.memberFields == nil {
+		return out, nil
+	}
+	for _, rid := range refsetIDs {
+		if byField, ok := p.memberFields[rid]; ok {
+			if byValue, ok := byField[filter.FieldName]; ok {
+				for val, conceptIDs := range byValue {
+					matches := filter.ValueSet != nil && filter.ValueSet.Contains(val)
+					if filter.Op == "!=" {
+						matches = !matches
+					}
+					if matches {
+						for _, cid := range conceptIDs {
+							out.m[cid] = struct{}{}
+						}
+					}
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
 var _ DataProvider = (*filterTestProvider)(nil)
 
 // ------------------------------------------------------------------------
@@ -218,23 +255,15 @@ func TestEvaluate_DescriptionFilter_Language_Negated(t *testing.T) {
 	assert.True(t, got.Contains("73211009"))
 }
 
-func TestEvaluate_MemberFilter_NotImplemented(t *testing.T) {
+func TestEvaluate_MemberFilter(t *testing.T) {
 	p := newFilterFixture()
-	// A member filter uses a refset field filter inside {{ M ... }}.
-	// A member field filter on an arbitrary refset field should trigger the
-	// "member filter: not yet implemented" error from the evaluator.
 	expr, err := Parse(`^ 900000000000497000 {{ M referencedComponentId = 22298006 }}`)
 	if err != nil {
-		// If the grammar doesn't accept this exact shape, skip — the goal is
-		// to confirm that WHEN parsed, the evaluator returns a clear error.
 		t.Skipf("member filter example did not parse: %v", err)
 	}
-	_, err = Evaluate(context.Background(), expr, p)
-	require.Error(t, err)
-	assert.True(t,
-		strings.Contains(err.Error(), "not yet implemented") ||
-			strings.Contains(err.Error(), "member filter"),
-		"expected member filter not-yet-implemented error, got: %v", err)
+	got, err := Evaluate(context.Background(), expr, p)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"22298006"}, got.Slice())
 }
 
 func TestEvaluate_DialectFilter(t *testing.T) {

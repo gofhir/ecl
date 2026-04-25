@@ -716,11 +716,44 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 	}
 	descFilters, conceptFilters, memberFilters := categorizeFilters(e.Filters)
 
-	if len(memberFilters) > 0 {
-		return nil, fmt.Errorf("member filter: not yet implemented (requires refset field projection)")
-	}
-
 	result := base
+
+	if len(memberFilters) > 0 {
+		for _, mf := range memberFilters {
+			field, ok := mf.(*ast.MemberFieldFilter)
+			if !ok {
+				continue
+			}
+			var valueSet Set
+			if field.Value != nil {
+				valueSet, err = Evaluate(ctx, field.Value, provider)
+				if err != nil {
+					return nil, fmt.Errorf("evaluating member filter value: %w", err)
+				}
+			}
+			opts := MemberFilterOpts{
+				FieldName: field.FieldName,
+				Op:        field.Op,
+				ValueSet:  valueSet,
+			}
+			// Get the refset IDs from the base operand if it's a MemberOf.
+			var refsetIDs []string
+			if mo, ok := e.Operand.(*ast.MemberOf); ok {
+				refsetIDSet, innerErr := Evaluate(ctx, mo.Operand, provider)
+				if innerErr != nil {
+					return nil, fmt.Errorf("evaluating member filter refset: %w", innerErr)
+				}
+				refsetIDs = toIDSlice(refsetIDSet)
+			} else {
+				refsetIDs = toIDSlice(base)
+			}
+			filtered, innerErr := provider.RefsetMembersFiltered(ctx, refsetIDs, opts)
+			if innerErr != nil {
+				return nil, fmt.Errorf("RefsetMembersFiltered: %w", innerErr)
+			}
+			result = result.Intersect(filtered)
+		}
+	}
 
 	// Description filters — build a single DescriptionFilterOpts from all
 	// clauses, then call MatchDescription once. The result is a set of concept
