@@ -744,6 +744,28 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 		}
 	}
 
+	// Dialect filters — separate from description filters because they use
+	// a dedicated provider method.
+	for _, f := range descFilters {
+		df, ok := f.(*ast.DialectFilter)
+		if !ok {
+			continue
+		}
+		dOpts, err := buildDialectFilterOpts(ctx, df, provider)
+		if err != nil {
+			return nil, err
+		}
+		matches, err := provider.MatchDialect(ctx, result, dOpts)
+		if err != nil {
+			return nil, fmt.Errorf("MatchDialect: %w", err)
+		}
+		if df.Op == "!=" {
+			result = result.Minus(matches)
+		} else {
+			result = result.Intersect(matches)
+		}
+	}
+
 	// Concept filters — build ConceptFilterOpts and delegate (or subtract when
 	// negated).
 	if len(conceptFilters) > 0 {
@@ -827,7 +849,8 @@ func buildDescriptionFilterOpts(ctx context.Context, filters []ast.Filter, provi
 				opts.Language = x.Languages[0]
 			}
 		case *ast.DialectFilter:
-			return opts, false, fmt.Errorf("dialect filter: not yet implemented")
+			// Handled separately in evaluateFiltered.
+			continue
 		}
 	}
 	return opts, negate, nil
@@ -878,6 +901,43 @@ func buildConceptFilterOpts(ctx context.Context, filters []ast.Filter, provider 
 		}
 	}
 	return opts, negate, nil
+}
+
+// buildDialectFilterOpts converts an ast.DialectFilter into DialectFilterOpts
+// by evaluating each dialect entry's dialect and acceptability expressions.
+func buildDialectFilterOpts(ctx context.Context, df *ast.DialectFilter, provider DataProvider) (DialectFilterOpts, error) {
+	opts := DialectFilterOpts{Negate: df.Op == "!="}
+	for _, entry := range df.Dialects {
+		var dialectID string
+		if entry.Dialect != nil {
+			ids, err := Evaluate(ctx, entry.Dialect, provider)
+			if err != nil {
+				return opts, fmt.Errorf("evaluating dialect: %w", err)
+			}
+			if ids != nil && ids.Len() > 0 {
+				dialectID = ids.Slice()[0]
+			} else if ref, ok := entry.Dialect.(*ast.ConceptRef); ok {
+				dialectID = ref.ID
+			}
+		}
+		var acceptID string
+		if entry.Acceptability != nil {
+			ids, err := Evaluate(ctx, entry.Acceptability, provider)
+			if err != nil {
+				return opts, fmt.Errorf("evaluating acceptability: %w", err)
+			}
+			if ids != nil && ids.Len() > 0 {
+				acceptID = ids.Slice()[0]
+			} else if ref, ok := entry.Acceptability.(*ast.ConceptRef); ok {
+				acceptID = ref.ID
+			}
+		}
+		opts.Dialects = append(opts.Dialects, DialectEntryOpts{
+			DialectID:       dialectID,
+			AcceptabilityID: acceptID,
+		})
+	}
+	return opts, nil
 }
 
 // ---------------------------------------------------------------------------

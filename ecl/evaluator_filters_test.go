@@ -27,6 +27,7 @@ type filterTestProvider struct {
 	*testProvider
 	descriptions map[string][]testDescription // conceptID → descriptions
 	activeFlag   map[string]bool              // conceptID → active? (default true)
+	dialects     map[string]map[string][]string // dialectID → acceptabilityID → conceptIDs
 }
 
 func newFilterFixture() *filterTestProvider {
@@ -54,6 +55,12 @@ func newFilterFixture() *filterTestProvider {
 		activeFlag: map[string]bool{
 			// Mark 404684004 as inactive for the active filter test.
 			"404684004": false,
+		},
+		dialects: map[string]map[string][]string{
+			"900000000000509007": { // US English
+				"900000000000548007": {"22298006", "73211009"}, // preferred
+				"900000000000549004": {"64572001"},              // acceptable
+			},
 		},
 	}
 }
@@ -106,6 +113,41 @@ func (p *filterTestProvider) FilterConcepts(_ context.Context, concepts Set, f C
 		// DefinitionStatusID / ModuleID / EffectiveTime: fixture does not
 		// model these; any non-empty option is treated as "matches all".
 		out.m[id] = struct{}{}
+		return true
+	})
+	return out, nil
+}
+
+// MatchDialect returns concept IDs whose descriptions match the given dialect
+// filter constraints using the test fixture's dialect data.
+func (p *filterTestProvider) MatchDialect(_ context.Context, concepts Set, f DialectFilterOpts) (Set, error) {
+	out := NewSet().(*mapSet)
+	if p.dialects == nil || concepts == nil {
+		return out, nil
+	}
+	concepts.Iter(func(id string) bool {
+		for _, d := range f.Dialects {
+			if byAccept, ok := p.dialects[d.DialectID]; ok {
+				if d.AcceptabilityID == "" {
+					// Any acceptability.
+					for _, ids := range byAccept {
+						for _, cid := range ids {
+							if cid == id {
+								out.m[id] = struct{}{}
+								return true
+							}
+						}
+					}
+				} else if ids, ok := byAccept[d.AcceptabilityID]; ok {
+					for _, cid := range ids {
+						if cid == id {
+							out.m[id] = struct{}{}
+							return true
+						}
+					}
+				}
+			}
+		}
 		return true
 	})
 	return out, nil
@@ -193,4 +235,17 @@ func TestEvaluate_MemberFilter_NotImplemented(t *testing.T) {
 		strings.Contains(err.Error(), "not yet implemented") ||
 			strings.Contains(err.Error(), "member filter"),
 		"expected member filter not-yet-implemented error, got: %v", err)
+}
+
+func TestEvaluate_DialectFilter(t *testing.T) {
+	p := newFilterFixture()
+	expr, err := Parse(`<< 404684003 {{ dialect = 900000000000509007 }}`)
+	if err != nil {
+		t.Skipf("parser does not accept dialect filter syntax: %v", err)
+	}
+	got, err := Evaluate(context.Background(), expr, p)
+	require.NoError(t, err)
+	assert.True(t, got.Contains("22298006"))
+	assert.True(t, got.Contains("73211009"))
+	assert.True(t, got.Contains("64572001"))
 }
