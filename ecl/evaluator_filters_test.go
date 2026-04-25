@@ -11,7 +11,7 @@ import (
 
 // ------------------------------------------------------------------------
 // Phase 4 — Filter constraints: {{ term = "..." }}, {{ active = true }} ...
-// ------------------------------------------------------------------------
+// ------------------------------------------------------------------------.
 
 // testDescription is a minimal description row used by filterTestProvider.
 type testDescription struct {
@@ -93,7 +93,7 @@ func (p *filterTestProvider) MatchDescription(_ context.Context, f DescriptionFi
 }
 
 // FilterConcepts applies concept-level filters (active flag only — module /
-// definitionStatus / effectiveTime are not modelled in the fixture).
+// definitionStatus / effectiveTime are not modeled in the fixture).
 func (p *filterTestProvider) FilterConcepts(_ context.Context, concepts Set, f ConceptFilterOpts) (Set, error) {
 	out := NewSet().(*mapSet)
 	if concepts == nil {
@@ -115,7 +115,7 @@ var _ DataProvider = (*filterTestProvider)(nil)
 
 // ------------------------------------------------------------------------
 // Tests
-// ------------------------------------------------------------------------
+// ------------------------------------------------------------------------.
 
 func TestEvaluate_DescriptionFilter_Term(t *testing.T) {
 	p := newFilterFixture()

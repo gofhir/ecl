@@ -33,15 +33,15 @@ func (m *mockProvider) AllConcepts(_ context.Context) (Set, error) {
 	return NewSet(), nil
 }
 
-func (m *mockProvider) RelationshipTargets(_ context.Context, _ Set, _ Set) (Set, error) {
+func (m *mockProvider) RelationshipTargets(_ context.Context, _, _ Set) (Set, error) {
 	return NewSet(), nil
 }
 
-func (m *mockProvider) RelationshipSources(_ context.Context, _ Set, _ Set) (Set, error) {
+func (m *mockProvider) RelationshipSources(_ context.Context, _, _ Set) (Set, error) {
 	return NewSet(), nil
 }
 
-func (m *mockProvider) ConcreteValues(_ context.Context, _ string, _ string) ([]ConcreteValue, error) {
+func (m *mockProvider) ConcreteValues(_ context.Context, _, _ string) ([]ConcreteValue, error) {
 	return nil, nil
 }
 
@@ -70,7 +70,7 @@ var _ DataProvider = (*mockProvider)(nil)
 
 // TestDataProviderCompiles verifies the DataProvider interface is satisfiable.
 // Real behavioral tests come with the evaluator in later phases.
-func TestDataProviderCompiles(t *testing.T) {
+func TestDataProviderCompiles(_ *testing.T) {
 	var p DataProvider = &mockProvider{}
 	_ = p
 }

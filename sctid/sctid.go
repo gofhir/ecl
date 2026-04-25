@@ -1,3 +1,4 @@
+// Package sctid validates SNOMED CT identifiers (SCTIDs) including Verhoeff checksum and partition rules.
 package sctid
 
 // Verhoeff multiplication table (d).

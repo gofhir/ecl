@@ -21,9 +21,9 @@ func TestIsValid(t *testing.T) {
 
 	invalid := []string{
 		"",
-		"12345",              // too short
+		"12345", // too short
 		"abc",
-		"404684004",          // wrong check digit
+		"404684004",           // wrong check digit
 		"0000000000000000000", // too long (19 digits)
 	}
 	for _, id := range invalid {

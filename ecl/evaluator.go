@@ -1,3 +1,5 @@
+// Package ecl parses and evaluates SNOMED CT Expression Constraint Language (ECL) expressions
+// against a pluggable DataProvider that supplies the underlying terminology.
 package ecl
 
 import (
@@ -29,7 +31,6 @@ func Evaluate(ctx context.Context, expr ast.Expression, provider DataProvider) (
 	}
 
 	switch e := expr.(type) {
-
 	// ── Primitives ───────────────────────────────────────────────────────
 
 	case *ast.ConceptRef:
@@ -238,7 +239,7 @@ func toIDSlice(s Set) []string {
 
 // ---------------------------------------------------------------------------
 // Refinement evaluation (Phase 3.3 + 3.4)
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
 // applyRefinement filters focus by evaluating a refinement.
 //
@@ -369,7 +370,7 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 	}
 
 	// Forward attribute: iterate per-concept via PropertiesByGroup.
-	out := NewSet().(*mapSet)
+	out := newMapSet()
 	var iterErr error
 	focus.Iter(func(id string) bool {
 		match, err := conceptMatchesAttribute(ctx, id, typeIDs, valueSet, valueIsAny, provider)
@@ -462,7 +463,7 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 		clauses = append(clauses, c)
 	}
 
-	out := NewSet().(*mapSet)
+	out := newMapSet()
 	var iterErr error
 	focus.Iter(func(id string) bool {
 		groups, err := provider.PropertiesByGroup(ctx, id)
@@ -539,7 +540,7 @@ func isDefaultCardinality(c *ast.Cardinality) bool {
 
 // ---------------------------------------------------------------------------
 // Filtered constraints (Phase 4)
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
 // evaluateFiltered evaluates a *ast.Filtered by:
 //  1. evaluating the operand to a base set,
@@ -712,7 +713,7 @@ func buildConceptFilterOpts(ctx context.Context, filters []ast.Filter, provider 
 
 // ---------------------------------------------------------------------------
 // Concrete value comparisons (Phase 5.2)
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
 // isConcreteValue reports whether an Attribute.Value is a concrete literal
 // (integer, decimal, string, or boolean) rather than a concept-valued
@@ -787,7 +788,7 @@ func filterByConcreteValue(ctx context.Context, focus Set, attr *ast.Attribute, 
 
 	typeIDList := typeIDs.Slice()
 
-	out := NewSet().(*mapSet)
+	out := newMapSet()
 	var iterErr error
 	focus.Iter(func(id string) bool {
 		matched := false
@@ -852,7 +853,7 @@ func compareFloat(a float64, op string, b float64) bool {
 
 // ---------------------------------------------------------------------------
 // Top / Bottom of set (Phase 6.1, v2.2)
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
 // topOfSet returns the concepts in baseSet that have no parent in baseSet
 // (i.e. the roots of the sub-graph induced by baseSet).
@@ -860,7 +861,7 @@ func topOfSet(ctx context.Context, baseSet Set, provider DataProvider) (Set, err
 	if baseSet == nil || baseSet.Len() == 0 {
 		return baseSet, nil
 	}
-	out := NewSet().(*mapSet)
+	out := newMapSet()
 	var iterErr error
 	baseSet.Iter(func(id string) bool {
 		parents, err := provider.Parents(ctx, []string{id}, false)
@@ -885,7 +886,7 @@ func bottomOfSet(ctx context.Context, baseSet Set, provider DataProvider) (Set, 
 	if baseSet == nil || baseSet.Len() == 0 {
 		return baseSet, nil
 	}
-	out := NewSet().(*mapSet)
+	out := newMapSet()
 	var iterErr error
 	baseSet.Iter(func(id string) bool {
 		children, err := provider.Children(ctx, []string{id}, false)

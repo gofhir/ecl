@@ -103,7 +103,7 @@ func TestSet_Iter_All(t *testing.T) {
 func TestSet_Iter_EarlyExit(t *testing.T) {
 	s := NewSetFromSlice([]string{"a", "b", "c", "d", "e"})
 	count := 0
-	s.Iter(func(id string) bool {
+	s.Iter(func(_ string) bool {
 		count++
 		return count < 2 // stop after the second element
 	})

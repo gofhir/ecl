@@ -10,7 +10,7 @@ import (
 
 // ------------------------------------------------------------------------
 // Phase 3.3 — Ungrouped refinement ( : attr = value )
-// ------------------------------------------------------------------------
+// ------------------------------------------------------------------------.
 
 func TestEvaluate_SimpleRefinement_Eq(t *testing.T) {
 	p := newFixture()
@@ -53,7 +53,7 @@ func TestEvaluate_Refinement_MultipleAttrs_AND(t *testing.T) {
 
 // ------------------------------------------------------------------------
 // Phase 3.4 — Grouped refinement ( : { a = v1, b = v2 } )
-// ------------------------------------------------------------------------
+// ------------------------------------------------------------------------.
 
 func TestEvaluate_GroupedRefinement(t *testing.T) {
 	p := newFixture()
@@ -82,8 +82,8 @@ func TestEvaluate_GroupedRefinement_SingleAttr(t *testing.T) {
 }
 
 // ------------------------------------------------------------------------
-// Phase 3.5 — Dot notation ( X . attr )
-// ------------------------------------------------------------------------
+// Phase 3.5 — Dot notation ( X . Attr )
+// ------------------------------------------------------------------------.
 
 func TestEvaluate_DotExpression_Simple(t *testing.T) {
 	p := newFixture()
@@ -118,7 +118,7 @@ func TestEvaluate_DotExpression_NoMatchingAttribute(t *testing.T) {
 
 // ------------------------------------------------------------------------
 // Reverse attribute
-// ------------------------------------------------------------------------
+// ------------------------------------------------------------------------.
 
 func TestEvaluate_Refinement_Reverse(t *testing.T) {
 	p := newFixture()
@@ -134,7 +134,7 @@ func TestEvaluate_Refinement_Reverse(t *testing.T) {
 
 // ------------------------------------------------------------------------
 // Error handling / deferred features
-// ------------------------------------------------------------------------
+// ------------------------------------------------------------------------.
 
 // Concrete-value comparisons are implemented in Phase 5.2. When no concept in
 // the focus set has a matching concrete value, the result is an empty set (no

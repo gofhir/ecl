@@ -11,7 +11,7 @@ import (
 
 // ------------------------------------------------------------------------
 // Phase 5.1 — History supplements
-// ------------------------------------------------------------------------
+// ------------------------------------------------------------------------.
 
 func TestEvaluate_HistorySupplement(t *testing.T) {
 	p := newFixture()
@@ -44,7 +44,7 @@ func TestEvaluate_HistorySupplement_Profile(t *testing.T) {
 
 // ------------------------------------------------------------------------
 // Phase 5.2 — Concrete value comparisons
-// ------------------------------------------------------------------------
+// ------------------------------------------------------------------------.
 
 func TestEvaluate_ConcreteValueEq(t *testing.T) {
 	p := newFixture()
@@ -88,7 +88,7 @@ func TestEvaluate_ConcreteValueNeq(t *testing.T) {
 
 // ------------------------------------------------------------------------
 // Phase 6.1 — v2.2: Top / Bottom of set
-// ------------------------------------------------------------------------
+// ------------------------------------------------------------------------.
 
 func TestEvaluate_TopOfSet(t *testing.T) {
 	p := newFixture()
@@ -119,7 +119,7 @@ func TestEvaluate_TopOfSet_Singleton(t *testing.T) {
 
 // ------------------------------------------------------------------------
 // Phase 6.1 — v2.2: RefsetContainingAny (^R)
-// ------------------------------------------------------------------------
+// ------------------------------------------------------------------------.
 
 func TestEvaluate_RefsetContainingAny(t *testing.T) {
 	p := newFixture()
@@ -137,7 +137,7 @@ func TestEvaluate_RefsetContainingAny(t *testing.T) {
 
 // ------------------------------------------------------------------------
 // Phase 6.1 — v2.2: AltIdentifier (deferred)
-// ------------------------------------------------------------------------
+// ------------------------------------------------------------------------.
 
 // TestEvaluate_AltIdentifier_NotImplemented confirms that alternate
 // identifiers parse but the evaluator returns a clear "not yet implemented"

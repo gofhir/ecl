@@ -34,6 +34,11 @@ type mapSet struct {
 
 // NewSet creates an empty Set.
 func NewSet() Set {
+	return newMapSet()
+}
+
+// newMapSet creates an empty *mapSet for internal use where the concrete type is needed.
+func newMapSet() *mapSet {
 	return &mapSet{m: make(map[string]struct{})}
 }
 

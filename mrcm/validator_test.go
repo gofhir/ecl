@@ -120,7 +120,7 @@ func (s *stubProvider) HistoricalAssociations(_ context.Context, _ ecl.Set, _ st
 //   363698007 (Finding site)
 //     domain: << 404684003   grouped=true   cardinality=0..*  inGroup=0..1
 //     range:  << 442083009
-// ------------------------------------------------------------------------
+// ------------------------------------------------------------------------.
 
 func newTestProvider() *stubProvider {
 	return &stubProvider{
@@ -172,7 +172,7 @@ func mustParseSCG(t *testing.T, s string) *scg.Expression {
 
 // ------------------------------------------------------------------------
 // Tests
-// ------------------------------------------------------------------------
+// ------------------------------------------------------------------------.
 
 func TestValidate_ValidExpression(t *testing.T) {
 	// Focus 22298006 is in << 404684003 ✓, value 74281007 is in << 442083009 ✓.

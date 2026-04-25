@@ -34,7 +34,7 @@ type testProvider struct {
 	concreteValues map[string]map[string][]ConcreteValue
 }
 
-// Hierarchy --------------------------------------------------------------
+// Hierarchy --------------------------------------------------------------.
 
 func (p *testProvider) Descendants(_ context.Context, conceptIDs []string, includeSelf bool) (Set, error) {
 	out := NewSet().(*mapSet)
@@ -88,7 +88,7 @@ func (p *testProvider) Parents(_ context.Context, conceptIDs []string, includeSe
 	return out, nil
 }
 
-// Concepts ---------------------------------------------------------------
+// Concepts ---------------------------------------------------------------.
 
 func (p *testProvider) ConceptExists(_ context.Context, conceptIDs []string) (Set, error) {
 	out := NewSet().(*mapSet)
@@ -104,7 +104,7 @@ func (p *testProvider) AllConcepts(_ context.Context) (Set, error) {
 	return NewSetFromSlice(p.all), nil
 }
 
-// Refsets ----------------------------------------------------------------
+// Refsets ----------------------------------------------------------------.
 
 func (p *testProvider) RefsetMembers(_ context.Context, refsetIDs []string) (Set, error) {
 	out := NewSet().(*mapSet)
@@ -116,9 +116,9 @@ func (p *testProvider) RefsetMembers(_ context.Context, refsetIDs []string) (Set
 	return out, nil
 }
 
-// Relationships (Phase 3.3 – 3.5) ---------------------------------------
+// Relationships (Phase 3.3 – 3.5) ---------------------------------------.
 
-func (p *testProvider) RelationshipTargets(_ context.Context, sourceIDs Set, typeIDs Set) (Set, error) {
+func (p *testProvider) RelationshipTargets(_ context.Context, sourceIDs, typeIDs Set) (Set, error) {
 	out := NewSet().(*mapSet)
 	if sourceIDs == nil || typeIDs == nil {
 		return out, nil
@@ -134,7 +134,7 @@ func (p *testProvider) RelationshipTargets(_ context.Context, sourceIDs Set, typ
 	return out, nil
 }
 
-func (p *testProvider) RelationshipSources(_ context.Context, targetIDs Set, typeIDs Set) (Set, error) {
+func (p *testProvider) RelationshipSources(_ context.Context, targetIDs, typeIDs Set) (Set, error) {
 	out := NewSet().(*mapSet)
 	if targetIDs == nil || typeIDs == nil {
 		return out, nil
@@ -165,9 +165,9 @@ func (p *testProvider) PropertiesByGroup(_ context.Context, conceptID string) (m
 	return groups, nil
 }
 
-// Concrete values / history (Phase 5) -----------------------------------
+// Concrete values / history (Phase 5) -----------------------------------.
 
-func (p *testProvider) ConcreteValues(_ context.Context, sourceID string, typeID string) ([]ConcreteValue, error) {
+func (p *testProvider) ConcreteValues(_ context.Context, sourceID, typeID string) ([]ConcreteValue, error) {
 	if p.concreteValues == nil {
 		return nil, nil
 	}
@@ -191,7 +191,7 @@ func (p *testProvider) HistoricalAssociations(_ context.Context, conceptIDs Set,
 	return out, nil
 }
 
-// Stubs (not exercised by Phase 3 – 5 tests) -----------------------------
+// Stubs (not exercised by Phase 3 – 5 tests) -----------------------------.
 
 func (p *testProvider) MatchDescription(_ context.Context, _ DescriptionFilterOpts) (Set, error) {
 	return NewSet(), nil
@@ -213,7 +213,7 @@ var _ DataProvider = (*testProvider)(nil)
 //   (MI)         /        \
 //             73211009    404684004 (other)
 //             (diabetes)
-// ------------------------------------------------------------------------
+// ------------------------------------------------------------------------.
 
 func newFixture() *testProvider {
 	return &testProvider{
@@ -250,8 +250,8 @@ func newFixture() *testProvider {
 			"404684004":          true,
 			"900000000000497000": true, // refset concept itself exists
 			// attribute type and target concepts used in relationship tests
-			"363698007": true, // Finding site (attribute type)
-			"116676008": true, // Associated morphology (attribute type)
+			"363698007":  true, // Finding site (attribute type)
+			"116676008":  true, // Associated morphology (attribute type)
 			"74281007":   true, // Myocardium (target)
 			"55641003":   true, // Infarct (target)
 			"113331007":  true, // Endocrine system (target)
@@ -309,7 +309,7 @@ func evalECL(t *testing.T, ecl string, p DataProvider) Set {
 
 // ------------------------------------------------------------------------
 // Tests
-// ------------------------------------------------------------------------
+// ------------------------------------------------------------------------.
 
 func TestEvaluate_ConceptRef(t *testing.T) {
 	p := newFixture()
@@ -422,4 +422,3 @@ func TestEvaluate_Nested(t *testing.T) {
 		[]string{"64572001", "73211009", "404684004"},
 		got.Slice())
 }
-

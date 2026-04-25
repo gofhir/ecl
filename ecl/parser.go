@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/antlr4-go/antlr/v4"
+
 	"github.com/gofhir/ecl/ecl/ast"
 	"github.com/gofhir/ecl/ecl/grammar"
 )
@@ -36,27 +37,27 @@ func Parse(input string) (ast.Expression, error) {
 
 // ---------------------------------------------------------------------------
 // Error listener
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
 type eclErrorListener struct {
 	antlr.DefaultErrorListener
 	err error
 }
 
-func (l *eclErrorListener) SyntaxError(_ antlr.Recognizer, _ interface{}, line, column int, msg string, _ antlr.RecognitionException) {
+func (l *eclErrorListener) SyntaxError(_ antlr.Recognizer, _ any, line, column int, msg string, _ antlr.RecognitionException) {
 	l.err = fmt.Errorf("syntax error at %d:%d: %s", line, column, msg)
 }
 
 // ---------------------------------------------------------------------------
 // AST builder visitor
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
 type astBuilder struct {
 	grammar.BaseECLVisitor
 }
 
 // Visit dispatches to the correct typed Visit method via the Accept pattern.
-func (v *astBuilder) Visit(tree antlr.ParseTree) interface{} {
+func (v *astBuilder) Visit(tree antlr.ParseTree) any {
 	if tree == nil {
 		return nil
 	}
@@ -77,9 +78,9 @@ func (v *astBuilder) visitExpr(tree antlr.ParseTree) ast.Expression {
 
 // ---------------------------------------------------------------------------
 // Top-level expression
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
-func (v *astBuilder) VisitExpressionconstraint(ctx *grammar.ExpressionconstraintContext) interface{} {
+func (v *astBuilder) VisitExpressionconstraint(ctx *grammar.ExpressionconstraintContext) any {
 	if c := ctx.Refinedexpressionconstraint(); c != nil {
 		return v.Visit(c)
 	}
@@ -97,9 +98,9 @@ func (v *astBuilder) VisitExpressionconstraint(ctx *grammar.Expressionconstraint
 
 // ---------------------------------------------------------------------------
 // Compound expressions (AND / OR / MINUS)
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
-func (v *astBuilder) VisitCompoundexpressionconstraint(ctx *grammar.CompoundexpressionconstraintContext) interface{} {
+func (v *astBuilder) VisitCompoundexpressionconstraint(ctx *grammar.CompoundexpressionconstraintContext) any {
 	if c := ctx.Conjunctionexpressionconstraint(); c != nil {
 		return v.Visit(c)
 	}
@@ -112,7 +113,7 @@ func (v *astBuilder) VisitCompoundexpressionconstraint(ctx *grammar.Compoundexpr
 	return nil
 }
 
-func (v *astBuilder) VisitConjunctionexpressionconstraint(ctx *grammar.ConjunctionexpressionconstraintContext) interface{} {
+func (v *astBuilder) VisitConjunctionexpressionconstraint(ctx *grammar.ConjunctionexpressionconstraintContext) any {
 	subs := ctx.AllSubexpressionconstraint()
 	if len(subs) == 0 {
 		return nil
@@ -124,7 +125,7 @@ func (v *astBuilder) VisitConjunctionexpressionconstraint(ctx *grammar.Conjuncti
 	return result
 }
 
-func (v *astBuilder) VisitDisjunctionexpressionconstraint(ctx *grammar.DisjunctionexpressionconstraintContext) interface{} {
+func (v *astBuilder) VisitDisjunctionexpressionconstraint(ctx *grammar.DisjunctionexpressionconstraintContext) any {
 	subs := ctx.AllSubexpressionconstraint()
 	if len(subs) == 0 {
 		return nil
@@ -136,7 +137,7 @@ func (v *astBuilder) VisitDisjunctionexpressionconstraint(ctx *grammar.Disjuncti
 	return result
 }
 
-func (v *astBuilder) VisitExclusionexpressionconstraint(ctx *grammar.ExclusionexpressionconstraintContext) interface{} {
+func (v *astBuilder) VisitExclusionexpressionconstraint(ctx *grammar.ExclusionexpressionconstraintContext) any {
 	subs := ctx.AllSubexpressionconstraint()
 	if len(subs) < 2 {
 		return nil
@@ -149,9 +150,9 @@ func (v *astBuilder) VisitExclusionexpressionconstraint(ctx *grammar.Exclusionex
 
 // ---------------------------------------------------------------------------
 // Refined expression
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
-func (v *astBuilder) VisitRefinedexpressionconstraint(ctx *grammar.RefinedexpressionconstraintContext) interface{} {
+func (v *astBuilder) VisitRefinedexpressionconstraint(ctx *grammar.RefinedexpressionconstraintContext) any {
 	focus := v.visitExpr(ctx.Subexpressionconstraint())
 	refinement := v.visitRefinement(ctx.Eclrefinement())
 	return &ast.Refined{
@@ -162,9 +163,9 @@ func (v *astBuilder) VisitRefinedexpressionconstraint(ctx *grammar.Refinedexpres
 
 // ---------------------------------------------------------------------------
 // Dotted expression
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
-func (v *astBuilder) VisitDottedexpressionconstraint(ctx *grammar.DottedexpressionconstraintContext) interface{} {
+func (v *astBuilder) VisitDottedexpressionconstraint(ctx *grammar.DottedexpressionconstraintContext) any {
 	result := v.visitExpr(ctx.Subexpressionconstraint())
 	for _, dattr := range ctx.AllDottedexpressionattribute() {
 		attrName := v.visitDottedExpressionAttribute(dattr)
@@ -191,7 +192,7 @@ func (v *astBuilder) visitDottedExpressionAttribute(ctx grammar.IDottedexpressio
 	return v.visitExpr(nameCtx)
 }
 
-func (v *astBuilder) VisitDottedexpressionattribute(ctx *grammar.DottedexpressionattributeContext) interface{} {
+func (v *astBuilder) VisitDottedexpressionattribute(ctx *grammar.DottedexpressionattributeContext) any {
 	if ctx.Eclattributename() != nil {
 		return v.Visit(ctx.Eclattributename())
 	}
@@ -200,9 +201,9 @@ func (v *astBuilder) VisitDottedexpressionattribute(ctx *grammar.Dottedexpressio
 
 // ---------------------------------------------------------------------------
 // Sub-expression constraint (the workhorse)
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
-func (v *astBuilder) VisitSubexpressionconstraint(ctx *grammar.SubexpressionconstraintContext) interface{} {
+func (v *astBuilder) VisitSubexpressionconstraint(ctx *grammar.SubexpressionconstraintContext) any {
 	// 1. Determine the focus concept or nested expression
 	var focusExpr ast.Expression
 
@@ -241,7 +242,10 @@ func (v *astBuilder) VisitSubexpressionconstraint(ctx *grammar.Subexpressioncons
 	// 4. Apply description/concept/member filter constraints. Each constraint
 	// can contain multiple sub-clauses (term, type, language, active, module,
 	// etc.) which we extract into typed ast.Filter nodes.
-	var filters []ast.Filter
+	filters := make([]ast.Filter, 0,
+		len(ctx.AllDescriptionfilterconstraint())+
+			len(ctx.AllConceptfilterconstraint())+
+			len(ctx.AllMemberfilterconstraint()))
 	for _, fc := range ctx.AllDescriptionfilterconstraint() {
 		filters = append(filters, v.buildDescriptionFilterClauses(fc)...)
 	}
@@ -306,9 +310,9 @@ func (v *astBuilder) applyConstraintOperator(ctx grammar.IConstraintoperatorCont
 
 // ---------------------------------------------------------------------------
 // Focus concept
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
-func (v *astBuilder) VisitEclfocusconcept(ctx *grammar.EclfocusconceptContext) interface{} {
+func (v *astBuilder) VisitEclfocusconcept(ctx *grammar.EclfocusconceptContext) any {
 	if ctx.Eclconceptreference() != nil {
 		return v.Visit(ctx.Eclconceptreference())
 	}
@@ -321,7 +325,7 @@ func (v *astBuilder) VisitEclfocusconcept(ctx *grammar.EclfocusconceptContext) i
 	return nil
 }
 
-func (v *astBuilder) VisitEclconceptreference(ctx *grammar.EclconceptreferenceContext) interface{} {
+func (v *astBuilder) VisitEclconceptreference(ctx *grammar.EclconceptreferenceContext) any {
 	ref := &ast.ConceptRef{}
 	if ctx.Conceptid() != nil {
 		ref.ID = ctx.Conceptid().GetText()
@@ -332,7 +336,7 @@ func (v *astBuilder) VisitEclconceptreference(ctx *grammar.EclconceptreferenceCo
 	return ref
 }
 
-func (v *astBuilder) VisitWildcard(_ *grammar.WildcardContext) interface{} {
+func (v *astBuilder) VisitWildcard(_ *grammar.WildcardContext) any {
 	return &ast.Any{}
 }
 
@@ -404,7 +408,7 @@ func (v *astBuilder) buildDescriptionFilterClauses(fc grammar.IDescriptionfilter
 			}
 			continue
 		}
-		// descriptionidfilter not modelled — skip.
+		// descriptionidfilter not modeled — skip.
 	}
 	return out
 }
@@ -495,7 +499,7 @@ func (v *astBuilder) buildMemberFilterClauses(fc grammar.IMemberfilterconstraint
 	return out
 }
 
-// --- Individual clause builders ---------------------------------------------
+// --- Individual clause builders ---------------------------------------------.
 
 func (v *astBuilder) buildTermFilter(ctx grammar.ITermfilterContext) *ast.TermFilter {
 	concrete, ok := ctx.(*grammar.TermfilterContext)
@@ -822,7 +826,7 @@ func (v *astBuilder) buildMemberFieldFilter(ctx grammar.IMemberfieldfilterContex
 	return f
 }
 
-func (v *astBuilder) VisitAltidentifier(ctx *grammar.AltidentifierContext) interface{} {
+func (v *astBuilder) VisitAltidentifier(ctx *grammar.AltidentifierContext) any {
 	alt := &ast.AltIdentifier{}
 	if ctx.Altidentifierschemealias() != nil {
 		alt.Scheme = ctx.Altidentifierschemealias().GetText()
@@ -840,9 +844,9 @@ func (v *astBuilder) VisitAltidentifier(ctx *grammar.AltidentifierContext) inter
 
 // ---------------------------------------------------------------------------
 // Eclattributename — delegates to subexpressionconstraint
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
-func (v *astBuilder) VisitEclattributename(ctx *grammar.EclattributenameContext) interface{} {
+func (v *astBuilder) VisitEclattributename(ctx *grammar.EclattributenameContext) any {
 	if ctx.Subexpressionconstraint() != nil {
 		return v.Visit(ctx.Subexpressionconstraint())
 	}
@@ -851,7 +855,7 @@ func (v *astBuilder) VisitEclattributename(ctx *grammar.EclattributenameContext)
 
 // ---------------------------------------------------------------------------
 // Refinement
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
 func (v *astBuilder) visitRefinement(ctx grammar.IEclrefinementContext) *ast.Refinement {
 	if ctx == nil {
@@ -889,7 +893,7 @@ func (v *astBuilder) visitRefinement(ctx grammar.IEclrefinementContext) *ast.Ref
 	return ref
 }
 
-func (v *astBuilder) VisitEclrefinement(ctx *grammar.EclrefinementContext) interface{} {
+func (v *astBuilder) VisitEclrefinement(ctx *grammar.EclrefinementContext) any {
 	return v.visitRefinement(ctx)
 }
 
@@ -901,15 +905,16 @@ func (v *astBuilder) collectSubrefinement(ctx grammar.ISubrefinementContext, ref
 	if !ok {
 		return
 	}
-	if concrete.Eclattributegroup() != nil {
+	switch {
+	case concrete.Eclattributegroup() != nil:
 		grp := v.visitAttributeGroup(concrete.Eclattributegroup())
 		if grp != nil {
 			ref.Groups = append(ref.Groups, grp)
 		}
-	} else if concrete.Eclattributeset() != nil {
+	case concrete.Eclattributeset() != nil:
 		attrs := v.collectAttributes(concrete.Eclattributeset())
 		ref.Ungrouped = append(ref.Ungrouped, attrs...)
-	} else if concrete.Eclrefinement() != nil {
+	case concrete.Eclrefinement() != nil:
 		// Nested refinement in parentheses
 		inner := v.visitRefinement(concrete.Eclrefinement())
 		if inner != nil {
@@ -923,7 +928,7 @@ func (v *astBuilder) collectSubrefinement(ctx grammar.ISubrefinementContext, ref
 
 // ---------------------------------------------------------------------------
 // Attribute group
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
 func (v *astBuilder) visitAttributeGroup(ctx grammar.IEclattributegroupContext) *ast.AttributeGroup {
 	if ctx == nil {
@@ -946,13 +951,13 @@ func (v *astBuilder) visitAttributeGroup(ctx grammar.IEclattributegroupContext) 
 	return grp
 }
 
-func (v *astBuilder) VisitEclattributegroup(ctx *grammar.EclattributegroupContext) interface{} {
+func (v *astBuilder) VisitEclattributegroup(ctx *grammar.EclattributegroupContext) any {
 	return v.visitAttributeGroup(ctx)
 }
 
 // ---------------------------------------------------------------------------
 // Attribute set — collects all attributes (possibly with conjunction/disjunction)
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
 func (v *astBuilder) collectAttributes(ctx grammar.IEclattributesetContext) []*ast.Attribute {
 	if ctx == nil {
@@ -1008,13 +1013,13 @@ func (v *astBuilder) collectSubAttributes(ctx grammar.ISubattributesetContext) [
 	return nil
 }
 
-func (v *astBuilder) VisitEclattributeset(ctx *grammar.EclattributesetContext) interface{} {
+func (v *astBuilder) VisitEclattributeset(ctx *grammar.EclattributesetContext) any {
 	return v.collectAttributes(ctx)
 }
 
 // ---------------------------------------------------------------------------
 // Single attribute
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
 func (v *astBuilder) visitAttribute(ctx grammar.IEclattributeContext) *ast.Attribute {
 	if ctx == nil {
@@ -1080,13 +1085,13 @@ func (v *astBuilder) visitAttribute(ctx grammar.IEclattributeContext) *ast.Attri
 	return attr
 }
 
-func (v *astBuilder) VisitEclattribute(ctx *grammar.EclattributeContext) interface{} {
+func (v *astBuilder) VisitEclattribute(ctx *grammar.EclattributeContext) any {
 	return v.visitAttribute(ctx)
 }
 
 // ---------------------------------------------------------------------------
 // Cardinality
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
 func (v *astBuilder) visitCardinality(ctx grammar.ICardinalityContext) *ast.Cardinality {
 	if ctx == nil {
@@ -1111,13 +1116,13 @@ func (v *astBuilder) visitCardinality(ctx grammar.ICardinalityContext) *ast.Card
 	return card
 }
 
-func (v *astBuilder) VisitCardinality(ctx *grammar.CardinalityContext) interface{} {
+func (v *astBuilder) VisitCardinality(ctx *grammar.CardinalityContext) any {
 	return v.visitCardinality(ctx)
 }
 
 // ---------------------------------------------------------------------------
 // Concrete values
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
 func (v *astBuilder) visitNumericValue(ctx grammar.INumericvalueContext) ast.Expression {
 	if ctx == nil {
@@ -1168,7 +1173,7 @@ func (v *astBuilder) visitBooleanValue(ctx grammar.IBooleanvalueContext) ast.Exp
 
 // ---------------------------------------------------------------------------
 // History supplement
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
 func (v *astBuilder) visitHistorySupplement(ctx grammar.IHistorysupplementContext, operand ast.Expression) ast.Expression {
 	if ctx == nil {
@@ -1182,11 +1187,12 @@ func (v *astBuilder) visitHistorySupplement(ctx grammar.IHistorysupplementContex
 
 	if concrete.Historyprofilesuffix() != nil {
 		suffix := concrete.Historyprofilesuffix().(*grammar.HistoryprofilesuffixContext)
-		if suffix.Historyminimumsuffix() != nil {
+		switch {
+		case suffix.Historyminimumsuffix() != nil:
 			hs.Profile = "HISTORY-MIN"
-		} else if suffix.Historymoderatesuffix() != nil {
+		case suffix.Historymoderatesuffix() != nil:
 			hs.Profile = "HISTORY-MOD"
-		} else if suffix.Historymaximumsuffix() != nil {
+		case suffix.Historymaximumsuffix() != nil:
 			hs.Profile = "HISTORY-MAX"
 		}
 	}
@@ -1194,7 +1200,7 @@ func (v *astBuilder) visitHistorySupplement(ctx grammar.IHistorysupplementContex
 	return hs
 }
 
-func (v *astBuilder) VisitHistorysupplement(ctx *grammar.HistorysupplementContext) interface{} {
+func (v *astBuilder) VisitHistorysupplement(ctx *grammar.HistorysupplementContext) any {
 	// This is typically called from visitHistorySupplement with an operand.
 	// If called standalone, wrap with nil operand.
 	return v.visitHistorySupplement(ctx, nil)
@@ -1202,7 +1208,7 @@ func (v *astBuilder) VisitHistorysupplement(ctx *grammar.HistorysupplementContex
 
 // ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------.
 
 // extractComparisonOp normalises the raw token text to a comparison operator string.
 func (v *astBuilder) extractComparisonOp(text string) string {

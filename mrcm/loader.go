@@ -142,27 +142,27 @@ func parseCardinality(s string) (Cardinality, error) {
 	minStr := strings.TrimSpace(parts[0])
 	maxStr := strings.TrimSpace(parts[1])
 
-	min, err := strconv.Atoi(minStr)
+	minVal, err := strconv.Atoi(minStr)
 	if err != nil {
 		return Cardinality{}, fmt.Errorf("invalid cardinality min %q: %w", minStr, err)
 	}
-	if min < 0 {
-		return Cardinality{}, fmt.Errorf("cardinality min must be >= 0, got %d", min)
+	if minVal < 0 {
+		return Cardinality{}, fmt.Errorf("cardinality min must be >= 0, got %d", minVal)
 	}
 
-	var max int
+	var maxVal int
 	if maxStr == "*" {
-		max = -1
+		maxVal = -1
 	} else {
 		m, err := strconv.Atoi(maxStr)
 		if err != nil {
 			return Cardinality{}, fmt.Errorf("invalid cardinality max %q: %w", maxStr, err)
 		}
-		if m < min {
-			return Cardinality{}, fmt.Errorf("cardinality max %d less than min %d", m, min)
+		if m < minVal {
+			return Cardinality{}, fmt.Errorf("cardinality max %d less than min %d", m, minVal)
 		}
-		max = m
+		maxVal = m
 	}
 
-	return Cardinality{Min: min, Max: max}, nil
+	return Cardinality{Min: minVal, Max: maxVal}, nil
 }

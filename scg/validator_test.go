@@ -4,9 +4,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/gofhir/ecl/ecl"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gofhir/ecl/ecl"
 )
 
 // mockProvider is a tiny ecl.DataProvider used for validator tests.

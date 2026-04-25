@@ -1,3 +1,4 @@
+// Package ast defines the AST node types produced by parsing SNOMED CT ECL expressions.
 package ast
 
 // Expression is the marker interface for all ECL AST nodes.
@@ -5,7 +6,7 @@ type Expression interface {
 	eclNode()
 }
 
-// --- Hierarchy operators ---
+// --- Hierarchy operators ---.
 
 // DescendantOf represents the < constraint operator.
 type DescendantOf struct{ Operand Expression }
@@ -13,10 +14,10 @@ type DescendantOf struct{ Operand Expression }
 // DescendantOrSelfOf represents the << constraint operator.
 type DescendantOrSelfOf struct{ Operand Expression }
 
-// ChildOf represents the <! constraint operator.
+// ChildOf represents the <! Constraint operator.
 type ChildOf struct{ Operand Expression }
 
-// ChildOrSelfOf represents the <<! constraint operator.
+// ChildOrSelfOf represents the <<! Constraint operator.
 type ChildOrSelfOf struct{ Operand Expression }
 
 // AncestorOf represents the > constraint operator.
@@ -25,13 +26,13 @@ type AncestorOf struct{ Operand Expression }
 // AncestorOrSelfOf represents the >> constraint operator.
 type AncestorOrSelfOf struct{ Operand Expression }
 
-// ParentOf represents the >! constraint operator.
+// ParentOf represents the >! Constraint operator.
 type ParentOf struct{ Operand Expression }
 
-// ParentOrSelfOf represents the >>! constraint operator.
+// ParentOrSelfOf represents the >>! Constraint operator.
 type ParentOrSelfOf struct{ Operand Expression }
 
-// --- Set operators ---
+// --- Set operators ---.
 
 // And represents a conjunction (AND / ,) of two expression constraints.
 type And struct{ Left, Right Expression }
@@ -42,7 +43,7 @@ type Or struct{ Left, Right Expression }
 // Minus represents an exclusion (MINUS) of two expression constraints.
 type Minus struct{ Left, Right Expression }
 
-// --- Primitives ---
+// --- Primitives ---.
 
 // ConceptRef represents a SNOMED CT concept reference with an optional display term.
 type ConceptRef struct {
@@ -56,7 +57,7 @@ type Any struct{}
 // Nested represents a parenthesised sub-expression.
 type Nested struct{ Inner Expression }
 
-// --- MemberOf ---
+// --- MemberOf ---.
 
 // MemberOf represents the ^ (member of) refset operator.
 type MemberOf struct {
@@ -64,20 +65,20 @@ type MemberOf struct {
 	Fields  []string // optional field names from ^[field1,field2]
 }
 
-// --- RefsetContainingAny ---
+// --- RefsetContainingAny ---.
 
 // RefsetContainingAny represents the ^R operator.
 type RefsetContainingAny struct{ Operand Expression }
 
-// --- Dot notation ---
+// --- Dot notation ---.
 
-// DotExpression represents attribute navigation via the dot (.) operator.
+// DotExpression represents attribute navigation via the dot (.) Operator.
 type DotExpression struct {
 	Source    Expression
 	Attribute Expression
 }
 
-// --- Refinements ---
+// --- Refinements ---.
 
 // Refined represents an expression constraint with a colon-separated refinement.
 type Refined struct {
@@ -114,7 +115,7 @@ type Cardinality struct {
 	Max int // -1 = unbounded (*)
 }
 
-// --- Concrete values ---
+// --- Concrete values ---.
 
 // StringValue represents a quoted string literal in an attribute comparison.
 type StringValue struct{ Value string }
@@ -128,7 +129,7 @@ type DecimalValue struct{ Value float64 }
 // BooleanValue represents a boolean literal in an attribute comparison.
 type BooleanValue struct{ Value bool }
 
-// --- Filters ---
+// --- Filters ---.
 
 // Filtered represents an expression constraint with one or more filter constraints.
 type Filtered struct {
@@ -211,7 +212,7 @@ type MemberFieldFilter struct {
 	Value     Expression // concept ref set or expression constraint
 }
 
-// --- History supplement ---
+// --- History supplement ---.
 
 // HistorySupplement represents the {{ +HISTORY }} supplement.
 type HistorySupplement struct {
@@ -219,7 +220,7 @@ type HistorySupplement struct {
 	Profile string // "HISTORY-MIN", "HISTORY-MOD", "HISTORY-MAX", or "" for default
 }
 
-// --- v2.2 ---
+// --- v2.2 ---.
 
 // AltIdentifier represents an alternative identifier (scheme#code).
 type AltIdentifier struct {
@@ -238,58 +239,58 @@ type Bottom struct {
 	Operand Expression
 }
 
-// --- eclNode() implementations ---
+// --- eclNode() implementations ---.
 
-func (*DescendantOf) eclNode()        {}
-func (*DescendantOrSelfOf) eclNode()  {}
-func (*ChildOf) eclNode()             {}
-func (*ChildOrSelfOf) eclNode()       {}
-func (*AncestorOf) eclNode()          {}
-func (*AncestorOrSelfOf) eclNode()    {}
-func (*ParentOf) eclNode()            {}
-func (*ParentOrSelfOf) eclNode()      {}
-func (*And) eclNode()                 {}
-func (*Or) eclNode()                  {}
-func (*Minus) eclNode()               {}
-func (*ConceptRef) eclNode()          {}
-func (*Any) eclNode()                 {}
-func (*Nested) eclNode()              {}
-func (*MemberOf) eclNode()            {}
-func (*RefsetContainingAny) eclNode() {}
-func (*DotExpression) eclNode()       {}
-func (*Refined) eclNode()             {}
-func (*Refinement) eclNode()          {}
-func (*AttributeGroup) eclNode()      {}
-func (*Attribute) eclNode()           {}
-func (*Cardinality) eclNode()         {}
-func (*StringValue) eclNode()         {}
-func (*IntegerValue) eclNode()        {}
-func (*DecimalValue) eclNode()        {}
-func (*BooleanValue) eclNode()        {}
-func (*Filtered) eclNode()            {}
-func (*TermFilter) eclNode()          {}
-func (*TypeFilter) eclNode()          {}
-func (*LanguageFilter) eclNode()      {}
-func (*DialectFilter) eclNode()       {}
-func (*DialectEntry) eclNode()        {}
-func (*ActiveFilter) eclNode()        {}
-func (*ModuleFilter) eclNode()        {}
-func (*EffectiveTimeFilter) eclNode() {}
+func (*DescendantOf) eclNode()           {}
+func (*DescendantOrSelfOf) eclNode()     {}
+func (*ChildOf) eclNode()                {}
+func (*ChildOrSelfOf) eclNode()          {}
+func (*AncestorOf) eclNode()             {}
+func (*AncestorOrSelfOf) eclNode()       {}
+func (*ParentOf) eclNode()               {}
+func (*ParentOrSelfOf) eclNode()         {}
+func (*And) eclNode()                    {}
+func (*Or) eclNode()                     {}
+func (*Minus) eclNode()                  {}
+func (*ConceptRef) eclNode()             {}
+func (*Any) eclNode()                    {}
+func (*Nested) eclNode()                 {}
+func (*MemberOf) eclNode()               {}
+func (*RefsetContainingAny) eclNode()    {}
+func (*DotExpression) eclNode()          {}
+func (*Refined) eclNode()                {}
+func (*Refinement) eclNode()             {}
+func (*AttributeGroup) eclNode()         {}
+func (*Attribute) eclNode()              {}
+func (*Cardinality) eclNode()            {}
+func (*StringValue) eclNode()            {}
+func (*IntegerValue) eclNode()           {}
+func (*DecimalValue) eclNode()           {}
+func (*BooleanValue) eclNode()           {}
+func (*Filtered) eclNode()               {}
+func (*TermFilter) eclNode()             {}
+func (*TypeFilter) eclNode()             {}
+func (*LanguageFilter) eclNode()         {}
+func (*DialectFilter) eclNode()          {}
+func (*DialectEntry) eclNode()           {}
+func (*ActiveFilter) eclNode()           {}
+func (*ModuleFilter) eclNode()           {}
+func (*EffectiveTimeFilter) eclNode()    {}
 func (*DefinitionStatusFilter) eclNode() {}
-func (*MemberFieldFilter) eclNode()   {}
-func (*HistorySupplement) eclNode()   {}
-func (*AltIdentifier) eclNode()       {}
-func (*Top) eclNode()                 {}
-func (*Bottom) eclNode()              {}
+func (*MemberFieldFilter) eclNode()      {}
+func (*HistorySupplement) eclNode()      {}
+func (*AltIdentifier) eclNode()          {}
+func (*Top) eclNode()                    {}
+func (*Bottom) eclNode()                 {}
 
-// --- filterKind() implementations ---
+// --- filterKind() implementations ---.
 
-func (*TermFilter) filterKind() string            { return "term" }
-func (*TypeFilter) filterKind() string            { return "type" }
-func (*LanguageFilter) filterKind() string        { return "language" }
-func (*DialectFilter) filterKind() string         { return "dialect" }
-func (*ActiveFilter) filterKind() string          { return "active" }
-func (*ModuleFilter) filterKind() string          { return "module" }
-func (*EffectiveTimeFilter) filterKind() string   { return "effectiveTime" }
+func (*TermFilter) filterKind() string             { return "term" }
+func (*TypeFilter) filterKind() string             { return "type" }
+func (*LanguageFilter) filterKind() string         { return "language" }
+func (*DialectFilter) filterKind() string          { return "dialect" }
+func (*ActiveFilter) filterKind() string           { return "active" }
+func (*ModuleFilter) filterKind() string           { return "module" }
+func (*EffectiveTimeFilter) filterKind() string    { return "effectiveTime" }
 func (*DefinitionStatusFilter) filterKind() string { return "definitionStatus" }
-func (*MemberFieldFilter) filterKind() string     { return "memberField" }
+func (*MemberFieldFilter) filterKind() string      { return "memberField" }

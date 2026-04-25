@@ -3,9 +3,10 @@ package ecl
 import (
 	"testing"
 
-	"github.com/gofhir/ecl/ecl/ast"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gofhir/ecl/ecl/ast"
 )
 
 func TestParse_SimpleDescendantOrSelf(t *testing.T) {
