@@ -227,9 +227,9 @@ var _ DataProvider = (*testProvider)(nil)
 func newFixture() *testProvider {
 	return &testProvider{
 		descendants: map[string][]string{
-			"138875005": {"404684003", "22298006", "64572001", "73211009", "404684004"},
-			"404684003": {"22298006", "64572001", "73211009", "404684004"},
-			"64572001":  {"73211009", "404684004"},
+			"138875005": {"404684003", "22298006", "64572001", "73211009", "404684004", "111111001"},
+			"404684003": {"22298006", "64572001", "73211009", "404684004", "111111001"},
+			"64572001":  {"73211009", "404684004", "111111001"},
 		},
 		ancestors: map[string][]string{
 			"22298006":  {"404684003", "138875005"},
@@ -237,11 +237,12 @@ func newFixture() *testProvider {
 			"73211009":  {"64572001", "404684003", "138875005"},
 			"404684004": {"64572001", "404684003", "138875005"},
 			"404684003": {"138875005"},
+			"111111001": {"64572001", "404684003", "138875005"},
 		},
 		children: map[string][]string{
 			"138875005": {"404684003"},
 			"404684003": {"22298006", "64572001"},
-			"64572001":  {"73211009", "404684004"},
+			"64572001":  {"73211009", "404684004", "111111001"},
 		},
 		parents: map[string][]string{
 			"404684003": {"138875005"},
@@ -249,6 +250,7 @@ func newFixture() *testProvider {
 			"64572001":  {"404684003"},
 			"73211009":  {"64572001"},
 			"404684004": {"64572001"},
+			"111111001": {"64572001"},
 		},
 		exists: map[string]bool{
 			"138875005":          true,
@@ -257,6 +259,7 @@ func newFixture() *testProvider {
 			"64572001":           true,
 			"73211009":           true,
 			"404684004":          true,
+			"111111001":          true,
 			"900000000000497000": true, // refset concept itself exists
 			// attribute type and target concepts used in relationship tests
 			"363698007":  true, // Finding site (attribute type)
@@ -268,7 +271,7 @@ func newFixture() *testProvider {
 			"1149367008": true, // String attribute type
 			"1149366004": true, // Boolean attribute type
 		},
-		all: []string{"138875005", "404684003", "22298006", "64572001", "73211009", "404684004"},
+		all: []string{"138875005", "404684003", "22298006", "64572001", "73211009", "404684004", "111111001"},
 		refsets: map[string][]string{
 			"900000000000497000": {"22298006", "64572001", "73211009"},
 		},
@@ -287,6 +290,7 @@ func newFixture() *testProvider {
 			},
 			"73211009": {
 				{TypeID: "363698007", TargetID: "113331007", GroupNum: 1},
+				{TypeID: "363698007", TargetID: "74281007", GroupNum: 1},
 			},
 			"404684004": {
 				{TypeID: "363698007", TargetID: "74281007", GroupNum: 1},
@@ -340,7 +344,7 @@ func TestEvaluate_DescendantOf(t *testing.T) {
 	p := newFixture()
 	got := evalECL(t, "< 404684003", p)
 	assert.ElementsMatch(t,
-		[]string{"22298006", "64572001", "73211009", "404684004"},
+		[]string{"22298006", "64572001", "73211009", "404684004", "111111001"},
 		got.Slice())
 }
 
@@ -348,7 +352,7 @@ func TestEvaluate_DescendantOrSelfOf(t *testing.T) {
 	p := newFixture()
 	got := evalECL(t, "<< 404684003", p)
 	assert.ElementsMatch(t,
-		[]string{"404684003", "22298006", "64572001", "73211009", "404684004"},
+		[]string{"404684003", "22298006", "64572001", "73211009", "404684004", "111111001"},
 		got.Slice())
 }
 
@@ -387,17 +391,17 @@ func TestEvaluate_ParentOf(t *testing.T) {
 func TestEvaluate_Wildcard(t *testing.T) {
 	p := newFixture()
 	got := evalECL(t, "*", p)
-	assert.Equal(t, 6, got.Len())
+	assert.Equal(t, 7, got.Len())
 }
 
 func TestEvaluate_And(t *testing.T) {
 	p := newFixture()
-	// << 404684003 = {404684003, 22298006, 64572001, 73211009, 404684004}
-	// << 64572001  = {64572001, 73211009, 404684004}
-	// intersection = {64572001, 73211009, 404684004}
+	// << 404684003 = {404684003, 22298006, 64572001, 73211009, 404684004, 111111001}
+	// << 64572001  = {64572001, 73211009, 404684004, 111111001}
+	// intersection = {64572001, 73211009, 404684004, 111111001}
 	got := evalECL(t, "<< 404684003 AND << 64572001", p)
 	assert.ElementsMatch(t,
-		[]string{"64572001", "73211009", "404684004"},
+		[]string{"64572001", "73211009", "404684004", "111111001"},
 		got.Slice())
 }
 
@@ -411,8 +415,8 @@ func TestEvaluate_Or(t *testing.T) {
 
 func TestEvaluate_Minus(t *testing.T) {
 	p := newFixture()
-	// << 404684003 = {404684003, 22298006, 64572001, 73211009, 404684004}
-	// << 64572001  = {64572001, 73211009, 404684004}
+	// << 404684003 = {404684003, 22298006, 64572001, 73211009, 404684004, 111111001}
+	// << 64572001  = {64572001, 73211009, 404684004, 111111001}
 	// difference   = {404684003, 22298006}
 	got := evalECL(t, "<< 404684003 MINUS << 64572001", p)
 	assert.ElementsMatch(t,
@@ -432,6 +436,6 @@ func TestEvaluate_Nested(t *testing.T) {
 	p := newFixture()
 	got := evalECL(t, "(<< 64572001)", p)
 	assert.ElementsMatch(t,
-		[]string{"64572001", "73211009", "404684004"},
+		[]string{"64572001", "73211009", "404684004", "111111001"},
 		got.Slice())
 }

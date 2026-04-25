@@ -310,11 +310,6 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 		return focus, nil
 	}
 
-	// Cardinality other than the default [1..*] is deferred to a later phase.
-	if !isDefaultCardinality(attr.Cardinality) {
-		return nil, fmt.Errorf("attribute cardinality other than [1..*] not yet implemented")
-	}
-
 	// Resolve attribute type IDs (the attribute name may be an ECL expression).
 	typeIDs, err := Evaluate(ctx, attr.Name, provider)
 	if err != nil {
@@ -373,14 +368,14 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 	out := newMapSet()
 	var iterErr error
 	focus.Iter(func(id string) bool {
-		match, err := conceptMatchesAttribute(ctx, id, typeIDs, valueSet, valueIsAny, provider)
+		count, err := conceptMatchesAttribute(ctx, id, typeIDs, valueSet, valueIsAny, provider)
 		if err != nil {
 			iterErr = err
 			return false
 		}
-		keep := match
+		keep := cardinalitySatisfied(attr.Cardinality, count)
 		if attr.Op == "!=" {
-			keep = !match
+			keep = !keep
 		}
 		if keep {
 			out.m[id] = struct{}{}
@@ -393,24 +388,41 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 	return out, nil
 }
 
-// conceptMatchesAttribute reports whether any relationship of the concept has
+// conceptMatchesAttribute counts how many relationships of the concept have
 // type ∈ typeIDs AND (valueIsAny OR target ∈ valueSet).
-func conceptMatchesAttribute(ctx context.Context, conceptID string, typeIDs, valueSet Set, valueIsAny bool, provider DataProvider) (bool, error) {
+func conceptMatchesAttribute(ctx context.Context, conceptID string, typeIDs, valueSet Set, valueIsAny bool, provider DataProvider) (int, error) {
 	groups, err := provider.PropertiesByGroup(ctx, conceptID)
 	if err != nil {
-		return false, fmt.Errorf("PropertiesByGroup(%s): %w", conceptID, err)
+		return 0, fmt.Errorf("PropertiesByGroup(%s): %w", conceptID, err)
 	}
+	count := 0
 	for _, rels := range groups {
 		for _, r := range rels {
 			if !typeIDs.Contains(r.TypeID) {
 				continue
 			}
 			if valueIsAny || valueSet.Contains(r.TargetID) {
-				return true, nil
+				count++
 			}
 		}
 	}
-	return false, nil
+	return count, nil
+}
+
+// cardinalitySatisfied reports whether count satisfies the given cardinality.
+// A nil cardinality is treated as the default [1..*] (at least one, unbounded).
+func cardinalitySatisfied(c *ast.Cardinality, count int) bool {
+	min, max := 1, -1
+	if c != nil {
+		min, max = c.Min, c.Max
+	}
+	if count < min {
+		return false
+	}
+	if max != -1 && count > max {
+		return false
+	}
+	return true
 }
 
 // filterByAttributeGroup returns the subset of focus that has at least one
@@ -422,18 +434,11 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 	if grp == nil || len(grp.Attrs) == 0 {
 		return focus, nil
 	}
-	if !isDefaultCardinality(grp.Cardinality) {
-		return nil, fmt.Errorf("attribute-group cardinality other than [1..*] not yet implemented")
-	}
-
 	// Pre-resolve each sub-attribute's type IDs and value set once.
 	clauses := make([]attrClause, 0, len(grp.Attrs))
 	for _, a := range grp.Attrs {
 		if a.Reverse {
 			return nil, fmt.Errorf("reverse attribute inside a group not yet implemented")
-		}
-		if !isDefaultCardinality(a.Cardinality) {
-			return nil, fmt.Errorf("attribute cardinality other than [1..*] not yet implemented")
 		}
 		typeIDs, err := Evaluate(ctx, a.Name, provider)
 		if err != nil {
@@ -451,7 +456,7 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 		default:
 			return nil, fmt.Errorf("unsupported attribute operator %q", a.Op)
 		}
-		c := attrClause{op: a.Op, typeIDs: typeIDs}
+		c := attrClause{op: a.Op, typeIDs: typeIDs, cardinality: a.Cardinality}
 		if _, isAny := a.Value.(*ast.Any); isAny {
 			c.valueIsAny = true
 		} else {
@@ -498,44 +503,42 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 
 // attrClause is a pre-resolved attribute sub-clause for group evaluation.
 type attrClause struct {
-	op         string
-	typeIDs    Set
-	valueSet   Set
-	valueIsAny bool
+	op          string
+	typeIDs     Set
+	valueSet    Set
+	valueIsAny  bool
+	cardinality *ast.Cardinality
 }
 
 // groupSatisfiesClauses reports whether a single relationship group satisfies
-// every clause (each clause must match some relationship in this group).
+// every clause. Each clause counts matching relationships and validates
+// against its cardinality constraint.
 func groupSatisfiesClauses(rels []Relationship, clauses []attrClause) bool {
 	for _, c := range clauses {
-		matched := false
+		count := 0
 		for _, r := range rels {
 			if !c.typeIDs.Contains(r.TypeID) {
 				continue
 			}
 			hit := c.valueIsAny || c.valueSet.Contains(r.TargetID)
 			if hit {
-				matched = true
-				break
+				count++
 			}
 		}
 		if c.op == "!=" {
-			matched = !matched
+			totalOfType := 0
+			for _, r := range rels {
+				if c.typeIDs.Contains(r.TypeID) {
+					totalOfType++
+				}
+			}
+			count = totalOfType - count
 		}
-		if !matched {
+		if !cardinalitySatisfied(c.cardinality, count) {
 			return false
 		}
 	}
 	return true
-}
-
-// isDefaultCardinality reports whether a cardinality is absent or the implicit
-// [1..*] (at least one, unbounded).
-func isDefaultCardinality(c *ast.Cardinality) bool {
-	if c == nil {
-		return true
-	}
-	return c.Min == 1 && c.Max == -1
 }
 
 // ---------------------------------------------------------------------------

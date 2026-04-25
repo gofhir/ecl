@@ -35,10 +35,10 @@ func TestEvaluate_HistorySupplement_Profile(t *testing.T) {
 	// profile) so the result is identical. The important part is that the
 	// evaluator accepts the profiled syntax.
 	got := evalECL(t, "<< 404684003 {{ +HISTORY-MIN }}", p)
-	// Base: {404684003, 22298006, 64572001, 73211009, 404684004}
+	// Base: {404684003, 22298006, 64572001, 73211009, 404684004, 111111001}
 	// History of 404684004 → 22298006 (already in base)
 	assert.ElementsMatch(t,
-		[]string{"404684003", "22298006", "64572001", "73211009", "404684004"},
+		[]string{"404684003", "22298006", "64572001", "73211009", "404684004", "111111001"},
 		got.Slice())
 }
 
@@ -146,11 +146,11 @@ func TestEvaluate_TopOfSet(t *testing.T) {
 
 func TestEvaluate_BottomOfSet(t *testing.T) {
 	p := newFixture()
-	// << 404684003 = {404684003, 22298006, 64572001, 73211009, 404684004}
-	// Leaves of the set (no child in the set) = 22298006, 73211009, 404684004.
+	// << 404684003 = {404684003, 22298006, 64572001, 73211009, 404684004, 111111001}
+	// Leaves of the set (no child in the set) = 22298006, 73211009, 404684004, 111111001.
 	got := evalECL(t, "!!< (<< 404684003)", p)
 	assert.ElementsMatch(t,
-		[]string{"22298006", "73211009", "404684004"},
+		[]string{"22298006", "73211009", "404684004", "111111001"},
 		got.Slice())
 }
 
