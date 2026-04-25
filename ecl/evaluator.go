@@ -13,18 +13,21 @@ import (
 // Evaluate evaluates an ECL AST against the given DataProvider and returns
 // the set of matching SNOMED CT concept IDs.
 //
-// Phase 3.2 coverage:
+// Full ECL v2.2 coverage:
 //   - Hierarchy operators (8): <, <<, <!, <<!, >, >>, >!, >>!
 //   - Set operators: AND, OR, MINUS
 //   - Primitives: ConceptRef, Any (wildcard), Nested
 //   - MemberOf (^): resolves refset members via DataProvider
-//
-// Deferred to later phases (returns "not yet implemented" error):
-//   - Refinements (Refined)           — Phase 3.3
-//   - DotExpression                   — Phase 3.5
-//   - Filtered constraints            — Phase 4
-//   - HistorySupplement               — Phase 5.1
-//   - Top, Bottom, RefsetContainingAny, AltIdentifier (v2.2) — Phase 6
+//   - Refinements (ungrouped/grouped) with cardinality [min..max]
+//   - Reverse attribute (R flag) including wildcard and concrete values
+//   - DotExpression (attribute navigation)
+//   - Filter constraints: term, type, language, dialect, active, module,
+//     definitionStatus, effectiveTime — including negated (!=) operators
+//   - Member field filters
+//   - Concrete value comparisons: integer, decimal, string, boolean
+//   - HistorySupplement with MIN/MOD/MAX profiles
+//   - Top (!!>), Bottom (!!<), RefsetContainingAny (^R)
+//   - AltIdentifier (scheme#code) via DataProvider.ResolveIdentifier
 func Evaluate(ctx context.Context, expr ast.Expression, provider DataProvider) (Set, error) {
 	if expr == nil {
 		return NewSet(), nil
@@ -993,9 +996,8 @@ func isConcreteValue(e ast.Expression) bool {
 // type ID. If any stored concrete value satisfies the comparison, the concept
 // is kept (or excluded, for the "!=" operator).
 //
-// Only numeric comparisons (=, !=, <, <=, >, >=) are implemented for
-// IntegerValue and DecimalValue. String and boolean comparisons currently
-// return "not yet implemented" so callers get a clear signal.
+// Supports numeric (integer/decimal) comparisons with all operators (=, !=,
+// <, <=, >, >=), and string/boolean comparisons with = and != only.
 func filterByConcreteValue(ctx context.Context, focus Set, attr *ast.Attribute, typeIDs Set, provider DataProvider) (Set, error) {
 	if focus == nil || focus.Len() == 0 {
 		return focus, nil
