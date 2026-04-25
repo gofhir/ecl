@@ -265,6 +265,8 @@ func newFixture() *testProvider {
 			"55641003":   true, // Infarct (target)
 			"113331007":  true, // Endocrine system (target)
 			"1142139005": true, // Count attribute (for concrete-value tests)
+			"1149367008": true, // String attribute type
+			"1149366004": true, // Boolean attribute type
 		},
 		all: []string{"138875005", "404684003", "22298006", "64572001", "73211009", "404684004"},
 		refsets: map[string][]string{
@@ -301,6 +303,8 @@ func newFixture() *testProvider {
 		concreteValues: map[string]map[string][]ConcreteValue{
 			"22298006": {
 				"1142139005": {{Kind: "integer", Value: "2"}},
+				"1149367008": {{Kind: "string", Value: "severe"}},
+				"1149366004": {{Kind: "boolean", Value: "true"}},
 			},
 		},
 	}

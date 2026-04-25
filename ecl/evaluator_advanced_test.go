@@ -87,6 +87,50 @@ func TestEvaluate_ConcreteValueNeq(t *testing.T) {
 }
 
 // ------------------------------------------------------------------------
+// Phase 5.2 — String concrete value comparisons
+// ------------------------------------------------------------------------.
+
+func TestEvaluate_ConcreteValueStringEq(t *testing.T) {
+	p := newFixture()
+	got := evalECL(t, `22298006 : 1149367008 = "severe"`, p)
+	assert.ElementsMatch(t, []string{"22298006"}, got.Slice())
+}
+
+func TestEvaluate_ConcreteValueStringNeq(t *testing.T) {
+	p := newFixture()
+	got := evalECL(t, `22298006 : 1149367008 != "mild"`, p)
+	assert.ElementsMatch(t, []string{"22298006"}, got.Slice())
+}
+
+func TestEvaluate_ConcreteValueStringNeq_NoMatch(t *testing.T) {
+	p := newFixture()
+	got := evalECL(t, `22298006 : 1149367008 != "severe"`, p)
+	assert.Equal(t, 0, got.Len())
+}
+
+// ------------------------------------------------------------------------
+// Phase 5.2 — Boolean concrete value comparisons
+// ------------------------------------------------------------------------.
+
+func TestEvaluate_ConcreteValueBoolEq(t *testing.T) {
+	p := newFixture()
+	got := evalECL(t, `22298006 : 1149366004 = true`, p)
+	assert.ElementsMatch(t, []string{"22298006"}, got.Slice())
+}
+
+func TestEvaluate_ConcreteValueBoolNeq(t *testing.T) {
+	p := newFixture()
+	got := evalECL(t, `22298006 : 1149366004 != false`, p)
+	assert.ElementsMatch(t, []string{"22298006"}, got.Slice())
+}
+
+func TestEvaluate_ConcreteValueBoolEq_NoMatch(t *testing.T) {
+	p := newFixture()
+	got := evalECL(t, `22298006 : 1149366004 = false`, p)
+	assert.Equal(t, 0, got.Len())
+}
+
+// ------------------------------------------------------------------------
 // Phase 6.1 — v2.2: Top / Bottom of set
 // ------------------------------------------------------------------------.
 

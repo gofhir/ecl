@@ -779,13 +779,6 @@ func filterByConcreteValue(ctx context.Context, focus Set, attr *ast.Attribute, 
 		return nil, fmt.Errorf("unsupported concrete-value operator %q", attr.Op)
 	}
 
-	if haveString || haveBool {
-		return nil, fmt.Errorf("string/boolean concrete-value comparisons not yet implemented")
-	}
-	// Silence unused-variable warnings for deferred paths.
-	_ = strVal
-	_ = boolVal
-
 	typeIDList := typeIDs.Slice()
 
 	out := newMapSet()
@@ -799,18 +792,26 @@ func filterByConcreteValue(ctx context.Context, focus Set, attr *ast.Attribute, 
 				return false
 			}
 			for _, cv := range values {
-				// Only numeric kinds apply here. Other kinds are skipped
-				// silently for this clause (the concept may still match via
-				// another relationship).
-				if cv.Kind != "integer" && cv.Kind != "decimal" {
-					continue
+				switch {
+				case haveNumeric && (cv.Kind == "integer" || cv.Kind == "decimal"):
+					f, parseErr := strconv.ParseFloat(cv.Value, 64)
+					if parseErr != nil {
+						continue
+					}
+					if compareFloat(f, attr.Op, numeric) {
+						matched = true
+					}
+				case haveString && cv.Kind == "string":
+					if compareString(cv.Value, attr.Op, strVal) {
+						matched = true
+					}
+				case haveBool && cv.Kind == "boolean":
+					stored := cv.Value == "true"
+					if compareBool(stored, attr.Op, boolVal) {
+						matched = true
+					}
 				}
-				f, parseErr := strconv.ParseFloat(cv.Value, 64)
-				if parseErr != nil {
-					continue
-				}
-				if compareFloat(f, attr.Op, numeric) {
-					matched = true
+				if matched {
 					break
 				}
 			}
@@ -847,6 +848,28 @@ func compareFloat(a float64, op string, b float64) bool {
 		return a > b
 	case ">=":
 		return a >= b
+	}
+	return false
+}
+
+// compareString applies the given operator to string values a (stored) and b (expected).
+func compareString(a, op, b string) bool {
+	switch op {
+	case "=":
+		return a == b
+	case "!=":
+		return a != b
+	}
+	return false
+}
+
+// compareBool applies the given operator to boolean values a (stored) and b (expected).
+func compareBool(a bool, op string, b bool) bool {
+	switch op {
+	case "=":
+		return a == b
+	case "!=":
+		return a != b
 	}
 	return false
 }
