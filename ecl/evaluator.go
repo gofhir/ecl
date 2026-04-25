@@ -724,9 +724,10 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 
 	// Description filters — build a single DescriptionFilterOpts from all
 	// clauses, then call MatchDescription once. The result is a set of concept
-	// IDs whose descriptions match; intersect with the current base.
+	// IDs whose descriptions match; intersect with the current base (or subtract
+	// when negated).
 	if len(descFilters) > 0 {
-		opts, err := buildDescriptionFilterOpts(ctx, descFilters, provider)
+		opts, negate, err := buildDescriptionFilterOpts(ctx, descFilters, provider)
 		if err != nil {
 			return nil, err
 		}
@@ -734,16 +735,19 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 		if err != nil {
 			return nil, fmt.Errorf("MatchDescription: %w", err)
 		}
-		if result == nil {
+		if negate {
+			result = result.Minus(matches)
+		} else if result == nil {
 			result = matches
 		} else {
 			result = result.Intersect(matches)
 		}
 	}
 
-	// Concept filters — build ConceptFilterOpts and delegate.
+	// Concept filters — build ConceptFilterOpts and delegate (or subtract when
+	// negated).
 	if len(conceptFilters) > 0 {
-		opts, err := buildConceptFilterOpts(ctx, conceptFilters, provider)
+		opts, negate, err := buildConceptFilterOpts(ctx, conceptFilters, provider)
 		if err != nil {
 			return nil, err
 		}
@@ -751,7 +755,11 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 		if err != nil {
 			return nil, fmt.Errorf("FilterConcepts: %w", err)
 		}
-		result = filtered
+		if negate {
+			result = result.Minus(filtered)
+		} else {
+			result = filtered
+		}
 	}
 
 	return result, nil
@@ -781,25 +789,26 @@ func categorizeFilters(filters []ast.Filter) (desc, concept, member []ast.Filter
 // buildDescriptionFilterOpts accumulates description filter clauses into a
 // single DescriptionFilterOpts. Multiple clauses of the same kind are
 // simplified by taking the last one (rarely seen in practice).
-func buildDescriptionFilterOpts(ctx context.Context, filters []ast.Filter, provider DataProvider) (DescriptionFilterOpts, error) {
+func buildDescriptionFilterOpts(ctx context.Context, filters []ast.Filter, provider DataProvider) (DescriptionFilterOpts, bool, error) {
 	var opts DescriptionFilterOpts
+	var negate bool
 	for _, f := range filters {
 		switch x := f.(type) {
 		case *ast.TermFilter:
 			if x.Op == "!=" {
-				return opts, fmt.Errorf("term filter with '!=' operator not yet implemented")
+				negate = true
 			}
 			opts.Term = x.Term
 		case *ast.TypeFilter:
 			if x.Op == "!=" {
-				return opts, fmt.Errorf("type filter with '!=' operator not yet implemented")
+				negate = true
 			}
 			// Resolve the first type SCTID. Multi-type sets simplify to the
 			// first concept.
 			if len(x.Types) > 0 {
 				ids, err := Evaluate(ctx, x.Types[0], provider)
 				if err != nil {
-					return opts, fmt.Errorf("evaluating type filter: %w", err)
+					return opts, false, fmt.Errorf("evaluating type filter: %w", err)
 				}
 				if ids != nil && ids.Len() > 0 {
 					opts.TypeID = ids.Slice()[0]
@@ -812,21 +821,22 @@ func buildDescriptionFilterOpts(ctx context.Context, filters []ast.Filter, provi
 			}
 		case *ast.LanguageFilter:
 			if x.Op == "!=" {
-				return opts, fmt.Errorf("language filter with '!=' operator not yet implemented")
+				negate = true
 			}
 			if len(x.Languages) > 0 {
 				opts.Language = x.Languages[0]
 			}
 		case *ast.DialectFilter:
-			return opts, fmt.Errorf("dialect filter: not yet implemented")
+			return opts, false, fmt.Errorf("dialect filter: not yet implemented")
 		}
 	}
-	return opts, nil
+	return opts, negate, nil
 }
 
 // buildConceptFilterOpts accumulates concept filter clauses into ConceptFilterOpts.
-func buildConceptFilterOpts(ctx context.Context, filters []ast.Filter, provider DataProvider) (ConceptFilterOpts, error) {
+func buildConceptFilterOpts(ctx context.Context, filters []ast.Filter, provider DataProvider) (ConceptFilterOpts, bool, error) {
 	var opts ConceptFilterOpts
+	var negate bool
 	for _, f := range filters {
 		switch x := f.(type) {
 		case *ast.ActiveFilter:
@@ -834,12 +844,12 @@ func buildConceptFilterOpts(ctx context.Context, filters []ast.Filter, provider 
 			opts.Active = &b
 		case *ast.DefinitionStatusFilter:
 			if x.Op == "!=" {
-				return opts, fmt.Errorf("definitionStatus filter with '!=' operator not yet implemented")
+				negate = true
 			}
 			if x.Value != nil {
 				ids, err := Evaluate(ctx, x.Value, provider)
 				if err != nil {
-					return opts, fmt.Errorf("evaluating definitionStatus filter: %w", err)
+					return opts, false, fmt.Errorf("evaluating definitionStatus filter: %w", err)
 				}
 				if ids != nil && ids.Len() > 0 {
 					opts.DefinitionStatusID = ids.Slice()[0]
@@ -849,12 +859,12 @@ func buildConceptFilterOpts(ctx context.Context, filters []ast.Filter, provider 
 			}
 		case *ast.ModuleFilter:
 			if x.Op == "!=" {
-				return opts, fmt.Errorf("module filter with '!=' operator not yet implemented")
+				negate = true
 			}
 			if x.Module != nil {
 				ids, err := Evaluate(ctx, x.Module, provider)
 				if err != nil {
-					return opts, fmt.Errorf("evaluating module filter: %w", err)
+					return opts, false, fmt.Errorf("evaluating module filter: %w", err)
 				}
 				if ids != nil && ids.Len() > 0 {
 					opts.ModuleID = ids.Slice()[0]
@@ -867,7 +877,7 @@ func buildConceptFilterOpts(ctx context.Context, filters []ast.Filter, provider 
 			opts.EffectiveTimeOp = x.Op
 		}
 	}
-	return opts, nil
+	return opts, negate, nil
 }
 
 // ---------------------------------------------------------------------------

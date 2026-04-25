@@ -157,6 +157,25 @@ func TestEvaluate_CombinedFilters(t *testing.T) {
 	assert.ElementsMatch(t, []string{"22298006"}, got.Slice())
 }
 
+func TestEvaluate_DescriptionFilter_Term_Negated(t *testing.T) {
+	p := newFilterFixture()
+	// term != "infarction" → concepts whose descriptions do NOT contain "infarction".
+	// Only MI (22298006) has "infarction" in its term.
+	got := evalECL(t, `<< 404684003 {{ term != "infarction" }}`, p)
+	assert.False(t, got.Contains("22298006"), "22298006 has 'infarction' in term")
+	assert.True(t, got.Contains("73211009"), "73211009 should remain")
+	assert.True(t, got.Contains("64572001"), "64572001 should remain")
+}
+
+func TestEvaluate_DescriptionFilter_Language_Negated(t *testing.T) {
+	p := newFilterFixture()
+	// language != es → concepts that do NOT have a Spanish description.
+	// Only MI (22298006) has a Spanish description.
+	got := evalECL(t, `<< 404684003 {{ language != es }}`, p)
+	assert.False(t, got.Contains("22298006"), "22298006 has Spanish desc")
+	assert.True(t, got.Contains("73211009"))
+}
+
 func TestEvaluate_MemberFilter_NotImplemented(t *testing.T) {
 	p := newFilterFixture()
 	// A member filter uses a refset field filter inside {{ M ... }}.
