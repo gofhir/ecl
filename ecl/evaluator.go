@@ -439,15 +439,12 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 	// Pre-resolve each sub-attribute's type IDs and value set once.
 	clauses := make([]attrClause, 0, len(grp.Attrs))
 	for _, a := range grp.Attrs {
-		if a.Reverse {
-			return nil, fmt.Errorf("reverse attribute inside a group not yet implemented")
-		}
 		typeIDs, err := Evaluate(ctx, a.Name, provider)
 		if err != nil {
 			return nil, fmt.Errorf("evaluating attribute name: %w", err)
 		}
 		if isConcreteValue(a.Value) {
-			c := attrClause{op: a.Op, typeIDs: typeIDs, cardinality: a.Cardinality, isConcrete: true}
+			c := attrClause{op: a.Op, typeIDs: typeIDs, cardinality: a.Cardinality, isConcrete: true, reverse: a.Reverse}
 			switch v := a.Value.(type) {
 			case *ast.IntegerValue:
 				c.concreteKind = "numeric"
@@ -472,7 +469,7 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 		default:
 			return nil, fmt.Errorf("unsupported attribute operator %q", a.Op)
 		}
-		c := attrClause{op: a.Op, typeIDs: typeIDs, cardinality: a.Cardinality}
+		c := attrClause{op: a.Op, typeIDs: typeIDs, cardinality: a.Cardinality, reverse: a.Reverse}
 		if _, isAny := a.Value.(*ast.Any); isAny {
 			c.valueIsAny = true
 		} else {
@@ -484,27 +481,39 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 		clauses = append(clauses, c)
 	}
 
+	hasReverse := false
+	for _, c := range clauses {
+		if c.reverse {
+			hasReverse = true
+			break
+		}
+	}
+
 	out := newMapSet()
 	var iterErr error
 	focus.Iter(func(id string) bool {
-		groups, err := provider.PropertiesByGroup(ctx, id)
-		if err != nil {
-			iterErr = fmt.Errorf("PropertiesByGroup(%s): %w", id, err)
-			return false
-		}
-		// Find at least one group (excluding group 0 if present? spec says
-		// "a single group" — group 0 is ungrouped. For grouped refinements,
-		// only non-zero relationship groups qualify). We follow the common
-		// semantics where only groups with num > 0 satisfy grouped clauses;
-		// if no group has num > 0 we fall back to checking any group (the
-		// spec is lenient). Here we accept any group key — easier for tests
-		// and still correct for the "all in same group" requirement.
 		anyGroupSatisfies := false
-		for _, rels := range groups {
-			if groupSatisfiesClauses(rels, clauses) {
-				anyGroupSatisfies = true
-				break
+		if !hasReverse {
+			// Fast path: all forward clauses — check groups directly.
+			groups, err := provider.PropertiesByGroup(ctx, id)
+			if err != nil {
+				iterErr = fmt.Errorf("PropertiesByGroup(%s): %w", id, err)
+				return false
 			}
+			for _, rels := range groups {
+				if groupSatisfiesClauses(rels, clauses) {
+					anyGroupSatisfies = true
+					break
+				}
+			}
+		} else {
+			// Slow path: reverse clauses require checking source concepts.
+			matched, err := conceptMatchesGroupWithReverse(ctx, id, clauses, provider)
+			if err != nil {
+				iterErr = err
+				return false
+			}
+			anyGroupSatisfies = matched
 		}
 		if anyGroupSatisfies {
 			out.m[id] = struct{}{}
@@ -524,6 +533,7 @@ type attrClause struct {
 	valueSet    Set
 	valueIsAny  bool
 	cardinality *ast.Cardinality
+	reverse     bool
 	// Concrete value fields (mutually exclusive with valueSet).
 	isConcrete   bool
 	numericVal   float64
@@ -557,6 +567,94 @@ func groupSatisfiesClauses(rels []Relationship, clauses []attrClause) bool {
 			}
 		}
 		if c.op == "!=" && !c.isConcrete {
+			totalOfType := 0
+			for _, r := range rels {
+				if c.typeIDs.Contains(r.TypeID) {
+					totalOfType++
+				}
+			}
+			count = totalOfType - count
+		}
+		if !cardinalitySatisfied(c.cardinality, count) {
+			return false
+		}
+	}
+	return true
+}
+
+// conceptMatchesGroupWithReverse checks if a concept satisfies a group with
+// reverse clauses. For each reverse clause, it finds sources that point to
+// this concept with the given type, then checks if any source has a group
+// where all clauses (forward and reverse) are satisfied.
+func conceptMatchesGroupWithReverse(ctx context.Context, conceptID string, clauses []attrClause, provider DataProvider) (bool, error) {
+	for _, c := range clauses {
+		if !c.reverse {
+			continue
+		}
+		focusSet := NewSetFromSlice([]string{conceptID})
+		sources, err := provider.RelationshipSources(ctx, focusSet, c.typeIDs)
+		if err != nil {
+			return false, fmt.Errorf("reverse group lookup: %w", err)
+		}
+		// Filter sources to those in the value set (unless wildcard).
+		if !c.valueIsAny && c.valueSet != nil {
+			sources = sources.Intersect(c.valueSet)
+		}
+		if sources.Len() == 0 {
+			return false, nil
+		}
+		found := false
+		var iterErr error
+		sources.Iter(func(srcID string) bool {
+			srcGroups, err := provider.PropertiesByGroup(ctx, srcID)
+			if err != nil {
+				iterErr = err
+				return false
+			}
+			for _, rels := range srcGroups {
+				if groupSatisfiesClausesWithReverse(rels, clauses, conceptID) {
+					found = true
+					return false
+				}
+			}
+			return true
+		})
+		if iterErr != nil {
+			return false, iterErr
+		}
+		if found {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// groupSatisfiesClausesWithReverse is like groupSatisfiesClauses but handles
+// reverse clauses by checking that the relationship targets the given conceptID.
+func groupSatisfiesClausesWithReverse(rels []Relationship, clauses []attrClause, reverseTargetID string) bool {
+	for _, c := range clauses {
+		count := 0
+		for _, r := range rels {
+			if !c.typeIDs.Contains(r.TypeID) {
+				continue
+			}
+			if c.reverse {
+				// Reverse: the relationship must target our focus concept.
+				if r.TargetID == reverseTargetID {
+					count++
+				}
+			} else if c.isConcrete {
+				if r.ConcreteValue != nil && matchConcreteValue(r.ConcreteValue, c) {
+					count++
+				}
+			} else {
+				hit := c.valueIsAny || c.valueSet.Contains(r.TargetID)
+				if hit {
+					count++
+				}
+			}
+		}
+		if c.op == "!=" && !c.isConcrete && !c.reverse {
 			totalOfType := 0
 			for _, r := range rels {
 				if c.typeIDs.Contains(r.TypeID) {

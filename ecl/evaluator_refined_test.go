@@ -207,6 +207,17 @@ func TestEvaluate_Cardinality_OneToUnbounded(t *testing.T) {
 	assert.False(t, got.Contains("111111001"), "111111001 has 0")
 }
 
+func TestEvaluate_GroupedRefinement_Reverse(t *testing.T) {
+	p := newFixture()
+	// { R 363698007 = << 404684003 } means: in the focus, keep concepts that
+	// are the TARGET of a 363698007 relationship from a source in << 404684003,
+	// within a single relationship group.
+	// 74281007 is targeted by 22298006 (group 1) and 404684004 (group 1).
+	// Both sources are in << 404684003.
+	got := evalECL(t, `* : { R 363698007 = << 404684003 }`, p)
+	assert.True(t, got.Contains("74281007"))
+}
+
 func TestEvaluate_Refinement_Reverse_Wildcard(t *testing.T) {
 	p := newFixture()
 	// R 363698007 = * → concepts that are the target of ANY 363698007 relationship.
