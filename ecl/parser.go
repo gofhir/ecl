@@ -510,32 +510,36 @@ func (v *astBuilder) buildTermFilter(ctx grammar.ITermfilterContext) *ast.TermFi
 	if concrete.Stringcomparisonoperator() != nil {
 		op = v.extractComparisonOp(concrete.Stringcomparisonoperator().GetText())
 	}
-	var term string
+	var (
+		term      string
+		matchType = "match"
+	)
 	if c := concrete.Typedsearchterm(); c != nil {
-		term = extractTypedSearchTermText(c)
+		term, matchType = extractTypedSearchTerm(c)
 	} else if c := concrete.Typedsearchtermset(); c != nil {
 		// Take the first term in the set; multi-term sets are treated as the
 		// first term for now (evaluator documents the simplification).
 		term = stripWrappingQuotes(c.GetText())
 	}
-	return &ast.TermFilter{Op: op, Term: term}
+	return &ast.TermFilter{Op: op, Term: term, MatchType: matchType}
 }
 
-// extractTypedSearchTermText returns the raw search term string without the
-// surrounding quotes. Falls back to the trimmed context text when the
-// expected sub-rule shape is not present.
-func extractTypedSearchTermText(ctx grammar.ITypedsearchtermContext) string {
+// extractTypedSearchTerm returns the raw search term and its match-type
+// modifier ("match" or "wild") from a typedsearchterm context. Falls back to
+// "match" when the expected sub-rule shape is not present.
+func extractTypedSearchTerm(ctx grammar.ITypedsearchtermContext) (term, matchType string) {
+	matchType = "match"
 	concrete, ok := ctx.(*grammar.TypedsearchtermContext)
 	if !ok {
-		return stripWrappingQuotes(ctx.GetText())
+		return stripWrappingQuotes(ctx.GetText()), matchType
 	}
 	if s := concrete.Matchsearchtermset(); s != nil {
-		return stripWrappingQuotes(s.GetText())
+		return stripWrappingQuotes(s.GetText()), "match"
 	}
 	if s := concrete.Wildsearchtermset(); s != nil {
-		return stripWrappingQuotes(s.GetText())
+		return stripWrappingQuotes(s.GetText()), "wild"
 	}
-	return stripWrappingQuotes(concrete.GetText())
+	return stripWrappingQuotes(concrete.GetText()), matchType
 }
 
 // stripWrappingQuotes removes a single layer of surrounding " quotes if present
@@ -810,7 +814,8 @@ func (v *astBuilder) buildMemberFieldFilter(ctx grammar.IMemberfieldfilterContex
 	case concrete.Stringcomparisonoperator() != nil:
 		f.Op = v.extractComparisonOp(concrete.Stringcomparisonoperator().GetText())
 		if ts := concrete.Typedsearchterm(); ts != nil {
-			f.Value = &ast.StringValue{Value: extractTypedSearchTermText(ts)}
+			term, _ := extractTypedSearchTerm(ts)
+			f.Value = &ast.StringValue{Value: term}
 		}
 	case concrete.Booleancomparisonoperator() != nil:
 		f.Op = v.extractComparisonOp(concrete.Booleancomparisonoperator().GetText())

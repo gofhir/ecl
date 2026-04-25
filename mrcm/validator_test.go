@@ -96,11 +96,15 @@ func (s *stubProvider) RefsetMembers(_ context.Context, _ []string) (ecl.Set, er
 	return ecl.NewSet(), nil
 }
 
+func (s *stubProvider) RefsetsContainingMembers(_ context.Context, _ []string) (ecl.Set, error) {
+	return ecl.NewSet(), nil
+}
+
 func (s *stubProvider) HistoricalAssociations(_ context.Context, _ ecl.Set, _ string) (ecl.Set, error) {
 	return ecl.NewSet(), nil
 }
 
-func (s *stubProvider) ResolveIdentifier(_ context.Context, _ string, _ string) (ecl.Set, error) {
+func (s *stubProvider) ResolveIdentifier(_ context.Context, _, _ string) (ecl.Set, error) {
 	return ecl.NewSet(), nil
 }
 

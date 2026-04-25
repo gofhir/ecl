@@ -142,9 +142,16 @@ func Evaluate(ctx context.Context, expr ast.Expression, provider DataProvider) (
 
 	case *ast.MemberOf:
 		// The operand evaluates to a set of refset IDs; we then fetch the
-		// union of members across those refsets. Field projections
-		// (^ [field1,field2]) are ignored in this phase — callers just get
-		// the member concept IDs.
+		// union of members across those refsets.
+		//
+		// Field projections (^ [field1,field2]) cannot be expressed through
+		// the Set return type because Set carries only concept IDs, not
+		// per-field values. Reject explicitly rather than silently dropping
+		// the projection. Use a MemberFieldFilter inside a {{ M ... }}
+		// constraint when you need per-field filtering.
+		if len(e.Fields) > 0 {
+			return nil, fmt.Errorf("MemberOf field projection ^[%v] is not supported by Evaluate; use a member filter constraint instead", e.Fields)
+		}
 		refsetIDs, err := Evaluate(ctx, e.Operand, provider)
 		if err != nil {
 			return nil, fmt.Errorf("evaluating %T: %w", expr, err)
@@ -216,13 +223,14 @@ func Evaluate(ctx context.Context, expr ast.Expression, provider DataProvider) (
 		return bottomOfSet(ctx, base, provider)
 
 	case *ast.RefsetContainingAny:
-		// Pragmatic: treat ^R like MemberOf. The operand resolves to refset
-		// IDs; we return the union of members across those refsets.
-		refsetIDs, err := Evaluate(ctx, e.Operand, provider)
+		// ^R <operand> returns the set of refsets that contain any concept
+		// in the operand as a member. This is the inverse direction of ^
+		// (which maps refset → members).
+		operandIDs, err := Evaluate(ctx, e.Operand, provider)
 		if err != nil {
 			return nil, fmt.Errorf("evaluating %T: %w", expr, err)
 		}
-		return provider.RefsetMembers(ctx, toIDSlice(refsetIDs))
+		return provider.RefsetsContainingMembers(ctx, toIDSlice(operandIDs))
 
 	case *ast.AltIdentifier:
 		return provider.ResolveIdentifier(ctx, e.Scheme, e.Code)
@@ -417,14 +425,14 @@ func conceptMatchesAttribute(ctx context.Context, conceptID string, typeIDs, val
 // cardinalitySatisfied reports whether count satisfies the given cardinality.
 // A nil cardinality is treated as the default [1..*] (at least one, unbounded).
 func cardinalitySatisfied(c *ast.Cardinality, count int) bool {
-	min, max := 1, -1
+	minVal, maxVal := 1, -1
 	if c != nil {
-		min, max = c.Min, c.Max
+		minVal, maxVal = c.Min, c.Max
 	}
-	if count < min {
+	if count < minVal {
 		return false
 	}
-	if max != -1 && count > max {
+	if maxVal != -1 && count > maxVal {
 		return false
 	}
 	return true
@@ -450,16 +458,16 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 			c := attrClause{op: a.Op, typeIDs: typeIDs, cardinality: a.Cardinality, isConcrete: true, reverse: a.Reverse}
 			switch v := a.Value.(type) {
 			case *ast.IntegerValue:
-				c.concreteKind = "numeric"
+				c.concreteKind = concreteKindNumeric
 				c.numericVal = float64(v.Value)
 			case *ast.DecimalValue:
-				c.concreteKind = "numeric"
+				c.concreteKind = concreteKindNumeric
 				c.numericVal = v.Value
 			case *ast.StringValue:
-				c.concreteKind = "string"
+				c.concreteKind = concreteKindString
 				c.stringVal = v.Value
 			case *ast.BooleanValue:
-				c.concreteKind = "boolean"
+				c.concreteKind = concreteKindBoolean
 				c.boolVal = v.Value
 			}
 			clauses = append(clauses, c)
@@ -542,8 +550,17 @@ type attrClause struct {
 	numericVal   float64
 	stringVal    string
 	boolVal      bool
-	concreteKind string // "numeric", "string", "boolean"
+	concreteKind string // concreteKindNumeric, concreteKindString, concreteKindBoolean
 }
+
+// Internal classification of concrete value clauses. These are coarser than
+// ConcreteValue.Kind (which uses "integer" vs "decimal") because <, <=, >, >=
+// treat both numeric kinds the same.
+const (
+	concreteKindNumeric = "numeric"
+	concreteKindString  = "string"
+	concreteKindBoolean = "boolean"
+)
 
 // groupSatisfiesClauses reports whether a single relationship group satisfies
 // every clause. Each clause counts matching relationships and validates
@@ -641,16 +658,17 @@ func groupSatisfiesClausesWithReverse(rels []Relationship, clauses []attrClause,
 			if !c.typeIDs.Contains(r.TypeID) {
 				continue
 			}
-			if c.reverse {
+			switch {
+			case c.reverse:
 				// Reverse: the relationship must target our focus concept.
 				if r.TargetID == reverseTargetID {
 					count++
 				}
-			} else if c.isConcrete {
+			case c.isConcrete:
 				if r.ConcreteValue != nil && matchConcreteValue(r.ConcreteValue, c) {
 					count++
 				}
-			} else {
+			default:
 				hit := c.valueIsAny || c.valueSet.Contains(r.TargetID)
 				if hit {
 					count++
@@ -676,7 +694,7 @@ func groupSatisfiesClausesWithReverse(rels []Relationship, clauses []attrClause,
 // matchConcreteValue checks if a stored concrete value satisfies the clause comparison.
 func matchConcreteValue(cv *ConcreteValue, c attrClause) bool {
 	switch c.concreteKind {
-	case "numeric":
+	case concreteKindNumeric:
 		if cv.Kind != "integer" && cv.Kind != "decimal" {
 			return false
 		}
@@ -685,12 +703,12 @@ func matchConcreteValue(cv *ConcreteValue, c attrClause) bool {
 			return false
 		}
 		return compareFloat(f, c.op, c.numericVal)
-	case "string":
+	case concreteKindString:
 		if cv.Kind != "string" {
 			return false
 		}
 		return compareString(cv.Value, c.op, c.stringVal)
-	case "boolean":
+	case concreteKindBoolean:
 		if cv.Kind != "boolean" {
 			return false
 		}
@@ -771,11 +789,12 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 		if err != nil {
 			return nil, fmt.Errorf("MatchDescription: %w", err)
 		}
-		if negate {
+		switch {
+		case negate:
 			result = result.Minus(matches)
-		} else if result == nil {
+		case result == nil:
 			result = matches
-		} else {
+		default:
 			result = result.Intersect(matches)
 		}
 	}
@@ -857,33 +876,33 @@ func buildDescriptionFilterOpts(ctx context.Context, filters []ast.Filter, provi
 				negate = true
 			}
 			opts.Term = x.Term
+			if x.MatchType != "" {
+				opts.MatchType = x.MatchType
+			}
 		case *ast.TypeFilter:
 			if x.Op == "!=" {
 				negate = true
 			}
-			// Resolve the first type SCTID. Multi-type sets simplify to the
-			// first concept.
-			if len(x.Types) > 0 {
-				ids, err := Evaluate(ctx, x.Types[0], provider)
+			// Collect all type SCTIDs from the filter (any-of semantics).
+			for _, typeExpr := range x.Types {
+				ids, err := Evaluate(ctx, typeExpr, provider)
 				if err != nil {
 					return opts, false, fmt.Errorf("evaluating type filter: %w", err)
 				}
 				if ids != nil && ids.Len() > 0 {
-					opts.TypeID = ids.Slice()[0]
-				} else if ref, ok := x.Types[0].(*ast.ConceptRef); ok {
+					opts.TypeIDs = append(opts.TypeIDs, ids.Slice()...)
+				} else if ref, ok := typeExpr.(*ast.ConceptRef); ok {
 					// Fallback to the literal ID even if provider didn't find
 					// it (tokens like FSN/SYN map to well-known SCTIDs that
 					// test providers may not enumerate in ConceptExists).
-					opts.TypeID = ref.ID
+					opts.TypeIDs = append(opts.TypeIDs, ref.ID)
 				}
 			}
 		case *ast.LanguageFilter:
 			if x.Op == "!=" {
 				negate = true
 			}
-			if len(x.Languages) > 0 {
-				opts.Language = x.Languages[0]
-			}
+			opts.Languages = append(opts.Languages, x.Languages...)
 		case *ast.DialectFilter:
 			// Handled separately in evaluateFiltered.
 			continue
@@ -911,9 +930,9 @@ func buildConceptFilterOpts(ctx context.Context, filters []ast.Filter, provider 
 					return opts, false, fmt.Errorf("evaluating definitionStatus filter: %w", err)
 				}
 				if ids != nil && ids.Len() > 0 {
-					opts.DefinitionStatusID = ids.Slice()[0]
+					opts.DefinitionStatusIDs = append(opts.DefinitionStatusIDs, ids.Slice()...)
 				} else if ref, ok := x.Value.(*ast.ConceptRef); ok {
-					opts.DefinitionStatusID = ref.ID
+					opts.DefinitionStatusIDs = append(opts.DefinitionStatusIDs, ref.ID)
 				}
 			}
 		case *ast.ModuleFilter:
@@ -926,9 +945,9 @@ func buildConceptFilterOpts(ctx context.Context, filters []ast.Filter, provider 
 					return opts, false, fmt.Errorf("evaluating module filter: %w", err)
 				}
 				if ids != nil && ids.Len() > 0 {
-					opts.ModuleID = ids.Slice()[0]
+					opts.ModuleIDs = append(opts.ModuleIDs, ids.Slice()...)
 				} else if ref, ok := x.Module.(*ast.ConceptRef); ok {
-					opts.ModuleID = ref.ID
+					opts.ModuleIDs = append(opts.ModuleIDs, ref.ID)
 				}
 			}
 		case *ast.EffectiveTimeFilter:
@@ -944,33 +963,33 @@ func buildConceptFilterOpts(ctx context.Context, filters []ast.Filter, provider 
 func buildDialectFilterOpts(ctx context.Context, df *ast.DialectFilter, provider DataProvider) (DialectFilterOpts, error) {
 	opts := DialectFilterOpts{Negate: df.Op == "!="}
 	for _, entry := range df.Dialects {
-		var dialectID string
+		var dialectIDs []string
 		if entry.Dialect != nil {
 			ids, err := Evaluate(ctx, entry.Dialect, provider)
 			if err != nil {
 				return opts, fmt.Errorf("evaluating dialect: %w", err)
 			}
 			if ids != nil && ids.Len() > 0 {
-				dialectID = ids.Slice()[0]
+				dialectIDs = ids.Slice()
 			} else if ref, ok := entry.Dialect.(*ast.ConceptRef); ok {
-				dialectID = ref.ID
+				dialectIDs = []string{ref.ID}
 			}
 		}
-		var acceptID string
+		var acceptIDs []string
 		if entry.Acceptability != nil {
 			ids, err := Evaluate(ctx, entry.Acceptability, provider)
 			if err != nil {
 				return opts, fmt.Errorf("evaluating acceptability: %w", err)
 			}
 			if ids != nil && ids.Len() > 0 {
-				acceptID = ids.Slice()[0]
+				acceptIDs = ids.Slice()
 			} else if ref, ok := entry.Acceptability.(*ast.ConceptRef); ok {
-				acceptID = ref.ID
+				acceptIDs = []string{ref.ID}
 			}
 		}
 		opts.Dialects = append(opts.Dialects, DialectEntryOpts{
-			DialectID:       dialectID,
-			AcceptabilityID: acceptID,
+			DialectIDs:       dialectIDs,
+			AcceptabilityIDs: acceptIDs,
 		})
 	}
 	return opts, nil

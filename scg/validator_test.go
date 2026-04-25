@@ -71,6 +71,9 @@ func (m *mockProvider) FilterConcepts(context.Context, ecl.Set, ecl.ConceptFilte
 func (m *mockProvider) RefsetMembers(context.Context, []string) (ecl.Set, error) {
 	panic("not used")
 }
+func (m *mockProvider) RefsetsContainingMembers(context.Context, []string) (ecl.Set, error) {
+	panic("not used")
+}
 func (m *mockProvider) HistoricalAssociations(context.Context, ecl.Set, string) (ecl.Set, error) {
 	panic("not used")
 }

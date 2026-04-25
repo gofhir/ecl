@@ -25,9 +25,9 @@ type testDescription struct {
 // and active-flag overrides, and implements MatchDescription / FilterConcepts.
 type filterTestProvider struct {
 	*testProvider
-	descriptions map[string][]testDescription // conceptID → descriptions
-	activeFlag   map[string]bool              // conceptID → active? (default true)
-	dialects     map[string]map[string][]string // dialectID → acceptabilityID → conceptIDs
+	descriptions map[string][]testDescription              // conceptID → descriptions
+	activeFlag   map[string]bool                           // conceptID → active? (default true)
+	dialects     map[string]map[string][]string            // dialectID → acceptabilityID → conceptIDs
 	memberFields map[string]map[string]map[string][]string // refsetID → fieldName → fieldValue → conceptIDs
 }
 
@@ -60,15 +60,15 @@ func newFilterFixture() *filterTestProvider {
 		dialects: map[string]map[string][]string{
 			"900000000000509007": { // US English
 				"900000000000548007": {"22298006", "73211009"}, // preferred
-				"900000000000549004": {"64572001"},              // acceptable
+				"900000000000549004": {"64572001"},             // acceptable
 			},
 		},
 		memberFields: map[string]map[string]map[string][]string{
 			"900000000000497000": {
 				"referencedComponentId": {
-					"22298006":  {"22298006"},
-					"64572001":  {"64572001"},
-					"73211009":  {"73211009"},
+					"22298006": {"22298006"},
+					"64572001": {"64572001"},
+					"73211009": {"73211009"},
 				},
 			},
 		},
@@ -93,10 +93,10 @@ func (p *filterTestProvider) MatchDescription(_ context.Context, f DescriptionFi
 			if f.Term != "" && !strings.Contains(strings.ToLower(d.Term), needle) {
 				continue
 			}
-			if f.TypeID != "" && d.TypeID != f.TypeID {
+			if len(f.TypeIDs) > 0 && !containsStr(f.TypeIDs, d.TypeID) {
 				continue
 			}
-			if f.Language != "" && d.Language != f.Language {
+			if len(f.Languages) > 0 && !containsStr(f.Languages, d.Language) {
 				continue
 			}
 			if f.Active != nil && d.Active != *f.Active {
@@ -137,8 +137,12 @@ func (p *filterTestProvider) MatchDialect(_ context.Context, concepts Set, f Dia
 	}
 	concepts.Iter(func(id string) bool {
 		for _, d := range f.Dialects {
-			if byAccept, ok := p.dialects[d.DialectID]; ok {
-				if d.AcceptabilityID == "" {
+			for _, dialectID := range d.DialectIDs {
+				byAccept, ok := p.dialects[dialectID]
+				if !ok {
+					continue
+				}
+				if len(d.AcceptabilityIDs) == 0 {
 					// Any acceptability.
 					for _, ids := range byAccept {
 						for _, cid := range ids {
@@ -148,7 +152,13 @@ func (p *filterTestProvider) MatchDialect(_ context.Context, concepts Set, f Dia
 							}
 						}
 					}
-				} else if ids, ok := byAccept[d.AcceptabilityID]; ok {
+					continue
+				}
+				for _, acceptID := range d.AcceptabilityIDs {
+					ids, ok := byAccept[acceptID]
+					if !ok {
+						continue
+					}
 					for _, cid := range ids {
 						if cid == id {
 							out.m[id] = struct{}{}
@@ -161,6 +171,16 @@ func (p *filterTestProvider) MatchDialect(_ context.Context, concepts Set, f Dia
 		return true
 	})
 	return out, nil
+}
+
+// containsStr reports whether haystack contains needle.
+func containsStr(haystack []string, needle string) bool {
+	for _, h := range haystack {
+		if h == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // RefsetMembersFiltered returns concept IDs from refset members that match
@@ -213,6 +233,18 @@ func TestEvaluate_DescriptionFilter_Language(t *testing.T) {
 	// Only MI has a Spanish description in the fixture.
 	got := evalECL(t, `<< 404684003 {{ language = es }}`, p)
 	assert.ElementsMatch(t, []string{"22298006"}, got.Slice())
+}
+
+func TestEvaluate_DescriptionFilter_Language_MultiValue(t *testing.T) {
+	// Multi-value any-of: matches descriptions in either language.
+	// Without the fix, this would silently take only the first language.
+	p := newFilterFixture()
+	got := evalECL(t, `<< 404684003 {{ language = (en OR es) }}`, p)
+	// All 5 concepts with descriptions match (every one has at least an en
+	// description; 22298006 also has es).
+	assert.ElementsMatch(t,
+		[]string{"22298006", "73211009", "64572001", "404684004", "404684003"},
+		got.Slice())
 }
 
 func TestEvaluate_DescriptionFilter_Term_NoMatch(t *testing.T) {

@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gofhir/ecl/ecl/ast"
 )
 
 // testProvider is a map-backed DataProvider used by evaluator tests.
@@ -114,6 +116,26 @@ func (p *testProvider) RefsetMembers(_ context.Context, refsetIDs []string) (Set
 	for _, rid := range refsetIDs {
 		for _, m := range p.refsets[rid] {
 			out.m[m] = struct{}{}
+		}
+	}
+	return out, nil
+}
+
+func (p *testProvider) RefsetsContainingMembers(_ context.Context, conceptIDs []string) (Set, error) {
+	out := NewSet().(*mapSet)
+	if len(conceptIDs) == 0 {
+		return out, nil
+	}
+	want := make(map[string]struct{}, len(conceptIDs))
+	for _, id := range conceptIDs {
+		want[id] = struct{}{}
+	}
+	for refsetID, members := range p.refsets {
+		for _, m := range members {
+			if _, ok := want[m]; ok {
+				out.m[refsetID] = struct{}{}
+				break
+			}
 		}
 	}
 	return out, nil
@@ -458,6 +480,22 @@ func TestEvaluate_MemberOf_Simple(t *testing.T) {
 	assert.ElementsMatch(t,
 		[]string{"22298006", "64572001", "73211009"},
 		got.Slice())
+}
+
+func TestEvaluate_MemberOf_FieldProjectionRejected(t *testing.T) {
+	// Field projection cannot be expressed through Set; the evaluator must
+	// reject it explicitly rather than silently dropping the projection.
+	p := newFixture()
+	_, err := Evaluate(
+		t.Context(),
+		&ast.MemberOf{
+			Operand: &ast.ConceptRef{ID: "900000000000497000"},
+			Fields:  []string{"referencedComponentId"},
+		},
+		p,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "field projection")
 }
 
 func TestEvaluate_Nested(t *testing.T) {

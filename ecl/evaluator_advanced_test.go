@@ -166,16 +166,21 @@ func TestEvaluate_TopOfSet_Singleton(t *testing.T) {
 
 func TestEvaluate_RefsetContainingAny(t *testing.T) {
 	p := newFixture()
-	// ^R <refsetID> should return the same member set as ^ <refsetID>.
-	expr, err := Parse("^R 900000000000497000")
-	if err != nil {
-		t.Skipf("parser does not yet produce RefsetContainingAny: %v", err)
-	}
-	got, err := Evaluate(context.Background(), expr, p)
-	require.NoError(t, err)
+	// ^R <concept> returns the set of refsets that contain the operand
+	// concept as a member. In the fixture, refset 900000000000497000
+	// contains 22298006.
+	got := evalECL(t, "^R 22298006", p)
 	assert.ElementsMatch(t,
-		[]string{"22298006", "64572001", "73211009"},
+		[]string{"900000000000497000"},
 		got.Slice())
+}
+
+func TestEvaluate_RefsetContainingAny_NoMatch(t *testing.T) {
+	p := newFixture()
+	// 404684003 (Clinical finding) is not a member of any refset in the
+	// fixture, so ^R returns an empty set.
+	got := evalECL(t, "^R 404684003", p)
+	assert.Empty(t, got.Slice())
 }
 
 // ------------------------------------------------------------------------

@@ -61,6 +61,12 @@ type DataProvider interface {
 	// RefsetMembers returns the concept IDs that are members of any of the given refsets.
 	RefsetMembers(ctx context.Context, refsetIDs []string) (Set, error)
 
+	// RefsetsContainingMembers returns the set of refset IDs that contain
+	// any of the given concept IDs as a member. Used to evaluate the ^R
+	// (refset containing any) operator. This is the inverse direction of
+	// RefsetMembers: given concepts, find the refsets they belong to.
+	RefsetsContainingMembers(ctx context.Context, conceptIDs []string) (Set, error)
+
 	// ── History supplements (v2.0) ─────────────────────────────────────────
 	// HistoricalAssociations expands a set of inactive concepts to their
 	// historical replacements according to the given profile (MIN, MOD, MAX, ALL).
@@ -85,8 +91,8 @@ type DataProvider interface {
 // Relationship is a single attribute relationship of a concept.
 type Relationship struct {
 	TypeID        string
-	TargetID      string         // "" when ConcreteValue is set
-	GroupNum       int
+	TargetID      string // "" when ConcreteValue is set
+	GroupNum      int
 	ConcreteValue *ConcreteValue // nil for concept-valued relationships
 }
 
@@ -99,7 +105,9 @@ type ConcreteValue struct {
 }
 
 // DescriptionFilterOpts describes which descriptions to match.
-// Empty fields are ignored (no filter on that dimension).
+// Empty / nil slice fields are ignored (no filter on that dimension).
+// Slice fields use any-of semantics: a description matches if it has
+// any one of the listed values.
 type DescriptionFilterOpts struct {
 	// Term is a substring or phrase to match (case-insensitive).
 	Term string
@@ -107,17 +115,18 @@ type DescriptionFilterOpts struct {
 	// MatchType is "match", "wild" (glob), or "regex". Default "match".
 	MatchType string
 
-	// TypeID filters by description type (SCTID), e.g. synonym, FSN.
-	TypeID string
+	// TypeIDs filters by description type SCTIDs (any-of). Empty = no filter.
+	// Examples: 900000000000003001 (FSN), 900000000000013009 (synonym).
+	TypeIDs []string
 
-	// Language filters by language code (e.g., "en", "es").
-	Language string
+	// Languages filters by language codes (any-of). Empty = no filter.
+	Languages []string
 
 	// Active filters by description active flag. Nil = don't filter.
 	Active *bool
 
-	// ModuleID filters by module SCTID.
-	ModuleID string
+	// ModuleIDs filters by module SCTIDs (any-of).
+	ModuleIDs []string
 
 	// EffectiveTime filters by effectiveTime (YYYYMMDD) with comparison operator.
 	EffectiveTime   string
@@ -125,15 +134,16 @@ type DescriptionFilterOpts struct {
 }
 
 // ConceptFilterOpts describes concept-level metadata filters.
+// Slice fields use any-of semantics.
 type ConceptFilterOpts struct {
 	// Active filters by concept active flag. Nil = don't filter.
 	Active *bool
 
-	// DefinitionStatusID filters by definitionStatus SCTID.
-	DefinitionStatusID string
+	// DefinitionStatusIDs filters by definitionStatus SCTIDs (any-of).
+	DefinitionStatusIDs []string
 
-	// ModuleID filters by module SCTID.
-	ModuleID string
+	// ModuleIDs filters by module SCTIDs (any-of).
+	ModuleIDs []string
 
 	// EffectiveTime + Op as in DescriptionFilterOpts.
 	EffectiveTime   string
@@ -146,10 +156,12 @@ type DialectFilterOpts struct {
 	Negate   bool
 }
 
-// DialectEntryOpts pairs a dialect refset with an optional acceptability.
+// DialectEntryOpts pairs a set of dialect refsets with an optional set of
+// acceptabilities. Match if (any DialectID) AND (any AcceptabilityID); empty
+// AcceptabilityIDs means any acceptability.
 type DialectEntryOpts struct {
-	DialectID       string // SCTID of the dialect language refset
-	AcceptabilityID string // optional; "" = any acceptability
+	DialectIDs       []string // SCTIDs of dialect language refsets (any-of)
+	AcceptabilityIDs []string // optional; nil/empty = any acceptability
 }
 
 // MemberFilterOpts describes member-level field filter constraints.
