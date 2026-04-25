@@ -136,7 +136,7 @@ func (p *testProvider) RelationshipTargets(_ context.Context, sourceIDs, typeIDs
 
 func (p *testProvider) RelationshipSources(_ context.Context, targetIDs, typeIDs Set) (Set, error) {
 	out := NewSet().(*mapSet)
-	if targetIDs == nil || typeIDs == nil {
+	if typeIDs == nil {
 		return out, nil
 	}
 	for src, rels := range p.relationships {
@@ -144,7 +144,7 @@ func (p *testProvider) RelationshipSources(_ context.Context, targetIDs, typeIDs
 			if !typeIDs.Contains(r.TypeID) {
 				continue
 			}
-			if targetIDs.Contains(r.TargetID) {
+			if targetIDs == nil || targetIDs.Contains(r.TargetID) {
 				out.m[src] = struct{}{}
 				break
 			}
@@ -197,6 +197,15 @@ func (p *testProvider) MatchDescription(_ context.Context, _ DescriptionFilterOp
 	return NewSet(), nil
 }
 func (p *testProvider) FilterConcepts(_ context.Context, _ Set, _ ConceptFilterOpts) (Set, error) {
+	return NewSet(), nil
+}
+func (p *testProvider) ResolveIdentifier(_ context.Context, _ string, _ string) (Set, error) {
+	return NewSet(), nil
+}
+func (p *testProvider) MatchDialect(_ context.Context, _ Set, _ DialectFilterOpts) (Set, error) {
+	return NewSet(), nil
+}
+func (p *testProvider) RefsetMembersFiltered(_ context.Context, _ []string, _ MemberFilterOpts) (Set, error) {
 	return NewSet(), nil
 }
 

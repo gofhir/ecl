@@ -100,6 +100,18 @@ func (s *stubProvider) HistoricalAssociations(_ context.Context, _ ecl.Set, _ st
 	return ecl.NewSet(), nil
 }
 
+func (s *stubProvider) ResolveIdentifier(_ context.Context, _ string, _ string) (ecl.Set, error) {
+	return ecl.NewSet(), nil
+}
+
+func (s *stubProvider) MatchDialect(_ context.Context, _ ecl.Set, _ ecl.DialectFilterOpts) (ecl.Set, error) {
+	return ecl.NewSet(), nil
+}
+
+func (s *stubProvider) RefsetMembersFiltered(_ context.Context, _ []string, _ ecl.MemberFilterOpts) (ecl.Set, error) {
+	return ecl.NewSet(), nil
+}
+
 // ------------------------------------------------------------------------
 // Test fixture
 //

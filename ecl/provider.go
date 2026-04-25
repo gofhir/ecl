@@ -36,6 +36,7 @@ type DataProvider interface {
 
 	// RelationshipSources returns the union of source concept IDs of relationships
 	// whose target is in targetIDs and type is in typeIDs (for reverse flag "R").
+	// When targetIDs is nil, all targets are considered (wildcard).
 	RelationshipSources(ctx context.Context, targetIDs Set, typeIDs Set) (Set, error)
 
 	// ConcreteValues returns concrete values for the given source concept and attribute type.
@@ -64,13 +65,29 @@ type DataProvider interface {
 	// HistoricalAssociations expands a set of inactive concepts to their
 	// historical replacements according to the given profile (MIN, MOD, MAX, ALL).
 	HistoricalAssociations(ctx context.Context, conceptIDs Set, profile string) (Set, error)
+
+	// ── Alternate identifiers (v2.2) ──────────────────────────────────────
+	// ResolveIdentifier resolves an alternate identifier (scheme#code) to
+	// SNOMED CT concept IDs.
+	ResolveIdentifier(ctx context.Context, scheme string, code string) (Set, error)
+
+	// ── Dialect filter ────────────────────────────────────────────────────
+	// MatchDialect returns concept IDs whose descriptions match the dialect
+	// filter constraints.
+	MatchDialect(ctx context.Context, concepts Set, filter DialectFilterOpts) (Set, error)
+
+	// ── Member filter ─────────────────────────────────────────────────────
+	// RefsetMembersFiltered returns concept IDs from refset members that match
+	// the member field filter.
+	RefsetMembersFiltered(ctx context.Context, refsetIDs []string, filter MemberFilterOpts) (Set, error)
 }
 
 // Relationship is a single attribute relationship of a concept.
 type Relationship struct {
-	TypeID   string
-	TargetID string
-	GroupNum int
+	TypeID        string
+	TargetID      string         // "" when ConcreteValue is set
+	GroupNum       int
+	ConcreteValue *ConcreteValue // nil for concept-valued relationships
 }
 
 // ConcreteValue is a concrete (non-concept) attribute value.
@@ -121,4 +138,23 @@ type ConceptFilterOpts struct {
 	// EffectiveTime + Op as in DescriptionFilterOpts.
 	EffectiveTime   string
 	EffectiveTimeOp string
+}
+
+// DialectFilterOpts describes dialect filter constraints for descriptions.
+type DialectFilterOpts struct {
+	Dialects []DialectEntryOpts
+	Negate   bool
+}
+
+// DialectEntryOpts pairs a dialect refset with an optional acceptability.
+type DialectEntryOpts struct {
+	DialectID       string // SCTID of the dialect language refset
+	AcceptabilityID string // optional; "" = any acceptability
+}
+
+// MemberFilterOpts describes member-level field filter constraints.
+type MemberFilterOpts struct {
+	FieldName string
+	Op        string // "=" or "!="
+	ValueSet  Set    // pre-resolved concept IDs
 }

@@ -65,6 +65,18 @@ func (m *mockProvider) HistoricalAssociations(_ context.Context, _ Set, _ string
 	return NewSet(), nil
 }
 
+func (m *mockProvider) ResolveIdentifier(_ context.Context, _ string, _ string) (Set, error) {
+	return NewSet(), nil
+}
+
+func (m *mockProvider) MatchDialect(_ context.Context, _ Set, _ DialectFilterOpts) (Set, error) {
+	return NewSet(), nil
+}
+
+func (m *mockProvider) RefsetMembersFiltered(_ context.Context, _ []string, _ MemberFilterOpts) (Set, error) {
+	return NewSet(), nil
+}
+
 // Compile-time check: mockProvider implements DataProvider.
 var _ DataProvider = (*mockProvider)(nil)
 
