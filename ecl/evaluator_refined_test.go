@@ -133,6 +133,25 @@ func TestEvaluate_Refinement_Reverse(t *testing.T) {
 }
 
 // ------------------------------------------------------------------------
+// Grouped refinement with concrete values
+// ------------------------------------------------------------------------.
+
+func TestEvaluate_GroupedRefinement_ConcreteValue(t *testing.T) {
+	p := newFixture()
+	// Grouped: finding site = myocardium AND count >= 1, both in same group.
+	// 22298006 has all three in group 1.
+	got := evalECL(t, `<< 404684003 : { 363698007 = 74281007, 1142139005 >= #1 }`, p)
+	assert.ElementsMatch(t, []string{"22298006"}, got.Slice())
+}
+
+func TestEvaluate_GroupedRefinement_ConcreteValue_NoMatch(t *testing.T) {
+	p := newFixture()
+	// count > 5 — 22298006 has value 2, which is NOT > 5.
+	got := evalECL(t, `<< 404684003 : { 363698007 = 74281007, 1142139005 > #5 }`, p)
+	assert.Equal(t, 0, got.Len())
+}
+
+// ------------------------------------------------------------------------
 // Error handling / deferred features
 // ------------------------------------------------------------------------.
 

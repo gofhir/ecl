@@ -447,9 +447,23 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 			return nil, fmt.Errorf("evaluating attribute name: %w", err)
 		}
 		if isConcreteValue(a.Value) {
-			// Concrete-value sub-clauses inside grouped refinements are not
-			// supported yet (would need per-group concrete-value lookup).
-			return nil, fmt.Errorf("concrete-value comparison inside a group not yet implemented")
+			c := attrClause{op: a.Op, typeIDs: typeIDs, cardinality: a.Cardinality, isConcrete: true}
+			switch v := a.Value.(type) {
+			case *ast.IntegerValue:
+				c.concreteKind = "numeric"
+				c.numericVal = float64(v.Value)
+			case *ast.DecimalValue:
+				c.concreteKind = "numeric"
+				c.numericVal = v.Value
+			case *ast.StringValue:
+				c.concreteKind = "string"
+				c.stringVal = v.Value
+			case *ast.BooleanValue:
+				c.concreteKind = "boolean"
+				c.boolVal = v.Value
+			}
+			clauses = append(clauses, c)
+			continue
 		}
 		switch a.Op {
 		case "=", "!=":
@@ -510,6 +524,12 @@ type attrClause struct {
 	valueSet    Set
 	valueIsAny  bool
 	cardinality *ast.Cardinality
+	// Concrete value fields (mutually exclusive with valueSet).
+	isConcrete   bool
+	numericVal   float64
+	stringVal    string
+	boolVal      bool
+	concreteKind string // "numeric", "string", "boolean"
 }
 
 // groupSatisfiesClauses reports whether a single relationship group satisfies
@@ -522,12 +542,21 @@ func groupSatisfiesClauses(rels []Relationship, clauses []attrClause) bool {
 			if !c.typeIDs.Contains(r.TypeID) {
 				continue
 			}
-			hit := c.valueIsAny || c.valueSet.Contains(r.TargetID)
-			if hit {
-				count++
+			if c.isConcrete {
+				if r.ConcreteValue == nil {
+					continue
+				}
+				if matchConcreteValue(r.ConcreteValue, c) {
+					count++
+				}
+			} else {
+				hit := c.valueIsAny || c.valueSet.Contains(r.TargetID)
+				if hit {
+					count++
+				}
 			}
 		}
-		if c.op == "!=" {
+		if c.op == "!=" && !c.isConcrete {
 			totalOfType := 0
 			for _, r := range rels {
 				if c.typeIDs.Contains(r.TypeID) {
@@ -541,6 +570,33 @@ func groupSatisfiesClauses(rels []Relationship, clauses []attrClause) bool {
 		}
 	}
 	return true
+}
+
+// matchConcreteValue checks if a stored concrete value satisfies the clause comparison.
+func matchConcreteValue(cv *ConcreteValue, c attrClause) bool {
+	switch c.concreteKind {
+	case "numeric":
+		if cv.Kind != "integer" && cv.Kind != "decimal" {
+			return false
+		}
+		f, err := strconv.ParseFloat(cv.Value, 64)
+		if err != nil {
+			return false
+		}
+		return compareFloat(f, c.op, c.numericVal)
+	case "string":
+		if cv.Kind != "string" {
+			return false
+		}
+		return compareString(cv.Value, c.op, c.stringVal)
+	case "boolean":
+		if cv.Kind != "boolean" {
+			return false
+		}
+		stored := cv.Value == "true"
+		return compareBool(stored, c.op, c.boolVal)
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------

@@ -298,6 +298,7 @@ func newFixture() *testProvider {
 			"22298006": {
 				{TypeID: "363698007", TargetID: "74281007", GroupNum: 1},
 				{TypeID: "116676008", TargetID: "55641003", GroupNum: 1},
+				{TypeID: "1142139005", TargetID: "", GroupNum: 1, ConcreteValue: &ConcreteValue{Kind: "integer", Value: "2"}},
 			},
 			"73211009": {
 				{TypeID: "363698007", TargetID: "113331007", GroupNum: 1},
