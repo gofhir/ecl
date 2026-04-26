@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0](https://github.com/gofhir/ecl/compare/v1.0.0...v1.1.0) (2026-04-26)
+
+
+### Features
+
+* add gofhir-ecl CLI and ECL v2.2 conformance suite ([4544b17](https://github.com/gofhir/ecl/commit/4544b17ada99709390f103212291260d263564f1))
+* gofhir-ecl CLI and ECL v2.2 conformance suite ([d194a9b](https://github.com/gofhir/ecl/commit/d194a9b38be20c75540ef2d48ea47ec16dd84ecb))
+
 ## [1.0.0](https://github.com/gofhir/ecl/compare/v0.1.0...v1.0.0) (2026-04-25)
 
 
