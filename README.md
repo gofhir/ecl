@@ -3,6 +3,7 @@
 [![CI](https://github.com/gofhir/ecl/actions/workflows/ci.yml/badge.svg)](https://github.com/gofhir/ecl/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/gofhir/ecl.svg)](https://pkg.go.dev/github.com/gofhir/ecl)
 [![Release](https://img.shields.io/github/v/release/gofhir/ecl)](https://github.com/gofhir/ecl/releases)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 Embeddable parser and evaluator for the SNOMED CT **Expression Constraint Language (ECL) v2.2** in pure Go. Comes with parsers for **SNOMED Compositional Grammar (SCG)** and a **Machine Readable Concept Model (MRCM)** validator, plus a `gofhir-ecl` CLI and a 44-case conformance suite.
 
@@ -204,7 +205,7 @@ The conformance suite is the source of truth for expected behavior — extending
 
 ## License
 
-See `LICENSE`. (Add one if missing — the project does not yet declare a license.)
+[Apache License 2.0](LICENSE) — Copyright © 2026 Roberto Araneda Espinoza.
 
 ## See also
 
