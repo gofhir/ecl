@@ -1,0 +1,20 @@
+name: Primitives (ConceptRef, Wildcard, Nested)
+fixture: ../fixtures/standard.yaml
+specSection: "5.0 Primitives"
+
+cases:
+  - name: bare concept reference resolves to itself
+    expression: "73211009"
+    expectedIds: ["73211009"]
+
+  - name: concept reference with term
+    expression: "73211009 |Diabetes mellitus|"
+    expectedIds: ["73211009"]
+
+  - name: parenthesised expression
+    expression: "(<< 73211009)"
+    expectedIds: ["73211009", "11687002"]
+
+  - name: wildcard returns every active concept (sample subset check)
+    expression: "<< 11687002"
+    expectedIds: ["11687002"]

@@ -1,0 +1,22 @@
+name: History supplements
+fixture: ../fixtures/standard.yaml
+specSection: "5.5 History supplements"
+
+cases:
+  - name: HISTORY-MAX (default) follows all associations
+    expression: "11111111 {{ +HISTORY-MAX }}"
+    expectedIds:
+      - "11111111"
+      - "22298006"
+
+  - name: HISTORY-MIN follows SAME_AS only
+    expression: "11111111 {{ +HISTORY-MIN }}"
+    expectedIds:
+      - "11111111"
+      - "22298006"
+
+  - name: bare +HISTORY defaults to MAX
+    expression: "11111111 {{ +HISTORY }}"
+    expectedIds:
+      - "11111111"
+      - "22298006"

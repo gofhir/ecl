@@ -1,0 +1,62 @@
+name: Hierarchy operators
+fixture: ../fixtures/standard.yaml
+specSection: "5.1 Hierarchy operators"
+
+cases:
+  - name: descendantOrSelfOf root
+    expression: "<< 138875005"
+    expectedIds:
+      - "138875005"
+      - "404684003"
+      - "22298006"
+      - "73211009"
+      - "11687002"
+      - "64572001"
+      - "95566004"
+
+  - name: descendantOf root
+    expression: "< 138875005"
+    expectedIds:
+      - "404684003"
+      - "22298006"
+      - "73211009"
+      - "11687002"
+      - "64572001"
+      - "95566004"
+
+  - name: childOf root (direct only)
+    expression: "<! 138875005"
+    expectedIds:
+      - "404684003"
+
+  - name: childOrSelfOf root
+    expression: "<<! 138875005"
+    expectedIds:
+      - "138875005"
+      - "404684003"
+
+  - name: ancestorOrSelfOf leaf
+    expression: ">> 11687002"
+    expectedIds:
+      - "11687002"
+      - "73211009"
+      - "404684003"
+      - "138875005"
+
+  - name: ancestorOf leaf
+    expression: "> 11687002"
+    expectedIds:
+      - "73211009"
+      - "404684003"
+      - "138875005"
+
+  - name: parentOf leaf
+    expression: ">! 11687002"
+    expectedIds:
+      - "73211009"
+
+  - name: parentOrSelfOf leaf
+    expression: ">>! 11687002"
+    expectedIds:
+      - "11687002"
+      - "73211009"

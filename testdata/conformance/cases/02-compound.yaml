@@ -1,0 +1,32 @@
+name: Compound expressions (AND / OR / MINUS)
+fixture: ../fixtures/standard.yaml
+specSection: "5.2 Compound expressions"
+
+cases:
+  - name: AND of overlapping subtrees
+    expression: "<< 404684003 AND << 73211009"
+    expectedIds:
+      - "73211009"
+      - "11687002"
+
+  - name: OR of disjoint concepts
+    expression: "22298006 OR 73211009"
+    expectedIds:
+      - "22298006"
+      - "73211009"
+
+  - name: MINUS removes branch
+    expression: "<< 404684003 MINUS << 73211009"
+    expectedIds:
+      - "404684003"
+      - "22298006"
+      - "64572001"
+      - "95566004"
+
+  - name: nested OR + AND
+    expression: "(<< 73211009 OR << 64572001) AND << 404684003"
+    expectedIds:
+      - "73211009"
+      - "11687002"
+      - "64572001"
+      - "95566004"

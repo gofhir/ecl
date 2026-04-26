@@ -137,6 +137,18 @@ linters:
       - linters:
           - forcetypeassert
         path: ecl/parser\.go
+      # The in-memory DataProvider implementation methods are required to be
+      # exported (they satisfy the ecl.DataProvider interface) but the
+      # receiver type is intentionally unexported.
+      - linters:
+          - revive
+        path: internal/conformance/fixture\.go
+        text: "exported method inMemoryProvider\\."
+      # CLI subcommands print to stdout via fmt.Fprintf/Fprintln; their
+      # error returns are not actionable in a CLI context.
+      - linters:
+          - errcheck
+        path: cmd/gofhir-ecl/
     paths:
       - third_party$
       - builtin$

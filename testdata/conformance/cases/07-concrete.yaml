@@ -1,0 +1,20 @@
+name: Concrete value comparisons
+fixture: ../fixtures/standard.yaml
+specSection: "5.3.4 Concrete values"
+
+cases:
+  - name: integer equality
+    expression: "<< 404684003 : 1142139005 = #5"
+    expectedIds: ["73211009"]
+
+  - name: integer greater than
+    expression: "<< 404684003 : 1142139005 > #4"
+    expectedIds: ["73211009"]
+
+  - name: integer less than (no match)
+    expression: "<< 404684003 : 1142139005 < #5"
+    expectedIds: []
+
+  - name: integer not equal
+    expression: "<< 404684003 : 1142139005 != #6"
+    expectedIds: ["73211009"]
