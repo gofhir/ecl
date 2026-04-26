@@ -1,0 +1,38 @@
+name: ECL v2.2 features (Top, Bottom, AltIdentifier, ^R, MemberOf)
+fixture: ../fixtures/standard.yaml
+specSection: "v2.2 additions"
+
+cases:
+  - name: memberOf refset
+    expression: "^ 900000000000497000"
+    expectedIds:
+      - "22298006"
+      - "73211009"
+
+  - name: refsetContainingAny - inverse direction
+    expression: "^R 22298006"
+    expectedIds:
+      - "900000000000497000"
+
+  - name: refsetContainingAny - concept not in any refset
+    expression: "^R 64572001"
+    expectedIds: []
+
+  - name: top of subtree
+    expression: "!!> (<< 404684003)"
+    expectedIds:
+      - "404684003"
+
+  - name: bottom of subtree
+    expression: "!!< (<< 73211009)"
+    expectedIds:
+      - "11687002"
+
+  - name: altIdentifier resolution
+    expression: "LOINC#1234-5"
+    expectedIds:
+      - "22298006"
+
+  - name: altIdentifier - unknown scheme returns empty
+    expression: "ICD10#E11"
+    expectedIds: []

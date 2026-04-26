@@ -1,0 +1,28 @@
+name: Refinements (basic, grouped, reverse, dot)
+fixture: ../fixtures/standard.yaml
+specSection: "5.3 Refinements"
+
+cases:
+  - name: ungrouped attribute equality
+    expression: "<< 404684003 : 363698007 = 74281007"
+    expectedIds: ["22298006"]
+
+  - name: ungrouped attribute with hierarchical value
+    expression: "<< 404684003 : 363698007 = << 74281007"
+    expectedIds: ["22298006"]
+
+  - name: attribute name wildcard via Any (*)
+    expression: "<< 404684003 : * = 74281007"
+    expectedIds: ["22298006"]
+
+  - name: dot notation traversal (finding site of MI)
+    expression: "(22298006).363698007"
+    expectedIds: ["74281007"]
+
+  - name: reverse attribute - body structure is a finding-site target of clinical findings
+    expression: "74281007 : R 363698007 = << 404684003"
+    expectedIds: ["74281007"]
+
+  - name: refinement with two attributes (AND in same group)
+    expression: "<< 404684003 : { 363698007 = 74281007, 116676008 = 55641003 }"
+    expectedIds: ["22298006"]
