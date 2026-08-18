@@ -107,8 +107,18 @@ type DataProvider interface {
 	RefsetsContainingMembers(ctx context.Context, conceptIDs []string) (Set, error)
 
 	// ── History supplements (v2.0) ─────────────────────────────────────────
-	// HistoricalAssociations expands a set of inactive concepts to their
-	// historical replacements according to the given profile (MIN, MOD, MAX, ALL).
+	// HistoricalAssociations returns the INACTIVE concepts that were replaced by
+	// any of the given concepts, according to the profile (MIN, MOD, MAX, ALL).
+	//
+	// Direction matters and is the opposite of what one might assume. The spec
+	// defines the supplement as
+	//
+	//	(X) OR (^ 900000000000527005 {{ M targetComponentId = (X) }})
+	//
+	// so the input is the set of (typically active) concepts, and the result is
+	// the historical concepts whose targetComponentId points AT them. An
+	// implementation that expands active concepts to their replacements instead
+	// makes `{{ +HISTORY }}` a silent no-op for every realistic input.
 	HistoricalAssociations(ctx context.Context, conceptIDs Set, profile string) (Set, error)
 
 	// ── Alternate identifiers (v2.2) ──────────────────────────────────────

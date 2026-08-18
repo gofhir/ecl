@@ -524,13 +524,22 @@ func (p *inMemoryProvider) HistoricalAssociations(_ context.Context, conceptIDs 
 	out := ecl.NewSet()
 	conceptIDs.Iter(func(id string) bool {
 		for _, h := range p.spec.HistoricalAssociations {
-			if h.Source != id {
+			// The input concepts are the TARGETS of the associations, and the
+			// result is the inactive concepts pointing at them.
+			//
+			// The spec defines the supplement as
+			//   (X) OR (^ 900000000000527005 {{ M targetComponentId = (X) }})
+			// so it adds the association members whose targetComponentId falls in
+			// X. Walking it the other way round (matching h.Source against id and
+			// emitting h.Target) made {{ +HISTORY }} a silent no-op for any set of
+			// active concepts, which is the whole point of the operator.
+			if h.Target != id {
 				continue
 			}
 			if allowed != nil && !contains(allowed, h.Refset) {
 				continue
 			}
-			out = out.Union(ecl.NewSetFromSlice([]string{h.Target}))
+			out = out.Union(ecl.NewSetFromSlice([]string{h.Source}))
 		}
 		return true
 	})

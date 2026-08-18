@@ -63,7 +63,7 @@ cases:
   # applied, `* {{ C active = false }}` could never return anything.
   - name: wildcard with active false returns the inactive concepts
     expression: "* {{ C active = false }}"
-    expectedIds: ["11111111", "22222222"]
+    expectedIds: ["11111111", "22222222", "33333333"]
 
   - name: descendants with active true excludes nothing here
     expression: "<< 73211009 {{ C active = true }}"

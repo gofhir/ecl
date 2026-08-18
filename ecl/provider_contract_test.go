@@ -107,7 +107,7 @@ func TestEvaluate_RespectsCancelledContext(t *testing.T) {
 // active flag or `* {{ C active = false }}` can never return anything.
 func TestEvaluate_WildcardIncludesInactiveConcepts(t *testing.T) {
 	inactive := evalFixture(t, "* {{ C active = false }}")
-	require.ElementsMatch(t, []string{"11111111", "22222222"}, inactive.Slice())
+	require.ElementsMatch(t, []string{"11111111", "22222222", "33333333"}, inactive.Slice())
 
 	active := evalFixture(t, "* {{ C active = true }}")
 	require.NotContains(t, active.Slice(), "11111111")

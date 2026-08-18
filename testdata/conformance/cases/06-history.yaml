@@ -2,21 +2,46 @@ name: History supplements
 fixture: ../fixtures/standard.yaml
 specSection: "5.5 History supplements"
 
-cases:
-  - name: HISTORY-MAX (default) follows all associations
-    expression: "11111111 {{ +HISTORY-MAX }}"
-    expectedIds:
-      - "11111111"
-      - "22298006"
+# The supplement is defined as
+#   (X) OR (^ 900000000000527005 {{ M targetComponentId = (X) }})
+# so it adds the INACTIVE concepts whose targetComponentId points at X. The input
+# is therefore the (typically active) concept, and the historical concepts come
+# back with it.
+#
+# These cases used to start from the inactive concept 11111111, which is what the
+# reversed provider implementation happened to satisfy. That made them pass while
+# {{ +HISTORY }} was a silent no-op for every realistic input: applied to an
+# active concept it returned that concept unchanged.
+#
+# The fixture points three associations at 22298006 through refsets in different
+# profile tiers, so the three profiles select different sets:
+#   11111111 SAME_AS                -> MIN, MOD, MAX
+#   22222222 REPLACED_BY            -> MOD, MAX
+#   33333333 POSSIBLY_EQUIVALENT_TO -> MAX only
 
+cases:
   - name: HISTORY-MIN follows SAME_AS only
-    expression: "11111111 {{ +HISTORY-MIN }}"
-    expectedIds:
-      - "11111111"
-      - "22298006"
+    expression: "22298006 {{ +HISTORY-MIN }}"
+    expectedIds: ["22298006", "11111111"]
+
+  - name: HISTORY-MOD adds REPLACED_BY
+    expression: "22298006 {{ +HISTORY-MOD }}"
+    expectedIds: ["22298006", "11111111", "22222222"]
+
+  - name: HISTORY-MAX follows every association
+    expression: "22298006 {{ +HISTORY-MAX }}"
+    expectedIds: ["22298006", "11111111", "22222222", "33333333"]
 
   - name: bare +HISTORY defaults to MAX
-    expression: "11111111 {{ +HISTORY }}"
-    expectedIds:
-      - "11111111"
-      - "22298006"
+    expression: "22298006 {{ +HISTORY }}"
+    expectedIds: ["22298006", "11111111", "22222222", "33333333"]
+
+  # The supplement applies to a set, not just a single concept.
+  - name: history supplement over a hierarchy query
+    expression: "<< 22298006 {{ +HISTORY-MIN }}"
+    expectedIds: ["22298006", "11111111"]
+
+  # A concept nothing points at comes back unchanged.
+  - name: concept with no historical associations is unchanged
+    expression: "95566004 {{ +HISTORY-MAX }}"
+    expectedIds: ["95566004"]

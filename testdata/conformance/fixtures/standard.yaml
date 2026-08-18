@@ -37,7 +37,8 @@ concepts:
   # discriminate. Neither has a parent, so they are outside the root's closure
   # and the hierarchy cases are unaffected.
   - {id: "11111111",  display: "Old MI (inactive)", active: false}
-  - {id: "22222222",  display: "Retired diabetes concept (inactive)", active: false}
+  - {id: "22222222",  display: "Superseded MI concept (inactive)", active: false}
+  - {id: "33333333",  display: "Loosely related MI concept (inactive)", active: false}
   # Description type SCTIDs (so ConceptExists succeeds)
   - {id: "900000000000003001", display: "Fully specified name"}
   - {id: "900000000000013009", display: "Synonym"}
@@ -105,11 +106,18 @@ memberFields:
   - {refset: "900000000000497000", member: "22298006", fieldName: "mapTarget", value: "G30.9"}
   - {refset: "900000000000497000", member: "73211009", fieldName: "mapTarget", value: "E11.9"}
 
-# Two associations with different refsets, so the MIN / MOD / MAX profiles
-# select different sets instead of all returning the same single row.
+# Three associations pointing at the SAME active concept through refsets in
+# different profile tiers, so MIN / MOD / MAX select different sets. With a single
+# association the three profiles returned the same thing and the cases could not
+# discriminate between them at all.
+#
+#   SAME_AS                  -> MIN, MOD and MAX
+#   REPLACED_BY              -> MOD and MAX
+#   POSSIBLY_EQUIVALENT_TO   -> MAX only
 historicalAssociations:
   - {refset: "900000000000527005", source: "11111111", target: "22298006"}  # SAME_AS
-  - {refset: "900000000000528000", source: "22222222", target: "73211009"}  # WAS_A
+  - {refset: "900000000000528000", source: "22222222", target: "22298006"}  # REPLACED_BY
+  - {refset: "900000000000523009", source: "33333333", target: "22298006"}  # POSSIBLY_EQUIVALENT_TO
 
 altIdentifiers:
   "LOINC":
