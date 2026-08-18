@@ -92,3 +92,24 @@ cases:
   - name: member field filter with a negated string value
     expression: '^ 900000000000497000 {{ M mapTarget != "G30.9" }}'
     expectedIds: ["73211009"]
+
+  # The default "match" search type is word-prefix, not substring: every word of
+  # the search term must be a prefix of some word of the description, in any
+  # order. The reference fixture used strings.Contains, which was wrong in both
+  # directions -- and since the README points implementors at that fixture, it
+  # taught the wrong semantics.
+  - name: term match ignores word order
+    expression: '<< 404684003 {{ D term = "infarction myocardial" }}'
+    expectedIds: ["22298006"]
+
+  - name: term match does not match mid-word
+    expression: '<< 404684003 {{ D term = "farct" }}'
+    expectedIds: []
+
+  - name: term match accepts a word prefix
+    expression: '<< 404684003 {{ D term = "infarct" }}'
+    expectedIds: ["22298006"]
+
+  - name: term match requires every word to match
+    expression: '<< 404684003 {{ D term = "myocardial diabetes" }}'
+    expectedIds: []

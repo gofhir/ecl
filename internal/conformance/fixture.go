@@ -428,13 +428,41 @@ func termMatches(value, term, matchType, lowerTerm string) bool {
 	case "wild":
 		// Glob → simplified: '*' anywhere, case-insensitive.
 		return globMatch(strings.ToLower(value), strings.ToLower(term))
-	case "regex":
-		// In-memory implementation deliberately punts: report any-match.
-		// A real implementation would use regexp; we keep deps minimal.
-		return strings.Contains(strings.ToLower(value), lowerTerm)
 	default: // "match" or empty
-		return strings.Contains(strings.ToLower(value), lowerTerm)
+		return wordPrefixMatch(value, lowerTerm)
 	}
+}
+
+// wordPrefixMatch implements the default "match" search type: every word of the
+// search term must be a prefix of some word of the description, in any order.
+//
+// This replaced strings.Contains, which was wrong in both directions and, being
+// the reference implementation the README points implementors at, taught the
+// wrong semantics:
+//
+//	{{ D term = "infarction myocardial" }}  Contains: no match (order matters)
+//	                                        correct:  matches (order is irrelevant)
+//	{{ D term = "farct" }}                  Contains: matches (mid-word)
+//	                                        correct:  no match (not a word prefix)
+func wordPrefixMatch(value, lowerTerm string) bool {
+	needles := strings.Fields(lowerTerm)
+	if len(needles) == 0 {
+		return true
+	}
+	haystack := strings.Fields(strings.ToLower(value))
+	for _, needle := range needles {
+		found := false
+		for _, word := range haystack {
+			if strings.HasPrefix(word, needle) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // globMatch implements '*' glob matching (no '?', no character classes) for
