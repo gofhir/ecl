@@ -18,19 +18,19 @@ func runExplain(args []string) error {
 
 func runExplainWithOutput(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("explain", flag.ContinueOnError)
-	fs.SetOutput(out)
+	fs.SetOutput(os.Stderr) // diagnostics go to stderr; out carries results only
 	fs.Usage = func() {
-		fmt.Fprintln(out, "Usage: gofhir-ecl explain <expression>")
-		fmt.Fprintln(out, "       gofhir-ecl explain -")
-		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Parses the expression and prints the AST as an indented tree.")
+		fmt.Fprintln(os.Stderr, "Usage: gofhir-ecl explain <expression>")
+		fmt.Fprintln(os.Stderr, "       gofhir-ecl explain -")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "Parses the expression and prints the AST as an indented tree.")
 	}
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
 		fs.Usage()
-		return fmt.Errorf("expected exactly one expression argument")
+		return fmt.Errorf("%w: expected exactly one expression argument", errUsage)
 	}
 
 	expr, err := readExpression(fs.Arg(0))

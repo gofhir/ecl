@@ -16,20 +16,20 @@ func runValidate(args []string) error {
 // runValidateWithOutput is the testable seam: callers can capture stdout.
 func runValidateWithOutput(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("validate", flag.ContinueOnError)
-	fs.SetOutput(out)
+	fs.SetOutput(os.Stderr) // diagnostics go to stderr; out carries results only
 	fs.Usage = func() {
-		fmt.Fprintln(out, "Usage: gofhir-ecl validate <expression>")
-		fmt.Fprintln(out, "       gofhir-ecl validate -")
-		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Reads the expression from the given argument, or from stdin when '-' is given.")
-		fmt.Fprintln(out, "Exits 0 on valid syntax, non-zero with a parse error otherwise.")
+		fmt.Fprintln(os.Stderr, "Usage: gofhir-ecl validate <expression>")
+		fmt.Fprintln(os.Stderr, "       gofhir-ecl validate -")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "Reads the expression from the given argument, or from stdin when '-' is given.")
+		fmt.Fprintln(os.Stderr, "Exits 0 on valid syntax, non-zero with a parse error otherwise.")
 	}
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
 		fs.Usage()
-		return fmt.Errorf("expected exactly one expression argument")
+		return fmt.Errorf("%w: expected exactly one expression argument", errUsage)
 	}
 
 	expr, err := readExpression(fs.Arg(0))

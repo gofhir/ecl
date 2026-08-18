@@ -18,13 +18,13 @@ func runEval(args []string) error {
 
 func runEvalWithOutput(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("eval", flag.ContinueOnError)
-	fs.SetOutput(out)
+	fs.SetOutput(os.Stderr) // diagnostics go to stderr; out carries results only
 	fixturePath := fs.String("fixture", "", "path to a YAML fixture defining the in-memory DataProvider (required)")
 	fs.Usage = func() {
-		fmt.Fprintln(out, "Usage: gofhir-ecl eval --fixture <path> <expression>")
-		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Evaluates the expression against an in-memory provider built from the YAML")
-		fmt.Fprintln(out, "fixture. Prints the resulting concept IDs, one per line.")
+		fmt.Fprintln(os.Stderr, "Usage: gofhir-ecl eval --fixture <path> <expression>")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "Evaluates the expression against an in-memory provider built from the YAML")
+		fmt.Fprintln(os.Stderr, "fixture. Prints the resulting concept IDs, one per line.")
 	}
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -35,7 +35,7 @@ func runEvalWithOutput(args []string, out io.Writer) error {
 	}
 	if fs.NArg() != 1 {
 		fs.Usage()
-		return fmt.Errorf("expected exactly one expression argument")
+		return fmt.Errorf("%w: expected exactly one expression argument", errUsage)
 	}
 
 	expr, err := readExpression(fs.Arg(0))

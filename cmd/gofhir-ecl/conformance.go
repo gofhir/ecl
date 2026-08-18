@@ -19,16 +19,16 @@ func runConformance(args []string) error {
 
 func runConformanceWithOutput(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("conformance", flag.ContinueOnError)
-	fs.SetOutput(out)
+	fs.SetOutput(os.Stderr) // diagnostics go to stderr; out carries results only
 	suiteDir := fs.String("suites", "testdata/conformance/cases", "directory containing suite YAML files")
 	fixtureDir := fs.String("fixtures", "testdata/conformance/fixtures", "directory for fixture YAML files referenced by suites")
 	filter := fs.String("filter", "", "regex; only cases whose name matches are run")
 	verbose := fs.Bool("v", false, "print PASS lines (failures and skips are always printed)")
 	fs.Usage = func() {
-		fmt.Fprintln(out, "Usage: gofhir-ecl conformance [-suites <dir>] [-fixtures <dir>] [-filter <regex>] [-v]")
-		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Runs the bundled ECL v2.2 conformance suite. Exits with a non-zero status")
-		fmt.Fprintln(out, "if any case fails.")
+		fmt.Fprintln(os.Stderr, "Usage: gofhir-ecl conformance [-suites <dir>] [-fixtures <dir>] [-filter <regex>] [-v]")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "Runs the bundled ECL v2.2 conformance suite. Exits with a non-zero status")
+		fmt.Fprintln(os.Stderr, "if any case fails.")
 	}
 	if err := fs.Parse(args); err != nil {
 		return err
