@@ -1,0 +1,23 @@
+version: 2
+
+# Without this, a dependency update only lands when someone remembers. The ANTLR
+# runtime in particular has to stay in step with the version the committed parser
+# was generated with (see ANTLR_VERSION in the Makefile), so its updates are worth
+# reviewing rather than merging blind.
+updates:
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "chore(ci)"
+      include: scope

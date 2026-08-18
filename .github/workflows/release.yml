@@ -14,7 +14,13 @@ jobs:
     name: Release Please
     runs-on: ubuntu-latest
     steps:
+      # Point at the config file. Passing release-type inline made the action
+      # IGNORE release-please-config.json entirely, so settings written there --
+      # bump-minor-pre-major and bump-patch-for-minor-pre-major among them --
+      # never applied. That is how the jump to v1.0.0 happened without anyone
+      # deciding on it.
       - uses: googleapis/release-please-action@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          release-type: go
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

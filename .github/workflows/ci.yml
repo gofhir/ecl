@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege by default: no job needs write access to the repository.
+permissions:
+  contents: read
+
 env:
   GO_VERSION: "1.24"
 
@@ -27,8 +31,55 @@ jobs:
         with:
           version: v2.11.3
 
+      # go.mod carried yaml.v3 as "// indirect" while internal/conformance
+      # imported it directly, so this step failed the day it was added.
+      - name: go.mod is tidy
+        run: go mod tidy -diff
+
   test:
-    name: Test
+    name: Test (Go ${{ matrix.go }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Report every combination rather than stopping at the first failure: a
+      # platform-specific break is exactly what this matrix exists to reveal.
+      fail-fast: false
+      matrix:
+        # The README offers this library for edge devices, so it cannot be
+        # verified on one Linux with one Go version.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        go: ["1.24", "1.25"]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go${{ matrix.go }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go${{ matrix.go }}-
+
+      - name: Run tests
+        run: go test -race ./...
+
+      # Runs the same suites through the CLI. Guards the binary itself and the
+      # paths it resolves, which the unit tests do not exercise.
+      - name: Conformance suite (CLI)
+        run: go run ./cmd/gofhir-ecl conformance
+
+      - name: Verify module
+        run: go mod verify
+
+  coverage:
+    name: Coverage
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -39,23 +90,8 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Cache Go modules
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
-
-      - name: Run tests
-        run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
-
-      # Runs the same suites through the CLI. Guards the binary itself, which
-      # the unit tests never exercise (cmd/ is at 0% coverage).
-      - name: Conformance suite (CLI)
-        run: go run ./cmd/gofhir-ecl conformance
+      - name: Run tests with coverage
+        run: go test -race -coverprofile=coverage.txt -covermode=atomic ./...
 
       - name: Upload coverage
         uses: codecov/codecov-action@v5
@@ -64,5 +100,31 @@ jobs:
           files: coverage.txt
         continue-on-error: true
 
-      - name: Verify module
-        run: go mod verify
+  generated:
+    name: Generated parser is current
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Set up Java (ANTLR runs on the JVM)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # Nothing detected an edited ECL.g4 that was never regenerated, or a
+      # hand-edited file under ecl/grammar/. Both would be a 48k-line diff
+      # nobody could review.
+      - name: Regenerate and diff
+        run: |
+          make generate
+          git diff --exit-code -- ecl/grammar/ || {
+            echo "::error::ecl/grammar/ is out of date with ECL.g4 — run 'make generate' and commit the result"
+            exit 1
+          }
