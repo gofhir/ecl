@@ -94,6 +94,22 @@ func (m *Model) FindDomains(attributeID string) []AttributeDomain {
 	return out
 }
 
+// AllDomains groups every domain rule by attribute ID.
+//
+// The validator needs this to evaluate minimum cardinality: walking the
+// expression's attributes can only see the ones that are present, so a mandatory
+// attribute that is missing would never be checked.
+func (m *Model) AllDomains() map[string][]AttributeDomain {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string][]AttributeDomain)
+	for _, d := range m.Domains {
+		out[d.AttributeID] = append(out[d.AttributeID], d)
+	}
+	return out
+}
+
 // FindRanges returns all range rules for the given attribute. The returned
 // slice shares storage with the model and must not be modified by the caller.
 func (m *Model) FindRanges(attributeID string) []AttributeRange {

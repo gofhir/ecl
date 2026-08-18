@@ -367,3 +367,111 @@ func TestValidate_NilArgs(t *testing.T) {
 	_, err = Validate(context.Background(), expr, newTestModel(), nil)
 	assert.Error(t, err)
 }
+
+// TestValidate_MultipleDomainRowsAreAlternatives covers the shape the MRCM
+// Attribute Domain refset actually distributes: one row per domain (and per
+// contentTypeId) for the same attribute.
+//
+// The rows are ALTERNATIVES -- the focus concept has to be in at least one. The
+// validator used to require it to be in every row and emitted a domain_violation
+// for each one it was not in, so a valid expression came back invalid.
+func TestValidate_MultipleDomainRowsAreAlternatives(t *testing.T) {
+	model := &Model{
+		Domains: []AttributeDomain{
+			{
+				AttributeID:    "363698007",
+				DomainECL:      "<< 404684003", // clinical finding
+				Grouped:        true,
+				Cardinality:    Cardinality{Min: 0, Max: -1},
+				RuleStrengthID: RuleStrengthMandatory,
+			},
+			{
+				AttributeID:    "363698007",
+				DomainECL:      "<< 442083009", // a different domain
+				Grouped:        true,
+				Cardinality:    Cardinality{Min: 0, Max: -1},
+				RuleStrengthID: RuleStrengthMandatory,
+			},
+		},
+		Ranges: []AttributeRange{
+			{AttributeID: "363698007", RangeECL: "<< 442083009", RuleStrengthID: RuleStrengthMandatory},
+		},
+	}
+
+	// 22298006 is in the first domain only, which is enough.
+	expr := mustParseSCG(t, "22298006:{363698007=74281007}")
+	res, err := Validate(context.Background(), expr, model, newTestProvider())
+	require.NoError(t, err)
+	assert.True(t, res.Valid, "issues: %+v", res.Issues)
+}
+
+// TestValidate_MinimumCardinalityOnAbsentAttribute covers the case the minimum
+// exists to catch: a mandatory attribute that is missing entirely.
+//
+// The check used to iterate the counts collected from the expression, which by
+// construction only contains attributes that are PRESENT, so `count < Min` was
+// unreachable and a rule with Min:1 reported Valid=true.
+func TestValidate_MinimumCardinalityOnAbsentAttribute(t *testing.T) {
+	model := &Model{
+		Domains: []AttributeDomain{
+			{
+				AttributeID:    "363698007",
+				DomainECL:      "<< 404684003",
+				Grouped:        true,
+				Cardinality:    Cardinality{Min: 1, Max: -1}, // mandatory
+				RuleStrengthID: RuleStrengthMandatory,
+			},
+		},
+	}
+
+	// The focus concept is in the domain but carries no attributes at all.
+	expr := mustParseSCG(t, "22298006")
+	res, err := Validate(context.Background(), expr, model, newTestProvider())
+	require.NoError(t, err)
+	assert.False(t, res.Valid, "a missing mandatory attribute must be reported")
+	require.Len(t, res.Issues, 1)
+	assert.Equal(t, IssueKindCardinalityViolation, res.Issues[0].Kind)
+	assert.Equal(t, "363698007", res.Issues[0].AttributeID)
+}
+
+// TestValidate_MinimumCardinalityIgnoresInapplicableDomain checks the other half:
+// a mandatory attribute whose domain does not contain the focus concept says
+// nothing about the expression and must not be reported.
+func TestValidate_MinimumCardinalityIgnoresInapplicableDomain(t *testing.T) {
+	model := &Model{
+		Domains: []AttributeDomain{
+			{
+				AttributeID:    "363698007",
+				DomainECL:      "<< 442083009", // 22298006 is not in here
+				Grouped:        true,
+				Cardinality:    Cardinality{Min: 1, Max: -1},
+				RuleStrengthID: RuleStrengthMandatory,
+			},
+		},
+	}
+
+	expr := mustParseSCG(t, "22298006")
+	res, err := Validate(context.Background(), expr, model, newTestProvider())
+	require.NoError(t, err)
+	assert.True(t, res.Valid, "issues: %+v", res.Issues)
+}
+
+// TestLoad_RejectsInvalidRuleECL covers validating the rule ECL at load time. A
+// rule with an empty or unparseable constraint used to load fine and then fail on
+// every validation that reached the attribute, far from the actual mistake.
+func TestLoad_RejectsInvalidRuleECL(t *testing.T) {
+	for name, doc := range map[string]string{
+		"empty domainEcl":     `{"domains":[{"attributeId":"363698007","domainEcl":"","grouped":true}]}`,
+		"malformed domainEcl": `{"domains":[{"attributeId":"363698007","domainEcl":"<< invalid!!!","grouped":true}]}`,
+		"empty rangeEcl":      `{"ranges":[{"attributeId":"363698007","rangeEcl":""}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadFromBytes([]byte(doc))
+			require.Error(t, err)
+		})
+	}
+
+	// A well-formed model still loads.
+	_, err := LoadFromBytes([]byte(`{"domains":[{"attributeId":"363698007","domainEcl":"<< 404684003","grouped":true}]}`))
+	require.NoError(t, err)
+}

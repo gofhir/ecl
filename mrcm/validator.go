@@ -3,6 +3,7 @@ package mrcm
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/gofhir/ecl/ecl"
 	"github.com/gofhir/ecl/scg"
@@ -16,6 +17,12 @@ const (
 	IssueKindGroupedViolation     = "grouped_violation"
 	IssueKindUngroupedViolation   = "ungrouped_violation"
 	IssueKindUnknownAttribute     = "unknown_attribute"
+
+	// IssueKindInvalidRule reports a rule in the model that could not be
+	// applied — typically an unparseable domain or range ECL. It is an issue
+	// rather than a hard error so one broken rule cannot hide the violations
+	// already found, nor the rules that are fine.
+	IssueKindInvalidRule = "invalid_rule"
 )
 
 // Result reports the outcome of validating an SCG expression against an MRCM
@@ -69,9 +76,11 @@ type Issue struct {
 //   - Recurses into nested SCG expressions (using the nested expression's own
 //     focus concepts as focus).
 //
-// Cardinality enforcement is best-effort: per-attribute counts are compared
-// against the rule's overall Cardinality. In-group cardinality is not
-// enforced in this version.
+// Cardinality is checked against the model's rules rather than against the
+// attributes present in the expression, so a mandatory attribute that is missing
+// entirely is reported. Multiple domain rows for one attribute are alternatives:
+// the focus concept only has to be in one of them. In-group cardinality
+// (AttributeDomain.InGroupCardinality) is loaded but not yet enforced.
 //
 // A nil expression, model, or provider returns an error.
 func Validate(ctx context.Context, expr *scg.Expression, model *Model, provider ecl.DataProvider) (*Result, error) {
@@ -116,58 +125,127 @@ type validator struct {
 // expr and applies MRCM rules. The pathPrefix is a dotted path that describes
 // the location of expr inside a parent expression (empty for the top level).
 func (v *validator) validateExpression(expr *scg.Expression, pathPrefix string) error {
-	for _, focus := range expr.FocusConcepts {
-		// Per-attribute counts (across all groups) for cardinality check.
-		counts := make(map[string]int)
+	// Per-attribute counts (across all groups) for the cardinality check.
+	counts := make(map[string]int)
+	for _, group := range expr.Refinements {
+		for _, attr := range group.Attributes {
+			counts[attr.Name.SCTID]++
+		}
+	}
 
+	for _, focus := range expr.FocusConcepts {
 		for gi, group := range expr.Refinements {
 			for ai, attr := range group.Attributes {
 				attrPath := joinPath(pathPrefix, fmt.Sprintf("refinement[%d].attr[%d]", gi, ai))
 				if err := v.validateAttribute(focus.SCTID, attr, group.Grouped, attrPath); err != nil {
 					return err
 				}
-				counts[attr.Name.SCTID]++
-
-				// Recurse into nested expressions.
-				if attr.Value.Nested != nil {
-					if err := v.validateExpression(attr.Value.Nested, attrPath+".value"); err != nil {
-						return err
-					}
-				}
 			}
 		}
+		if err := v.validateCardinality(focus.SCTID, counts, pathPrefix); err != nil {
+			return err
+		}
+	}
 
-		// Cardinality: per-attribute counts vs domain rule.Cardinality.
-		for attrID, count := range counts {
-			rules := v.model.FindDomains(attrID)
-			for _, r := range rules {
-				if r.RuleStrengthID != "" && r.RuleStrengthID != RuleStrengthMandatory {
-					continue
-				}
-				if count < r.Cardinality.Min {
-					v.issues = append(v.issues, Issue{
-						Kind:        IssueKindCardinalityViolation,
-						AttributeID: attrID,
-						FocusID:     focus.SCTID,
-						Message: fmt.Sprintf("attribute %s occurs %d time(s) on focus %s, MRCM requires at least %d",
-							attrID, count, focus.SCTID, r.Cardinality.Min),
-						Path: pathPrefix,
-					})
-				}
-				if r.Cardinality.Max >= 0 && count > r.Cardinality.Max {
-					v.issues = append(v.issues, Issue{
-						Kind:        IssueKindCardinalityViolation,
-						AttributeID: attrID,
-						FocusID:     focus.SCTID,
-						Message: fmt.Sprintf("attribute %s occurs %d time(s) on focus %s, MRCM allows at most %d",
-							attrID, count, focus.SCTID, r.Cardinality.Max),
-						Path: pathPrefix,
-					})
-				}
+	// Nested expressions are validated once, OUTSIDE the focus loop: they have
+	// their own focus concepts, so recursing per focus emitted the same issue
+	// once per focus of the parent (2^depth copies for nested expressions).
+	for gi, group := range expr.Refinements {
+		for ai, attr := range group.Attributes {
+			if attr.Value.Nested == nil {
+				continue
+			}
+			attrPath := joinPath(pathPrefix, fmt.Sprintf("refinement[%d].attr[%d]", gi, ai))
+			if err := v.validateExpression(attr.Value.Nested, attrPath+".value"); err != nil {
+				return err
 			}
 		}
 	}
 	return nil
+}
+
+// validateCardinality checks the per-attribute counts against the cardinality of
+// the domain rules applicable to the focus concept.
+//
+// It walks the MODEL's rules rather than the counts map. Iterating the counts
+// could only ever see attributes that are PRESENT, so `count < Min` was
+// unreachable for a mandatory attribute that was missing — the very case the
+// minimum exists to catch. A rule with Min:1 and the attribute absent reported
+// Valid=true with no issues.
+func (v *validator) validateCardinality(focusID string, counts map[string]int, pathPrefix string) error {
+	for attrID, domains := range v.model.AllDomains() {
+		applicable := v.applicableDomains(focusID, attrID, domains)
+		if len(applicable) == 0 {
+			// The attribute does not apply to this focus concept, so its
+			// cardinality says nothing about this expression.
+			continue
+		}
+		count := counts[attrID]
+		for _, r := range applicable {
+			if count < r.Cardinality.Min {
+				v.issues = append(v.issues, Issue{
+					Kind:        IssueKindCardinalityViolation,
+					AttributeID: attrID,
+					FocusID:     focusID,
+					Message: fmt.Sprintf("attribute %s occurs %d time(s) on focus %s, MRCM requires at least %d",
+						attrID, count, focusID, r.Cardinality.Min),
+					Path: pathPrefix,
+				})
+			}
+			if r.Cardinality.Max >= 0 && count > r.Cardinality.Max {
+				v.issues = append(v.issues, Issue{
+					Kind:        IssueKindCardinalityViolation,
+					AttributeID: attrID,
+					FocusID:     focusID,
+					Message: fmt.Sprintf("attribute %s occurs %d time(s) on focus %s, MRCM allows at most %d",
+						attrID, count, focusID, r.Cardinality.Max),
+					Path: pathPrefix,
+				})
+			}
+		}
+	}
+	return nil
+}
+
+// applicableDomains returns the mandatory domain rows of an attribute whose
+// domain ECL contains the focus concept. The rows of the MRCM Attribute Domain
+// refset are alternatives, so being in any one of them makes the attribute
+// applicable.
+//
+// An invalid domain ECL is reported as an issue rather than aborting the whole
+// validation: a broken rule must not hide the violations already collected, nor
+// the rules that are fine.
+func (v *validator) applicableDomains(focusID, attrID string, domains []AttributeDomain) []AttributeDomain {
+	var applicable []AttributeDomain
+	for _, rule := range domains {
+		if rule.RuleStrengthID != "" && rule.RuleStrengthID != RuleStrengthMandatory {
+			continue
+		}
+		ok, err := v.eclContains(rule.DomainECL, focusID)
+		if err != nil {
+			v.issues = append(v.issues, Issue{
+				Kind:        IssueKindInvalidRule,
+				AttributeID: attrID,
+				FocusID:     focusID,
+				Message: fmt.Sprintf("domain ECL %q of attribute %s could not be evaluated: %v",
+					rule.DomainECL, attrID, err),
+			})
+			continue
+		}
+		if ok {
+			applicable = append(applicable, rule)
+		}
+	}
+	return applicable
+}
+
+// domainSummary renders the domain ECLs of a rule set for an error message.
+func domainSummary(domains []AttributeDomain) string {
+	ecls := make([]string, 0, len(domains))
+	for _, d := range domains {
+		ecls = append(ecls, d.DomainECL)
+	}
+	return strings.Join(ecls, " OR ")
 }
 
 // validateAttribute applies MRCM rules to a single attribute of a focus
@@ -190,27 +268,31 @@ func (v *validator) validateAttribute(focusID string, attr scg.Attribute, groupe
 	}
 
 	// Domain & grouped checks.
-	for _, rule := range domains {
-		if rule.RuleStrengthID != "" && rule.RuleStrengthID != RuleStrengthMandatory {
-			continue
-		}
+	//
+	// The MRCM Attribute Domain refset holds ONE ROW PER DOMAIN (and per
+	// contentTypeId) for an attribute, so the rows are alternatives: the focus
+	// concept has to be in at least one of them. Applicability and conformance
+	// used to be conflated, requiring the focus to be in EVERY row and emitting a
+	// domain_violation for each one it was not in. With the two rows the refset
+	// distributes for Finding site, a valid expression came back invalid with a
+	// spurious violation.
+	//
+	// So: collect the applicable rows first, report a domain violation only if
+	// none apply, and check grouped/cardinality against the applicable rows alone.
+	applicable := v.applicableDomains(focusID, attrID, domains)
 
-		// Domain ECL membership of focus concept.
-		ok, err := v.eclContains(rule.DomainECL, focusID)
-		if err != nil {
-			return fmt.Errorf("evaluating domain ECL for attribute %s: %w", attrID, err)
-		}
-		if !ok {
-			v.issues = append(v.issues, Issue{
-				Kind:        IssueKindDomainViolation,
-				AttributeID: attrID,
-				FocusID:     focusID,
-				Message: fmt.Sprintf("focus concept %s is not in domain (%s) of attribute %s",
-					focusID, rule.DomainECL, attrID),
-				Path: path + ".name",
-			})
-		}
+	if len(domains) > 0 && len(applicable) == 0 {
+		v.issues = append(v.issues, Issue{
+			Kind:        IssueKindDomainViolation,
+			AttributeID: attrID,
+			FocusID:     focusID,
+			Message: fmt.Sprintf("focus concept %s is not in any domain of attribute %s (%s)",
+				focusID, attrID, domainSummary(domains)),
+			Path: path + ".name",
+		})
+	}
 
+	for _, rule := range applicable {
 		// Grouped / ungrouped check.
 		if rule.Grouped && !grouped {
 			v.issues = append(v.issues, Issue{
