@@ -52,6 +52,11 @@ jobs:
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
 
+      # Runs the same suites through the CLI. Guards the binary itself, which
+      # the unit tests never exercise (cmd/ is at 0% coverage).
+      - name: Conformance suite (CLI)
+        run: go run ./cmd/gofhir-ecl conformance
+
       - name: Upload coverage
         uses: codecov/codecov-action@v5
         with:

@@ -21,33 +21,54 @@ func repoRoot(t *testing.T) string {
 	return filepath.Join(filepath.Dir(file), "..", "..")
 }
 
-// TestRunSuite_Hierarchy loads the bundled hierarchy suite and confirms it
-// passes against the bundled standard fixture. This guarantees the
-// conformance runner stays correct as we extend the suite.
-func TestRunSuite_Hierarchy(t *testing.T) {
+// wantTotalCases is the number of bundled conformance cases. Raise it when you
+// add cases — never lower it without explaining why in the commit message. The
+// explicit count makes adding or deleting a case file a visible change in the
+// diff instead of a silent loss of coverage.
+const wantTotalCases = 53
+
+// TestRunAllSuites runs EVERY bundled conformance suite against the bundled
+// fixtures, one subtest per case.
+//
+// This test replaced an earlier one that loaded only 01-hierarchy.yaml, which
+// left 36 of the 44 cases unexecuted by CI: they only ran if someone invoked
+// the CLI by hand. A regression in refsets, filters, history, concrete values
+// or v2.2 features could be merged with a green build.
+func TestRunAllSuites(t *testing.T) {
 	root := repoRoot(t)
-	suitePath := filepath.Join(root, "testdata", "conformance", "cases", "01-hierarchy.yaml")
+	casesDir := filepath.Join(root, "testdata", "conformance", "cases")
 	fixtureDir := filepath.Join(root, "testdata", "conformance", "fixtures")
 
-	suite, err := LoadSuite(suitePath)
+	paths, err := filepath.Glob(filepath.Join(casesDir, "*.yaml"))
 	require.NoError(t, err)
-	require.NotEmpty(t, suite.Cases)
+	require.NotEmpty(t, paths, "no suites found in %s", casesDir)
 
-	rep, err := RunSuite(context.Background(), suite, RunOptions{FixtureDir: fixtureDir})
+	suites := make([]*Suite, 0, len(paths))
+	for _, p := range paths {
+		s, err := LoadSuite(p)
+		require.NoErrorf(t, err, "LoadSuite(%s)", p)
+		require.NotEmptyf(t, s.Cases, "suite %s has no cases", p)
+		suites = append(suites, s)
+	}
+
+	rep, err := RunSuites(context.Background(), suites, RunOptions{FixtureDir: fixtureDir})
 	require.NoError(t, err)
+
+	for _, r := range rep.Results {
+		t.Run(r.Suite+"/"+r.Case.Name, func(t *testing.T) {
+			if r.Skipped {
+				t.Skip(r.Reason)
+			}
+			if !r.Passed {
+				t.Errorf("expression: %s\nreason: %s", r.Case.Expression, r.Reason)
+			}
+		})
+	}
 
 	passed, failed, skipped, total := rep.Summary()
-	if failed > 0 {
-		for _, r := range rep.Results {
-			if !r.Passed && !r.Skipped {
-				t.Errorf("FAIL %s: %s", r.Case.Name, r.Reason)
-			}
-		}
-	}
-	assert.Equal(t, len(suite.Cases), total)
+	t.Logf("%d passed, %d failed, %d skipped, %d total", passed, failed, skipped, total)
 	assert.Equal(t, 0, failed)
-	assert.Equal(t, 0, skipped)
-	assert.Equal(t, total, passed)
+	assert.Equal(t, wantTotalCases, total, "case count changed; update wantTotalCases")
 }
 
 // TestRunCase_ExpectError verifies that a case marked ExpectError passes
