@@ -1,0 +1,54 @@
+name: Syntax errors and unsupported constructs
+specSection: "ECL v2.2 grammar — invalid input must be rejected, not truncated"
+fixture: standard.yaml
+cases:
+  # Until the EOF anchor was added, the expressionconstraint rule stopped at the
+  # first complete parse and discarded the rest with err == nil: `validate`
+  # answered OK on these, and the evaluator ran on a different expression than
+  # the one the user wrote.
+  - name: trailing garbage after a complete expression
+    expression: "11687002 TOTALGARBAGE"
+    expectError: true
+
+  - name: trailing words after a hierarchy operator
+    expression: "<< 404684003 ESTO SOBRA"
+    expectError: true
+
+  # exclusionexpressionconstraint takes exactly two operands, so a chain needs
+  # parentheses. This used to truncate silently to "404684003 MINUS 11687002".
+  - name: chained MINUS without parentheses
+    expression: "404684003 MINUS 11687002 MINUS 73211009"
+    expectError: true
+
+  # Compound sets are homogeneous in the grammar: mixing conjunction and
+  # disjunction at one level requires parentheses.
+  - name: AND and OR mixed without parentheses
+    expression: "< 404684003 AND < 11687002 OR < 73211009"
+    expectError: true
+
+  # The lexer had no error listener, so an unrecognizable character was written
+  # to os.Stderr, dropped from the token stream, and the parse "succeeded" with a
+  # corrupted term. UTF8_LETTER in ECL.g4 starts at 'À', so U+2019 and U+00A0
+  # fall in the gap. Reporting them is the fix here; widening the grammar is
+  # tracked separately.
+  - name: typographic apostrophe in a term is reported, not dropped
+    expression: "404684003 |Crohn’s disease|"
+    expectError: true
+
+  - name: no-break space in a term is reported, not dropped
+    expression: "404684003 |Body structure|"
+    expectError: true
+
+  # Accented Latin letters are inside UTF8_LETTER: the cut is not ASCII vs
+  # non-ASCII, and this must keep parsing.
+  - name: accented term still parses
+    expression: "404684003 |hipertensión|"
+    expectedIds: ["404684003"]
+
+  - name: unbalanced parenthesis
+    expression: "(< 404684003"
+    expectError: true
+
+  - name: attribute without a value
+    expression: "< 404684003 : 363698007 ="
+    expectError: true

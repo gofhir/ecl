@@ -13,18 +13,44 @@ import (
 
 // Parse parses an ECL expression string and returns the AST.
 func Parse(input string) (ast.Expression, error) {
+	errListener := &eclErrorListener{}
+
 	lexer := grammar.NewECLLexer(antlr.NewInputStream(input))
+	// The lexer needs the listener too. Without this, an unrecognizable
+	// character makes ANTLR's default ConsoleErrorListener write to os.Stderr
+	// (from inside a library), drop the character from the token stream, and
+	// let Parse return a corrupted AST with a nil error.
+	lexer.RemoveErrorListeners()
+	lexer.AddErrorListener(errListener)
+
 	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
 	parser := grammar.NewECLParser(stream)
-
-	// Error handling
-	errListener := &eclErrorListener{}
 	parser.RemoveErrorListeners()
 	parser.AddErrorListener(errListener)
 
 	tree := parser.Expressionconstraint()
-	if errListener.err != nil {
-		return nil, errListener.err
+
+	// The expressionconstraint rule in ECL.g4 does not end in EOF, so ANTLR
+	// stops at the first complete parse and discards the rest without
+	// reporting anything: "11687002 GARBAGE" parsed as 11687002 with err ==
+	// nil, and "A MINUS B MINUS C" silently truncated to "A MINUS B".
+	//
+	// The message quotes the remaining INPUT, not the token text: the ECL
+	// lexer is character-level, so GetText() would be just "G" here.
+	if tok := stream.LT(1); tok != nil && tok.GetTokenType() != antlr.TokenEOF {
+		rest := input
+		if start := tok.GetStart(); start >= 0 && start < len(input) {
+			rest = input[start:]
+		}
+		errListener.errs = append(errListener.errs, SyntaxError{
+			Line:   tok.GetLine(),
+			Column: tok.GetColumn(),
+			Msg:    fmt.Sprintf("unexpected trailing input %q", strings.TrimSpace(rest)),
+		})
+	}
+
+	if len(errListener.errs) > 0 {
+		return nil, &ParseError{Errors: errListener.errs}
 	}
 
 	visitor := &astBuilder{}
@@ -39,13 +65,58 @@ func Parse(input string) (ast.Expression, error) {
 // Error listener
 // ---------------------------------------------------------------------------.
 
-type eclErrorListener struct {
-	antlr.DefaultErrorListener
-	err error
+// SyntaxError is a single syntax error reported while parsing an expression.
+type SyntaxError struct {
+	// Line is the 1-based line the error was reported on.
+	Line int
+	// Column is the 0-based character offset within the line.
+	Column int
+	// Msg is the underlying description from the parser or lexer.
+	Msg string
 }
 
+// Error renders the error in the "syntax error at line:column: msg" form.
+func (e SyntaxError) Error() string {
+	return fmt.Sprintf("syntax error at %d:%d: %s", e.Line, e.Column, e.Msg)
+}
+
+// ParseError collects every syntax error found in one expression. Callers can
+// classify a failure with errors.As instead of matching on message text:
+//
+//	var pe *ecl.ParseError
+//	if errors.As(err, &pe) { /* 400 Bad Request, report pe.Errors */ }
+type ParseError struct {
+	// Errors holds every reported error, in the order the parser found them.
+	Errors []SyntaxError
+}
+
+// Error renders every collected error, separated by "; ".
+//
+// The single-error form is byte-identical to what Parse returned before
+// ParseError existed ("syntax error at line:column: msg"), so callers that
+// match on that text keep working. Callers that add their own prefix (the CLI
+// does) stay unaffected too.
+func (e *ParseError) Error() string {
+	if len(e.Errors) == 1 {
+		return e.Errors[0].Error()
+	}
+	msgs := make([]string, 0, len(e.Errors))
+	for _, se := range e.Errors {
+		msgs = append(msgs, se.Error())
+	}
+	return strings.Join(msgs, "; ")
+}
+
+type eclErrorListener struct {
+	antlr.DefaultErrorListener
+	errs []SyntaxError
+}
+
+// SyntaxError appends the error. It must accumulate rather than overwrite: the
+// previous implementation assigned to a single field, so only the last error of
+// a batch survived.
 func (l *eclErrorListener) SyntaxError(_ antlr.Recognizer, _ any, line, column int, msg string, _ antlr.RecognitionException) {
-	l.err = fmt.Errorf("syntax error at %d:%d: %s", line, column, msg)
+	l.errs = append(l.errs, SyntaxError{Line: line, Column: column, Msg: msg})
 }
 
 // ---------------------------------------------------------------------------
