@@ -30,15 +30,48 @@ func TestEvaluate_SimpleRefinement_Eq_HierarchicalValue(t *testing.T) {
 
 func TestEvaluate_SimpleRefinement_NotEq(t *testing.T) {
 	p := newFixture()
-	// Concepts in << 404684003 whose Finding site is NOT myocardium.
-	// Per our AND-across-focus semantics, "!=" matches concepts that do not
-	// have an outbound 363698007 relationship to 74281007.
-	//   MI (22298006)       — has 363698007=74281007  → excluded
-	//   diabetes (73211009) — has 363698007=74281007  → excluded
-	//   404684004           — has 363698007=74281007  → excluded
-	//   64572001, 404684003, 111111001 — no such relationship → included
+	// "attr != value" selects concepts that HAVE at least one relationship of
+	// that type whose value is not in the value set. It negates the VALUE, not
+	// the existence of the attribute, so a concept without any 363698007
+	// relationship does not qualify.
+	//
+	//   73211009  — has 363698007=113331007 (and =74281007) → included
+	//   22298006  — only 363698007=74281007                 → excluded
+	//   404684004 — only 363698007=74281007                 → excluded
+	//   404684003, 64572001, 111111001 — no 363698007 at all → excluded
+	//
+	// This assertion used to be the complement of the above, justified in a
+	// comment as "our AND-across-focus semantics". It was the bug: the ungrouped
+	// path inverted the cardinality predicate, which implements [0..0] attr =
+	// value, and produced a set disjoint from the one the grouped path returned
+	// for the same clause.
 	got := evalECL(t, "<< 404684003 : 363698007 != 74281007", p)
-	assert.ElementsMatch(t, []string{"404684003", "64572001", "111111001"}, got.Slice())
+	assert.ElementsMatch(t, []string{"73211009"}, got.Slice())
+}
+
+// TestEvaluate_NotEq_UngroupedMatchesGroupedOracle pins the two paths together.
+// The grouped path was already correct and serves as the oracle; before the fix
+// the two returned disjoint sets for the same clause.
+func TestEvaluate_NotEq_UngroupedMatchesGroupedOracle(t *testing.T) {
+	p := newFixture()
+	ungrouped := evalECL(t, "<< 404684003 : 363698007 != 74281007", p)
+	grouped := evalECL(t, "<< 404684003 : { 363698007 != 74281007 }", p)
+	assert.ElementsMatch(t, grouped.Slice(), ungrouped.Slice())
+}
+
+// TestEvaluate_NotEq_ExcludesConceptsWithoutTheAttribute states the distinction
+// explicitly: "!= X" is not "does not have X".
+func TestEvaluate_NotEq_ExcludesConceptsWithoutTheAttribute(t *testing.T) {
+	p := newFixture()
+	got := evalECL(t, "<< 404684003 : 363698007 != 74281007", p)
+	assert.False(t, got.Contains("404684003"), "404684003 has no finding site at all")
+	assert.False(t, got.Contains("22298006"), "22298006's only finding site IS 74281007")
+	assert.True(t, got.Contains("73211009"), "73211009 has a finding site that is not 74281007")
+
+	// [0..0] is the form that means "does not have it", and it must still work.
+	none := evalECL(t, "<< 404684003 : [0..0] 363698007 = 74281007", p)
+	assert.True(t, none.Contains("404684003"))
+	assert.False(t, none.Contains("22298006"))
 }
 
 func TestEvaluate_Refinement_MultipleAttrs_AND(t *testing.T) {

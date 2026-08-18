@@ -438,19 +438,27 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 	}
 
 	// Forward attribute: iterate per-concept via PropertiesByGroup.
+	//
+	// The clause is evaluated over ALL of the concept's relationships at once
+	// (groups flattened), which is what "ungrouped" means: the attribute may sit
+	// in any group. clauseSatisfied then applies the same "!=" rule the grouped
+	// path uses, so the two paths agree.
+	clause := attrClause{
+		op:          attr.Op,
+		typeIDs:     typeIDs,
+		valueSet:    valueSet,
+		valueIsAny:  valueIsAny,
+		cardinality: attr.Cardinality,
+	}
 	out := newMapSet()
 	var iterErr error
 	focus.Iter(func(id string) bool {
-		count, err := conceptMatchesAttribute(ctx, id, typeIDs, valueSet, valueIsAny, provider)
+		rels, err := conceptRelationships(ctx, id, provider)
 		if err != nil {
 			iterErr = err
 			return false
 		}
-		keep := cardinalitySatisfied(attr.Cardinality, count)
-		if attr.Op == "!=" {
-			keep = !keep
-		}
-		if keep {
+		if clauseSatisfied(rels, clause) {
 			out.m[id] = struct{}{}
 		}
 		return true
@@ -461,25 +469,19 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 	return out, nil
 }
 
-// conceptMatchesAttribute counts how many relationships of the concept have
-// type ∈ typeIDs AND (valueIsAny OR target ∈ valueSet).
-func conceptMatchesAttribute(ctx context.Context, conceptID string, typeIDs, valueSet Set, valueIsAny bool, provider DataProvider) (int, error) {
+// conceptRelationships returns every relationship of a concept, with the group
+// structure flattened. Ungrouped attribute clauses match a relationship in any
+// group, so they are evaluated against this flat view.
+func conceptRelationships(ctx context.Context, conceptID string, provider DataProvider) ([]Relationship, error) {
 	groups, err := provider.PropertiesByGroup(ctx, conceptID)
 	if err != nil {
-		return 0, fmt.Errorf("PropertiesByGroup(%s): %w", conceptID, err)
+		return nil, fmt.Errorf("PropertiesByGroup(%s): %w", conceptID, err)
 	}
-	count := 0
+	var out []Relationship
 	for _, rels := range groups {
-		for _, r := range rels {
-			if !typeIDs.Contains(r.TypeID) {
-				continue
-			}
-			if valueIsAny || valueSet.Contains(r.TargetID) {
-				count++
-			}
-		}
+		out = append(out, rels...)
 	}
-	return count, nil
+	return out, nil
 }
 
 // cardinalitySatisfied reports whether count satisfies the given cardinality.

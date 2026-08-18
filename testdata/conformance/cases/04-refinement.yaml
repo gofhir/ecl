@@ -32,6 +32,27 @@ cases:
     expression: "<< 404684003 : { 363698007 = 74281007, 116676008 = 55641003 }"
     expectedIds: ["22298006"]
 
+  # "attr != value" negates the VALUE, not the existence of the attribute: it
+  # selects concepts that HAVE a relationship of that type pointing somewhere
+  # else. The ungrouped path used to invert the cardinality predicate instead,
+  # which implements [0..0] attr = value and produced a set disjoint from the one
+  # the grouped path returned for the same clause.
+  - name: not-equals selects concepts with another value
+    expression: "* : 363698007 != 74281007"
+    expectedIds: ["22298006", "73211009"]
+
+  - name: not-equals agrees between the grouped and ungrouped paths
+    expression: "* : { 363698007 != 74281007 }"
+    expectedIds: ["22298006", "73211009"]
+
+  - name: not-equals excludes a concept whose only value is the excluded one
+    expression: "<< 22298006 : 116676008 != 55641003"
+    expectedIds: []
+
+  - name: zero cardinality is the form that means "does not have it"
+    expression: "<< 404684003 : [0..0] 116676008 = 55641003"
+    expectedIds: ["11687002", "404684003", "64572001", "73211009", "95566004"]
+
   # Disjunction. The parser used to flatten AND and OR into one list, so these
   # were evaluated as intersections and returned the empty set.
   - name: disjunction of ungrouped attributes
