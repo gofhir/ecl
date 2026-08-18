@@ -539,7 +539,12 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 	out := newMapSet()
 	var iterErr error
 	focus.Iter(func(id string) bool {
-		anyGroupSatisfies := false
+		// matchingGroups is how many relationship groups satisfy the clause
+		// tree. Counting is what makes group cardinality work at all: the code
+		// used to stop at the first match, so [0..0], [1..1] and [2..*] were
+		// indistinguishable from "at least one" and [0..0] returned exactly the
+		// inverse of the requested set.
+		matchingGroups := 0
 		if !hasReverse {
 			// Fast path: all forward clauses — check groups directly.
 			groups, err := provider.PropertiesByGroup(ctx, id)
@@ -547,22 +552,35 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 				iterErr = fmt.Errorf("PropertiesByGroup(%s): %w", id, err)
 				return false
 			}
-			for _, rels := range groups {
+			for gnum, rels := range groups {
+				// Group 0 is "ungrouped" per the PropertiesByGroup contract, so
+				// it is not a relationship group and must not be counted as one.
+				// Ungrouped attributes are matched by filterByAttribute instead.
+				if gnum == 0 {
+					continue
+				}
 				if groupSatisfiesSet(rels, tree) {
-					anyGroupSatisfies = true
-					break
+					matchingGroups++
 				}
 			}
 		} else {
 			// Slow path: reverse clauses require checking source concepts.
+			//
+			// This returns 1 or 0, not a real count: it walks the groups of the
+			// SOURCE concepts, so any count derived from it would be counting
+			// someone else's groups. Group cardinality combined with a reverse
+			// clause is therefore not supported; see the known limitations.
 			matched, err := conceptMatchesGroupWithReverse(ctx, id, clauses, provider)
 			if err != nil {
 				iterErr = err
 				return false
 			}
-			anyGroupSatisfies = matched
+			if matched {
+				matchingGroups = 1
+			}
 		}
-		if anyGroupSatisfies {
+		// A nil cardinality is the default [1..*], same as everywhere else.
+		if cardinalitySatisfied(grp.Cardinality, matchingGroups) {
 			out.m[id] = struct{}{}
 		}
 		return true
@@ -1234,7 +1252,11 @@ func filterByConcreteValue(ctx context.Context, focus Set, attr *ast.Attribute, 
 	out := newMapSet()
 	var iterErr error
 	focus.Iter(func(id string) bool {
-		matched := false
+		// Count the values that satisfy the comparison, so the clause's
+		// cardinality can be applied. This used to be a bool with an early
+		// break, which made [0..0], [1..1] and [2..*] all behave as "at least
+		// one".
+		matches := 0
 		for _, typeID := range typeIDList {
 			values, err := provider.ConcreteValues(ctx, id, typeID)
 			if err != nil {
@@ -1249,30 +1271,25 @@ func filterByConcreteValue(ctx context.Context, focus Set, attr *ast.Attribute, 
 						continue
 					}
 					if compareFloat(f, attr.Op, numeric) {
-						matched = true
+						matches++
 					}
 				case haveString && cv.Kind == "string":
 					if compareString(cv.Value, attr.Op, strVal) {
-						matched = true
+						matches++
 					}
 				case haveBool && cv.Kind == "boolean":
 					stored := cv.Value == "true"
 					if compareBool(stored, attr.Op, boolVal) {
-						matched = true
+						matches++
 					}
 				}
-				if matched {
-					break
-				}
-			}
-			if matched {
-				break
 			}
 		}
-		// compareFloat already applied the operator directly, so "matched"
-		// means at least one stored value satisfied the comparison. No extra
-		// inversion for "!=".
-		if matched {
+		// compareFloat/compareString/compareBool already applied the operator,
+		// so `matches` is "how many stored values satisfy the comparison". No
+		// extra inversion for "!=" -- subtracting from the total here, as the
+		// concept-valued path does, would invert a correct result.
+		if cardinalitySatisfied(attr.Cardinality, matches) {
 			out.m[id] = struct{}{}
 		}
 		return true

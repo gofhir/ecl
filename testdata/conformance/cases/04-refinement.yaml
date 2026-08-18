@@ -32,6 +32,35 @@ cases:
     expression: "<< 404684003 : { 363698007 = 74281007, 116676008 = 55641003 }"
     expectedIds: ["22298006"]
 
+  # Attribute-group cardinality. AttributeGroup.Cardinality was never read and
+  # the group loop stopped at the first match, so every cardinality behaved as
+  # "at least one" and [0..0] returned exactly the inverse of the requested set.
+  # 22298006 has a 363698007 relationship in two groups, 73211009 in one.
+  - name: group cardinality defaults to one-or-more
+    expression: "* : { 363698007 = * }"
+    expectedIds: ["22298006", "73211009"]
+
+  - name: group cardinality exactly one
+    expression: "* : [1..1] { 363698007 = * }"
+    expectedIds: ["73211009"]
+
+  - name: group cardinality two or more
+    expression: "* : [2..*] { 363698007 = * }"
+    expectedIds: ["22298006"]
+
+  - name: group cardinality zero excludes the concepts that have the group
+    expression: "<< 404684003 : [0..0] { 363698007 = 74281007 }"
+    expectedIds: ["11687002", "404684003", "64572001", "73211009", "95566004"]
+
+  # Concrete-value cardinality: this path decided with a bool and an early break.
+  - name: concrete value cardinality exactly one
+    expression: "* : [1..1] 1142139005 = #5"
+    expectedIds: ["73211009"]
+
+  - name: concrete value cardinality two or more matches nobody
+    expression: "* : [2..*] 1142139005 = #5"
+    expectedIds: []
+
   # "attr != value" negates the VALUE, not the existence of the attribute: it
   # selects concepts that HAVE a relationship of that type pointing somewhere
   # else. The ungrouped path used to invert the cardinality predicate instead,
