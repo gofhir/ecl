@@ -126,3 +126,18 @@ func TestHarness(t *testing.T) {
 	require.True(t, isActiveInFixture(t, "22298006"))
 	require.False(t, isActiveInFixture(t, "11111111"), "11111111 is declared active: false")
 }
+
+// exampleProvider loads the bundled fixture for the Example functions, which
+// cannot take a *testing.T.
+func exampleProvider() ecl.DataProvider {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		panic("runtime.Caller failed")
+	}
+	path := filepath.Join(filepath.Dir(file), "..", "testdata", "conformance", "fixtures", "standard.yaml")
+	p, err := conformance.LoadFixtureFile(path)
+	if err != nil {
+		panic(err)
+	}
+	return p
+}

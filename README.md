@@ -5,7 +5,7 @@
 [![Release](https://img.shields.io/github/v/release/gofhir/ecl)](https://github.com/gofhir/ecl/releases)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-Embeddable parser and evaluator for the SNOMED CT **Expression Constraint Language (ECL) v2.2** in pure Go. Comes with parsers for **SNOMED Compositional Grammar (SCG)** and a **Machine Readable Concept Model (MRCM)** validator, plus a `gofhir-ecl` CLI and a 44-case conformance suite.
+Embeddable parser and evaluator for the SNOMED CT **Expression Constraint Language (ECL) v2.2** in pure Go. Comes with parsers for **SNOMED Compositional Grammar (SCG)** and a **Machine Readable Concept Model (MRCM)** validator, plus a `gofhir-ecl` CLI and a 95-case conformance suite.
 
 ```go
 import "github.com/gofhir/ecl/ecl"
@@ -21,12 +21,27 @@ ECL is the standard query language for SNOMED CT. Until now, evaluating it from 
 
 ## Status
 
-- ✅ **ECL v2.2 evaluator** — hierarchy, compound, refinements (with cardinality, reverse `R`, attribute groups), dot notation, filters (term/type/language/dialect/active/module/effectiveTime/definitionStatus/memberField), history supplements, concrete values (integer/decimal/string/boolean), Top/Bottom, MemberOf, RefsetContainingAny (`^R`), AltIdentifier
+- ✅ **ECL v2.2 evaluator** — hierarchy operators, compound (`AND`/`OR`/`MINUS`), refinements with conjunction **and disjunction**, attribute groups with cardinality, reverse `R`, dot notation, concrete values (integer/decimal/string/boolean), history supplements with MIN/MOD/MAX, Top/Bottom, MemberOf, RefsetContainingAny (`^R`), AltIdentifier
+- ✅ **Filters** — term (word-prefix and `wild`), description type, language, `dialectId`, active, module, effectiveTime, definitionStatus, memberField
 - ✅ **SCG** parser + validator
 - ✅ **MRCM** loader + validator (uses ECL evaluator internally)
 - ✅ **SCTID** Verhoeff checksum + partition validation
-- ✅ **44/44** bundled conformance cases pass
+- ✅ **95/95** bundled conformance cases pass, all executed by CI
 - 📦 Latest release: see [GitHub Releases](https://github.com/gofhir/ecl/releases)
+
+### Known limitations
+
+Each of these returns `ecl.ErrUnsupportedFeature` rather than a silently wrong
+result, so you can classify it with `errors.Is` and answer 501 instead of serving
+bad data:
+
+| Construct | Why |
+|---|---|
+| `{{ D term != … }}`, `{{ D language != … }}`, `{{ D type != … }}` | Negating a description filter is a per-row operation. Expressing it needs negation fields on `DescriptionFilterOpts`, which changes the provider contract. Negated **concept** filters (`{{ C … != … }}`) do work. |
+| `{{ D dialect = en-gb }}` (alias form) | Mapping a dialect alias to a language reference set's SCTID is terminology data; only the international English aliases are universal. Use `{{ D dialectId = 900000000000508004 }}`. |
+| `^[field]` projection | `Set` carries concept IDs only. Use a `{{ M … }}` member filter. |
+| Cardinality on a reverse clause inside a group | Counting inbound relationships needs a provider signature that preserves multiplicity. |
+| `AttributeDomain.InGroupCardinality` (MRCM) | Loaded and exposed, not yet enforced. |
 
 ## Install
 
@@ -64,7 +79,9 @@ for _, id := range set.Slice() {
 
 ### `DataProvider` contract
 
-You implement [`ecl.DataProvider`](ecl/provider.go) against your storage (PostgreSQL closure tables, in-memory maps, Elasticsearch, an HTTP terminology server, …). The 18 methods are batch-shaped to avoid N+1 patterns and split into:
+You implement [`ecl.DataProvider`](ecl/provider.go) against your storage (PostgreSQL closure tables, in-memory maps, Elasticsearch, an HTTP terminology server, …). Read the contract in the interface's godoc before you start — it states the rules the evaluator relies on (never return a nil `Set`, empty input yields empty output, only `FilterConcepts` may filter by the `active` flag, and the direction of `HistoricalAssociations`, which is the opposite of the intuitive reading).
+
+Most methods take sets or slices so they can be answered with one batch query. **Two are per-concept by signature** — `PropertiesByGroup` and `ConcreteValues` — and are called once per focus concept, so a broad refinement issues one query per concept; batching them is a planned breaking change. The 18 methods split into:
 
 | Group | Methods |
 |---|---|
@@ -77,20 +94,38 @@ You implement [`ecl.DataProvider`](ecl/provider.go) against your storage (Postgr
 | History | `HistoricalAssociations` |
 | v2.2 | `ResolveIdentifier` (alternate identifiers) |
 
-For tests and examples, the in-memory provider in [`internal/conformance/fixture.go`](internal/conformance/fixture.go) implements all 18 against a YAML fixture — read it to see the expected semantics.
+For tests and examples, the in-memory provider in [`internal/conformance/fixture.go`](internal/conformance/fixture.go) implements all 18 against a YAML fixture — read it to see the expected semantics. Note it lives under `internal/`, so Go will not let you import it; running the bundled conformance suite against your own provider is the supported way to check it, and exposing the runner as a public package is planned.
 
 ### SCG + MRCM
 
 ```go
 import (
-    "github.com/gofhir/ecl/scg"
+    "context"
+
     "github.com/gofhir/ecl/mrcm"
+    "github.com/gofhir/ecl/scg"
 )
 
-scgExpr, _ := scg.Parse("404684003 : 363698007 = 74281007")
-model, _   := mrcm.LoadModel("mrcm.json")
-err := mrcm.NewValidator(model, provider).Validate(ctx, scgExpr)
+ctx := context.Background()
+
+expr, err := scg.Parse("22298006 : { 363698007 = 74281007 }")
+if err != nil { /* handle parse error */ }
+
+model, err := mrcm.LoadFromBytes(mrcmJSON) // or mrcm.LoadFromJSON(reader)
+if err != nil { /* handle load error */ }
+
+res, err := mrcm.Validate(ctx, expr, model, provider)
+if err != nil { /* handle validation error */ }
+
+for _, issue := range res.Issues {
+    fmt.Printf("%s at %s: %s\n", issue.Kind, issue.Path, issue.Message)
+}
 ```
+
+Every snippet in this README is backed by a runnable `Example` in the package it
+documents ([`ecl/example_test.go`](ecl/example_test.go),
+[`mrcm/example_test.go`](mrcm/example_test.go)), so CI fails if the API drifts
+from the docs.
 
 ## CLI: `gofhir-ecl`
 
@@ -104,6 +139,10 @@ Commands:
   conformance  run the bundled v2.2 conformance suite
   version      print the build version
 ```
+
+Exit codes: `0` success (including `-h`), `1` runtime error, `2` usage error,
+`3` invalid ECL syntax, `4` feature not supported by this build. Results go to
+stdout, diagnostics to stderr.
 
 ### `validate`
 
@@ -122,7 +161,13 @@ Refined :
   focus:
     DescendantOrSelfOf <<
       ConceptRef 404684003
-  refinement: <1 ungrouped, 0 groups, 0 conjunction, 0 disjunction>
+  refinement: <0 groups, 0 conjunction, 0 disjunction>
+  attributes:
+    Attribute =
+      name:
+        ConceptRef 363698007
+      value:
+        ConceptRef 74281007
 ```
 
 ### `eval`
@@ -139,7 +184,7 @@ The fixture is a YAML file describing concepts, parents, descriptions, relations
 
 ```bash
 $ gofhir-ecl conformance
-44 passed, 0 failed, 0 skipped, 44 total
+95 passed, 0 failed, 0 skipped, 95 total
 
 $ gofhir-ecl conformance -filter '^memberOf'
 PASS  ECL v2.2 features (Top, Bottom, AltIdentifier, ^R, MemberOf) :: memberOf refset
@@ -151,18 +196,19 @@ Useful in CI to prove your `DataProvider` implementation matches the spec.
 
 ## Conformance suite
 
-The bundled suite lives in [`testdata/conformance/`](testdata/conformance/) and currently covers 44 cases across 8 areas of the spec.
+The bundled suite lives in [`testdata/conformance/`](testdata/conformance/) and currently covers 95 cases across 9 areas of the spec, including a suite of expressions that must be REJECTED.
 
 | Area | Cases | Spec section |
 |---|---|---|
-| Hierarchy operators | 8 | 5.1 |
+| Hierarchy operators (incl. Top/Bottom on non-closed sets) | 10 | 5.1 |
 | Compound expressions | 4 | 5.2 |
 | Primitives | 4 | 5.0 |
-| Refinements (groups, dot, reverse) | 6 | 5.3 |
-| Filters (term/wild, language, negation) | 8 | 5.4 |
-| History supplements | 3 | 5.5 |
+| Refinements (disjunction, groups, cardinality, `!=`, dot, reverse) | 25 | 5.3 |
+| Filters (term, type, language, dialectId, module, definitionStatus, active, memberField) | 21 | 5.4 |
+| History supplements (MIN/MOD/MAX) | 6 | 5.5 |
 | Concrete values | 4 | 5.3.4 |
 | v2.2 (Top, Bottom, AltIdentifier, `^R`) | 7 | v2.2 |
+| **Errors** — input that must be rejected, not truncated | 14 | grammar |
 
 Each suite is a YAML file with cases of the form:
 
