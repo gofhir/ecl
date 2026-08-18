@@ -15,9 +15,14 @@ cases:
     expression: "<< 404684003 : * = 74281007"
     expectedIds: ["22298006"]
 
-  - name: dot notation traversal (finding site of MI)
+  # Re-baselined when the fixture gained a second relationship group on
+  # 22298006 (needed to make attribute-group cardinality verifiable at all).
+  # MI now has two finding sites, one per group, and dot notation returns the
+  # union of the targets — which makes this a stronger case than the
+  # single-target version it replaces.
+  - name: dot notation traversal returns every target (finding sites of MI)
     expression: "(22298006).363698007"
-    expectedIds: ["74281007"]
+    expectedIds: ["74281007", "113331007"]
 
   - name: reverse attribute - body structure is a finding-site target of clinical findings
     expression: "74281007 : R 363698007 = << 404684003"

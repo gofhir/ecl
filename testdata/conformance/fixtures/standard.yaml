@@ -15,11 +15,15 @@ version: 2024-01-31
 concepts:
   - {id: "138875005", display: "SNOMED CT Concept"}
   - {id: "404684003", display: "Clinical finding"}
-  - {id: "22298006",  display: "Myocardial infarction"}
-  - {id: "73211009",  display: "Diabetes mellitus"}
-  - {id: "11687002",  display: "Type 1 diabetes mellitus"}
+  # definitionStatusId / moduleId / effectiveTime are declared on a subset of
+  # concepts so the {{ C ... }} filters have something to discriminate. A
+  # concept without them keeps the loader's defaults, which is what the
+  # pre-existing cases assume.
+  - {id: "22298006",  display: "Myocardial infarction", definitionStatusId: "900000000000073002", moduleId: "900000000000207008", effectiveTime: "20240131"}
+  - {id: "73211009",  display: "Diabetes mellitus", definitionStatusId: "900000000000073002", moduleId: "900000000000207008", effectiveTime: "20230731"}
+  - {id: "11687002",  display: "Type 1 diabetes mellitus", definitionStatusId: "900000000000074008", moduleId: "900000000000207008", effectiveTime: "20220131"}
   - {id: "64572001",  display: "Disease"}
-  - {id: "95566004",  display: "Hypertensive disorder"}
+  - {id: "95566004",  display: "Hypertensive disorder", definitionStatusId: "900000000000074008", moduleId: "900000000000012004", effectiveTime: "20240131"}
   # Attribute types
   - {id: "363698007", display: "Finding site"}
   - {id: "116676008", display: "Associated morphology"}
@@ -28,14 +32,28 @@ concepts:
   - {id: "74281007",  display: "Body structure"}
   - {id: "55641003",  display: "Infarct"}
   - {id: "113331007", display: "Endocrine system structure"}
-  # Inactive concept used by history association
+  # Inactive concepts. Two of them, so `{{ C active = false }}` asserts on a set
+  # rather than on a single row, and so history profiles have something to
+  # discriminate. Neither has a parent, so they are outside the root's closure
+  # and the hierarchy cases are unaffected.
   - {id: "11111111",  display: "Old MI (inactive)", active: false}
+  - {id: "22222222",  display: "Retired diabetes concept (inactive)", active: false}
   # Description type SCTIDs (so ConceptExists succeeds)
   - {id: "900000000000003001", display: "Fully specified name"}
   - {id: "900000000000013009", display: "Synonym"}
   # Definition status SCTIDs
   - {id: "900000000000074008", display: "Primitive"}
   - {id: "900000000000073002", display: "Defined"}
+  # Dialect language refsets and acceptability SCTIDs, for {{ D dialect = ... }}
+  - {id: "900000000000508004", display: "Great Britain English language reference set"}
+  - {id: "900000000000509007", display: "United States English language reference set"}
+  - {id: "900000000000548007", display: "Preferred"}
+  - {id: "900000000000549004", display: "Acceptable"}
+  # Map refset, for {{ M ... }} member filters
+  - {id: "900000000000497000", display: "CTV3 simple map reference set"}
+  # Module SCTIDs referenced by the metadata above
+  - {id: "900000000000207008", display: "SNOMED CT core module"}
+  - {id: "900000000000012004", display: "SNOMED CT model component module"}
 
 # Direct parents. Closure is computed at fixture-load time.
 parents:
@@ -59,6 +77,12 @@ relationships:
   # Myocardial infarction: site = body structure, morphology = infarct
   - {source: "22298006", typeId: "363698007", target: "74281007", group: 1}
   - {source: "22298006", typeId: "116676008", target: "55641003", group: 1}
+  # A SECOND relationship group on the same concept. Without it every
+  # relationship sat in group 1 and attribute-group cardinality was
+  # structurally unverifiable: no expression could tell "one matching group"
+  # from "two". With this, `[1..1] { 363698007 = * }` and `[2..*] { 363698007 = * }`
+  # select different sets.
+  - {source: "22298006", typeId: "363698007", target: "113331007", group: 2}
   # Diabetes mellitus: site = endocrine system structure
   - {source: "73211009", typeId: "363698007", target: "113331007", group: 1}
   # Diabetes carries a count concrete value (used by concrete-value tests)
@@ -67,8 +91,25 @@ relationships:
 refsets:
   "900000000000497000": ["22298006", "73211009"]
 
+# (dialectId, acceptabilityId) per description, for {{ D dialect = ... }}.
+# 22298006 is preferred in en-gb and acceptable in en-us; 73211009 only exists
+# in en-us, so a dialect filter discriminates between them.
+dialects:
+  - {dialectId: "900000000000508004", acceptabilityId: "900000000000548007", conceptId: "22298006", language: "en"}
+  - {dialectId: "900000000000509007", acceptabilityId: "900000000000549004", conceptId: "22298006", language: "en"}
+  - {dialectId: "900000000000509007", acceptabilityId: "900000000000548007", conceptId: "73211009", language: "en"}
+
+# Per-member custom fields, for {{ M field = ... }}. The values are strings, the
+# shape that used to fail at runtime with "unsupported AST node type".
+memberFields:
+  - {refset: "900000000000497000", member: "22298006", fieldName: "mapTarget", value: "G30.9"}
+  - {refset: "900000000000497000", member: "73211009", fieldName: "mapTarget", value: "E11.9"}
+
+# Two associations with different refsets, so the MIN / MOD / MAX profiles
+# select different sets instead of all returning the same single row.
 historicalAssociations:
   - {refset: "900000000000527005", source: "11111111", target: "22298006"}  # SAME_AS
+  - {refset: "900000000000528000", source: "22222222", target: "73211009"}  # WAS_A
 
 altIdentifiers:
   "LOINC":
