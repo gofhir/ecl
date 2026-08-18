@@ -68,3 +68,27 @@ cases:
   - name: descendants with active true excludes nothing here
     expression: "<< 73211009 {{ C active = true }}"
     expectedIds: ["11687002", "73211009"]
+
+  # Dialect filters. The parser used to discard the filter's contents and force
+  # Op to "=", so the evaluator built empty options, matched nothing and
+  # intersected: EVERY dialect expression returned the empty set silently.
+  # 22298006 is preferred in en-gb and acceptable in en-us; 73211009 exists only
+  # in en-us, so the two refsets select different sets.
+  - name: dialect filter by refset id (en-gb)
+    expression: "<< 404684003 {{ D dialectId = 900000000000508004 }}"
+    expectedIds: ["22298006"]
+
+  - name: dialect filter by refset id (en-us)
+    expression: "<< 404684003 {{ D dialectId = 900000000000509007 }}"
+    expectedIds: ["22298006", "73211009"]
+
+  # Member field filters with a literal value. This used to fail at runtime with
+  # "unsupported AST node type: *ast.StringValue" because the literal was routed
+  # through Evaluate, which has nothing to resolve for it.
+  - name: member field filter with a string value
+    expression: '^ 900000000000497000 {{ M mapTarget = "G30.9" }}'
+    expectedIds: ["22298006"]
+
+  - name: member field filter with a negated string value
+    expression: '^ 900000000000497000 {{ M mapTarget != "G30.9" }}'
+    expectedIds: ["73211009"]

@@ -977,11 +977,21 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 			if !ok {
 				continue
 			}
+			// A member field may hold a literal (a map target, an order, a flag)
+			// rather than a concept reference, so a literal must NOT go through
+			// Evaluate: there is nothing to resolve, and the type switch there
+			// rejects it with "unsupported AST node type: *ast.StringValue".
+			// That made every `{{ M mapTarget = "..." }}` fail at runtime even
+			// though the README lists memberField as supported.
 			var valueSet Set
 			if field.Value != nil {
-				valueSet, err = Evaluate(ctx, field.Value, provider)
-				if err != nil {
-					return nil, fmt.Errorf("evaluating member filter value: %w", err)
+				if lit, ok := literalText(field.Value); ok {
+					valueSet = NewSetFromSlice([]string{lit})
+				} else {
+					valueSet, err = Evaluate(ctx, field.Value, provider)
+					if err != nil {
+						return nil, fmt.Errorf("evaluating member filter value: %w", err)
+					}
 				}
 			}
 			opts := MemberFilterOpts{
@@ -1058,10 +1068,16 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 			continue
 		}
 		if len(df.Dialects) == 0 {
-			// The parser has not populated this node yet. Intersecting with an
-			// empty match would silently return the empty set for every dialect
-			// expression, so say so instead.
-			return nil, fmt.Errorf("%w: dialect filter is recognized but not yet populated by the parser", ErrUnsupportedFeature)
+			// Reached by the alias form (`dialect = en-gb`): mapping an alias to
+			// the SCTID of a language reference set is terminology data, and only
+			// the international English aliases are universal — national dialects
+			// use namespace-specific refset IDs. Use the dialectId form
+			// (`dialectId = 900000000000508004`) meanwhile.
+			//
+			// Intersecting with an empty match instead would return the empty set
+			// for every dialect expression without a word, which is what happened
+			// before this node was populated at all.
+			return nil, fmt.Errorf("%w: dialect alias filter needs an alias-to-refset mapping; use the dialectId form", ErrUnsupportedFeature)
 		}
 		dOpts, err := buildDialectFilterOpts(ctx, df, provider)
 		if err != nil {
@@ -1310,6 +1326,25 @@ func buildDialectFilterOpts(ctx context.Context, df *ast.DialectFilter, provider
 // ---------------------------------------------------------------------------
 // Concrete value comparisons (Phase 5.2)
 // ---------------------------------------------------------------------------.
+
+// literalText renders a concrete literal node as the text a provider stores for
+// it, reporting false for anything that is not a literal.
+//
+// Used by member field filters, whose fields hold arbitrary values (map targets,
+// orders, flags) rather than concept IDs.
+func literalText(e ast.Expression) (string, bool) {
+	switch v := e.(type) {
+	case *ast.StringValue:
+		return v.Value, true
+	case *ast.IntegerValue:
+		return strconv.Itoa(v.Value), true
+	case *ast.DecimalValue:
+		return strconv.FormatFloat(v.Value, 'f', -1, 64), true
+	case *ast.BooleanValue:
+		return strconv.FormatBool(v.Value), true
+	}
+	return "", false
+}
 
 // isConcreteValue reports whether an Attribute.Value is a concrete literal
 // (integer, decimal, string, or boolean) rather than a concept-valued

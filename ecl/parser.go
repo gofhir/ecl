@@ -456,9 +456,9 @@ func (v *astBuilder) buildDescriptionFilterClauses(fc grammar.IDescriptionfilter
 			continue
 		}
 		if c := d.Dialectfilter(); c != nil {
-			// Preserve presence — evaluator will flag as not-yet-implemented.
-			out = append(out, &ast.DialectFilter{Op: "=", Dialects: nil})
-			_ = c
+			if f := v.buildDialectFilter(c); f != nil {
+				out = append(out, f)
+			}
 			continue
 		}
 		if c := d.Activefilter(); c != nil {
@@ -723,6 +723,97 @@ func (v *astBuilder) buildLanguageFilter(ctx grammar.ILanguagefilterContext) *as
 		}
 	}
 	return lf
+}
+
+// buildDialectFilter builds an *ast.DialectFilter from a dialectfilter context.
+//
+// The grammar offers two forms:
+//
+//	dialectidfilter    : dialectId = <SCTID> | (set of SCTIDs)
+//	dialectaliasfilter : dialect   = en-gb   | (set of aliases)
+//
+// Only the SCTID form is populated here. An alias like "en-gb" has to be mapped
+// to the SCTID of a language reference set, and that mapping is terminology data:
+// only the two international English aliases are universal, while national
+// dialects use namespace-specific refset IDs. Inventing a partial table inside
+// the parser would resolve some expressions and silently mis-resolve others, so
+// the alias form is left with an empty Dialects slice and the evaluator reports
+// it through ErrUnsupportedFeature.
+//
+// This node used to be emitted with Dialects always nil and Op forced to "=",
+// which made every dialect expression evaluate to the empty set without a word.
+func (v *astBuilder) buildDialectFilter(ctx grammar.IDialectfilterContext) *ast.DialectFilter {
+	concrete, ok := ctx.(*grammar.DialectfilterContext)
+	if !ok {
+		return nil
+	}
+
+	df := &ast.DialectFilter{Op: "="}
+
+	// Acceptability applies to every entry of the filter.
+	var acceptability ast.Expression
+	if as := concrete.Acceptabilityset(); as != nil {
+		acceptability = v.buildAcceptability(as)
+	}
+
+	if idf, ok := concrete.Dialectidfilter().(*grammar.DialectidfilterContext); ok && idf != nil {
+		if op := idf.Booleancomparisonoperator(); op != nil {
+			df.Op = v.extractComparisonOp(op.GetText())
+		}
+		if sub := idf.Subexpressionconstraint(); sub != nil {
+			if expr := v.visitExpr(sub); expr != nil {
+				df.Dialects = append(df.Dialects, ast.DialectEntry{Dialect: expr, Acceptability: acceptability})
+			}
+		}
+		if set, ok := idf.Dialectidset().(*grammar.DialectidsetContext); ok && set != nil {
+			// Each entry of the set may carry its own acceptability, falling back
+			// to the filter-level one.
+			perEntry := set.AllAcceptabilityset()
+			for i, ref := range set.AllEclconceptreference() {
+				expr := v.visitExpr(ref)
+				if expr == nil {
+					continue
+				}
+				accept := acceptability
+				if i < len(perEntry) && perEntry[i] != nil {
+					if a := v.buildAcceptability(perEntry[i]); a != nil {
+						accept = a
+					}
+				}
+				df.Dialects = append(df.Dialects, ast.DialectEntry{Dialect: expr, Acceptability: accept})
+			}
+		}
+		return df
+	}
+
+	// Alias form: record the operator so the error message is accurate, but
+	// leave Dialects empty — see the comment above.
+	if af, ok := concrete.Dialectaliasfilter().(*grammar.DialectaliasfilterContext); ok && af != nil {
+		if op := af.Booleancomparisonoperator(); op != nil {
+			df.Op = v.extractComparisonOp(op.GetText())
+		}
+	}
+	return df
+}
+
+// buildAcceptability renders an acceptabilityset as a concept reference when it
+// is expressed as SCTIDs. Token forms (preferred / acceptable) resolve to
+// well-known SCTIDs, which the caller's provider may or may not enumerate.
+func (v *astBuilder) buildAcceptability(as grammar.IAcceptabilitysetContext) ast.Expression {
+	concrete, ok := as.(*grammar.AcceptabilitysetContext)
+	if !ok {
+		return nil
+	}
+	if crs := concrete.Acceptabilityconceptreferenceset(); crs != nil {
+		if set, ok := crs.(*grammar.AcceptabilityconceptreferencesetContext); ok {
+			for _, ref := range set.AllEclconceptreference() {
+				if expr := v.visitExpr(ref); expr != nil {
+					return expr
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (v *astBuilder) buildActiveFilter(ctx grammar.IActivefilterContext) *ast.ActiveFilter {

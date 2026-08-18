@@ -75,3 +75,10 @@ cases:
   - name: mixed-polarity description filter is reported as unsupported
     expression: '<< 404684003 {{ D term = "Myocardial", language != es }}'
     expectError: true
+
+  # The dialect ALIAS form needs an alias-to-refset mapping, which is terminology
+  # data rather than something the parser can invent: only the international
+  # English aliases are universal. Reported instead of silently returning empty.
+  - name: dialect alias filter is reported as unsupported
+    expression: "<< 404684003 {{ D dialect = en-gb }}"
+    expectError: true
