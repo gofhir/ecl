@@ -311,12 +311,16 @@ func (p *inMemoryProvider) ConceptExists(_ context.Context, conceptIDs []string)
 	return out, nil
 }
 
+// AllConcepts returns every declared concept, active or not.
+//
+// It deliberately does NOT filter by the active flag: the wildcard is resolved
+// before filters are applied, so filtering here would make
+// `* {{ C active = false }}` unable to return anything. Restricting the active
+// axis is FilterConcepts' job. See the DataProvider contract.
 func (p *inMemoryProvider) AllConcepts(_ context.Context) (ecl.Set, error) {
 	ids := make([]string, 0, len(p.concepts))
-	for id, c := range p.concepts {
-		if isActive(c.Active) {
-			ids = append(ids, id)
-		}
+	for id := range p.concepts {
+		ids = append(ids, id)
 	}
 	return ecl.NewSetFromSlice(ids), nil
 }

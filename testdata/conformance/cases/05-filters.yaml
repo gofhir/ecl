@@ -57,3 +57,14 @@ cases:
   - name: concept filter definition status
     expression: '<< 404684003 {{ C definitionStatusId = 900000000000073002 }}'
     expectedIds: ["22298006", "73211009"]
+
+  # The active axis belongs to FilterConcepts alone. AllConcepts used to filter
+  # by the active flag, and since the wildcard is resolved BEFORE filters are
+  # applied, `* {{ C active = false }}` could never return anything.
+  - name: wildcard with active false returns the inactive concepts
+    expression: "* {{ C active = false }}"
+    expectedIds: ["11111111", "22222222"]
+
+  - name: descendants with active true excludes nothing here
+    expression: "<< 73211009 {{ C active = true }}"
+    expectedIds: ["11687002", "73211009"]

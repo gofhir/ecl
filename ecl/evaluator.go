@@ -47,7 +47,35 @@ func Evaluate(ctx context.Context, expr ast.Expression, provider DataProvider) (
 	if expr == nil {
 		return NewSet(), nil
 	}
+	// Evaluating a broad expression can issue thousands of provider calls, so
+	// honor cancellation. Checked on entry, which covers every recursive step.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
+	set, err := evaluateNode(ctx, expr, provider)
+	if err != nil {
+		return nil, err
+	}
+	// Never hand a nil Set to the caller: the contract requires providers to
+	// return non-nil, but a wrong provider must yield an empty result rather
+	// than a nil-pointer panic in the caller's Slice().
+	return nonNil(set), nil
+}
+
+// nonNil normalizes a Set returned by a DataProvider. The DataProvider contract
+// requires implementations to return a non-nil Set; this keeps a provider that
+// breaks the rule from panicking the evaluator, since returning (nil, nil) for
+// "nothing found" is idiomatic Go and an easy mistake to make.
+func nonNil(s Set) Set {
+	if s == nil {
+		return NewSet()
+	}
+	return s
+}
+
+// evaluateNode is the type switch behind Evaluate.
+func evaluateNode(ctx context.Context, expr ast.Expression, provider DataProvider) (Set, error) {
 	switch e := expr.(type) {
 	// ── Primitives ───────────────────────────────────────────────────────
 
