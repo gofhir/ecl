@@ -988,17 +988,33 @@ func (v *astBuilder) collectSubrefinement(ctx grammar.ISubrefinementContext, ref
 			ref.Groups = append(ref.Groups, grp)
 		}
 	case concrete.Eclattributeset() != nil:
-		attrs := v.collectAttributes(concrete.Eclattributeset())
-		ref.Ungrouped = append(ref.Ungrouped, attrs...)
+		set := v.collectAttributeSet(concrete.Eclattributeset())
+		ref.AttrSet = mergeAttrSet(ref.AttrSet, set)
+		ref.Ungrouped = append(ref.Ungrouped, flattenAttrSet(set)...) //nolint:staticcheck // deprecated field kept populated for v1 readers
 	case concrete.Eclrefinement() != nil:
-		// Nested refinement in parentheses
-		inner := v.visitRefinement(concrete.Eclrefinement())
-		if inner != nil {
-			ref.Groups = append(ref.Groups, inner.Groups...)
-			ref.Ungrouped = append(ref.Ungrouped, inner.Ungrouped...)
-			ref.Conjunction = append(ref.Conjunction, inner.Conjunction...)
-			ref.Disjunction = append(ref.Disjunction, inner.Disjunction...)
+		// A parenthesised refinement is a SCOPE: keep it as one sub-node.
+		//
+		// This used to merge inner.Groups/Ungrouped/Conjunction/Disjunction into
+		// the parent, which destroyed the parentheses. The parent then held both
+		// a Conjunction and a Disjunction with no record of which operands
+		// belonged to the inner scope, so `({A} OR {B}) , C` became
+		// indistinguishable from `{A} , ({B} OR C)`.
+		if inner := v.visitRefinement(concrete.Eclrefinement()); inner != nil {
+			ref.Conjunction = append(ref.Conjunction, inner)
 		}
+	}
+}
+
+// mergeAttrSet combines two attribute trees with AND, which is the operator
+// between successive sub-refinements of the same refinement.
+func mergeAttrSet(a, b *ast.AttributeSet) *ast.AttributeSet {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	default:
+		return &ast.AttributeSet{Op: ast.AttrSetAnd, Items: []*ast.AttributeSet{a, b}}
 	}
 }
 
@@ -1021,7 +1037,8 @@ func (v *astBuilder) visitAttributeGroup(ctx grammar.IEclattributegroupContext) 
 	}
 
 	if concrete.Eclattributeset() != nil {
-		grp.Attrs = v.collectAttributes(concrete.Eclattributeset())
+		grp.AttrSet = v.collectAttributeSet(concrete.Eclattributeset())
+		grp.Attrs = flattenAttrSet(grp.AttrSet) //nolint:staticcheck // deprecated field kept populated for v1 readers
 	}
 
 	return grp
@@ -1035,7 +1052,19 @@ func (v *astBuilder) VisitEclattributegroup(ctx *grammar.EclattributegroupContex
 // Attribute set — collects all attributes (possibly with conjunction/disjunction)
 // ---------------------------------------------------------------------------.
 
-func (v *astBuilder) collectAttributes(ctx grammar.IEclattributesetContext) []*ast.Attribute {
+// collectAttributeSet builds the boolean tree of an eclattributeset, preserving
+// whether the clauses were joined by AND (",") or OR.
+//
+// The grammar rule is
+//
+//	eclattributeset : subattributeset ws (conjunctionattributeset | disjunctionattributeset)?;
+//
+// so a level is either a conjunction or a disjunction, never both, and the
+// operator is unambiguous. Flattening both into one slice — which is what
+// collectAttributes below still does for the deprecated field — made `a = x OR
+// b = y` and `a = x, b = y` produce byte-identical ASTs, and the evaluator then
+// intersected the disjuncts.
+func (v *astBuilder) collectAttributeSet(ctx grammar.IEclattributesetContext) *ast.AttributeSet {
 	if ctx == nil {
 		return nil
 	}
@@ -1043,33 +1072,47 @@ func (v *astBuilder) collectAttributes(ctx grammar.IEclattributesetContext) []*a
 	if !ok {
 		return nil
 	}
-	var attrs []*ast.Attribute
 
-	// First sub-attribute
+	var items []*ast.AttributeSet
 	if concrete.Subattributeset() != nil {
-		attrs = append(attrs, v.collectSubAttributes(concrete.Subattributeset())...)
+		if s := v.collectSubAttributeSet(concrete.Subattributeset()); s != nil {
+			items = append(items, s)
+		}
 	}
 
-	// Conjunction attributes
-	if concrete.Conjunctionattributeset() != nil {
+	op := ast.AttrSetAnd
+	switch {
+	case concrete.Conjunctionattributeset() != nil:
 		conj := concrete.Conjunctionattributeset().(*grammar.ConjunctionattributesetContext)
 		for _, sub := range conj.AllSubattributeset() {
-			attrs = append(attrs, v.collectSubAttributes(sub)...)
+			if s := v.collectSubAttributeSet(sub); s != nil {
+				items = append(items, s)
+			}
 		}
-	}
-
-	// Disjunction attributes
-	if concrete.Disjunctionattributeset() != nil {
+	case concrete.Disjunctionattributeset() != nil:
+		op = ast.AttrSetOr
 		disj := concrete.Disjunctionattributeset().(*grammar.DisjunctionattributesetContext)
 		for _, sub := range disj.AllSubattributeset() {
-			attrs = append(attrs, v.collectSubAttributes(sub)...)
+			if s := v.collectSubAttributeSet(sub); s != nil {
+				items = append(items, s)
+			}
 		}
 	}
 
-	return attrs
+	switch len(items) {
+	case 0:
+		return nil
+	case 1:
+		return items[0] // a lone leaf needs no boolean wrapper
+	default:
+		return &ast.AttributeSet{Op: op, Items: items}
+	}
 }
 
-func (v *astBuilder) collectSubAttributes(ctx grammar.ISubattributesetContext) []*ast.Attribute {
+// collectSubAttributeSet builds the tree of a subattributeset: either a single
+// attribute leaf, or recursively the parenthesised eclattributeset. Note it can
+// never return a group — `subattributeset` does not admit eclattributegroup.
+func (v *astBuilder) collectSubAttributeSet(ctx grammar.ISubattributesetContext) *ast.AttributeSet {
 	if ctx == nil {
 		return nil
 	}
@@ -1078,15 +1121,38 @@ func (v *astBuilder) collectSubAttributes(ctx grammar.ISubattributesetContext) [
 		return nil
 	}
 	if concrete.Eclattribute() != nil {
-		attr := v.visitAttribute(concrete.Eclattribute())
-		if attr != nil {
-			return []*ast.Attribute{attr}
+		if attr := v.visitAttribute(concrete.Eclattribute()); attr != nil {
+			return &ast.AttributeSet{Attr: attr}
 		}
+		return nil
 	}
-	if concrete.Eclattributeset() != nil {
-		return v.collectAttributes(concrete.Eclattributeset())
+	// Parenthesised nested set: recurse so the scope survives.
+	return v.collectAttributeSet(concrete.Eclattributeset())
+}
+
+// collectAttributes flattens an attribute set into a slice, losing the AND/OR
+// distinction.
+//
+// Deprecated: it exists only to keep ast.Refinement.Ungrouped and
+// ast.AttributeGroup.Attrs populated for readers written against v1.1. Use
+// collectAttributeSet.
+func (v *astBuilder) collectAttributes(ctx grammar.IEclattributesetContext) []*ast.Attribute {
+	return flattenAttrSet(v.collectAttributeSet(ctx))
+}
+
+// flattenAttrSet collects every attribute leaf of a set, in order.
+func flattenAttrSet(set *ast.AttributeSet) []*ast.Attribute {
+	if set == nil {
+		return nil
 	}
-	return nil
+	if set.Attr != nil {
+		return []*ast.Attribute{set.Attr}
+	}
+	var out []*ast.Attribute
+	for _, item := range set.Items {
+		out = append(out, flattenAttrSet(item)...)
+	}
+	return out
 }
 
 func (v *astBuilder) VisitEclattributeset(ctx *grammar.EclattributesetContext) any {

@@ -88,14 +88,55 @@ type Refined struct {
 
 // Refinement holds attribute constraints, optionally grouped, with conjunction/disjunction.
 type Refinement struct {
-	Groups      []*AttributeGroup
+	// AttrSet is the boolean tree of the refinement's ungrouped attribute
+	// clauses. Prefer it over Ungrouped: a flat slice cannot express OR, so
+	// `a = x OR b = y` and `a = x, b = y` were indistinguishable.
+	AttrSet *AttributeSet
+
+	Groups []*AttributeGroup
+
+	// Deprecated: use AttrSet. Kept populated for compatibility with readers
+	// written against v1.1; it flattens AND and OR into one list and will be
+	// removed in v2.
 	Ungrouped   []*Attribute
 	Conjunction []*Refinement
 	Disjunction []*Refinement
 }
 
+// AttrSetOp is the boolean operator joining the items of an AttributeSet.
+type AttrSetOp string
+
+// Operators for AttributeSet.
+const (
+	AttrSetAnd AttrSetOp = "AND"
+	AttrSetOr  AttrSetOp = "OR"
+)
+
+// AttributeSet is a boolean tree of attribute clauses. It preserves the operator
+// and the parenthesised nesting the ECL grammar allows, which a flat
+// []*Attribute cannot express.
+//
+// Exactly one of Attr or Items is set:
+//   - Attr:  a single attribute clause (a leaf)
+//   - Items: nested sets combined with Op
+//
+// Note there is no group leaf. The grammar keeps the two levels apart:
+// `subrefinement` admits an eclattributegroup, but `subattributeset` does not,
+// so a group can never appear inside an attribute set — it arrives through
+// Refinement.Groups or through a sibling sub-refinement instead.
+type AttributeSet struct {
+	Op    AttrSetOp
+	Attr  *Attribute
+	Items []*AttributeSet
+}
+
 // AttributeGroup represents a curly-brace-grouped set of attributes with optional cardinality.
 type AttributeGroup struct {
+	// AttrSet is the boolean tree of the group's clauses. Prefer it over Attrs,
+	// which cannot express OR.
+	AttrSet *AttributeSet
+
+	// Deprecated: use AttrSet. Kept populated for compatibility; removed in v2.
 	Attrs       []*Attribute
 	Cardinality *Cardinality
 }
@@ -267,6 +308,7 @@ func (*RefsetContainingAny) eclNode()    {}
 func (*DotExpression) eclNode()          {}
 func (*Refined) eclNode()                {}
 func (*Refinement) eclNode()             {}
+func (*AttributeSet) eclNode()           {}
 func (*AttributeGroup) eclNode()         {}
 func (*Attribute) eclNode()              {}
 func (*Cardinality) eclNode()            {}

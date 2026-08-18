@@ -266,15 +266,33 @@ func applyRefinement(ctx context.Context, focus Set, ref *ast.Refinement, provid
 		return focus, nil
 	}
 
+	// A node must never hold both, or the parenthesised scope was lost while
+	// parsing and the disjunction below cannot be composed correctly.
+	if len(ref.Conjunction) > 0 && len(ref.Disjunction) > 0 {
+		return nil, fmt.Errorf("refinement has both a conjunction and a disjunction in one node: the parenthesised scope was lost while parsing")
+	}
+
 	result := focus
 
-	// Ungrouped attributes — all must match (conjunction).
-	for _, attr := range ref.Ungrouped {
-		filtered, err := filterByAttribute(ctx, result, attr, provider)
+	// Ungrouped attribute clauses. AttrSet is the boolean tree; it replaces the
+	// Ungrouped loop only, and the group/conjunction/disjunction stages below
+	// still run. Returning early here would silently drop the sibling groups of
+	// an expression like `: a = x , { b = y }`, where the grammar puts the group
+	// in Conjunction because subattributeset admits no groups.
+	if ref.AttrSet != nil {
+		filtered, err := applyAttrSet(ctx, result, ref.AttrSet, provider)
 		if err != nil {
 			return nil, err
 		}
 		result = filtered
+	} else {
+		for _, attr := range ref.Ungrouped { //nolint:staticcheck // deprecated path, for hand-built ASTs
+			filtered, err := filterByAttribute(ctx, result, attr, provider)
+			if err != nil {
+				return nil, err
+			}
+			result = filtered
+		}
 	}
 
 	// Grouped attributes — each group filters the set.
@@ -295,11 +313,17 @@ func applyRefinement(ctx context.Context, focus Set, ref *ast.Refinement, provid
 		result = filtered
 	}
 
-	// Disjunction sub-refinements — union of each sub's result on current focus.
+	// Disjunction sub-refinements. Each disjunct is an ALTERNATIVE to the first
+	// sub-refinement, so every branch is evaluated against the incoming focus
+	// and the results are unioned — including the first sub-refinement's own
+	// result, which the stages above already computed into `result`.
+	//
+	// Evaluating the disjuncts against `result` instead of `focus` is what made
+	// `A OR B` behave as `focus ∩ A ∩ B`, i.e. usually the empty set.
 	if len(ref.Disjunction) > 0 {
-		acc := NewSet()
+		acc := result
 		for _, sub := range ref.Disjunction {
-			subResult, err := applyRefinement(ctx, result, sub, provider)
+			subResult, err := applyRefinement(ctx, focus, sub, provider)
 			if err != nil {
 				return nil, err
 			}
@@ -308,6 +332,42 @@ func applyRefinement(ctx context.Context, focus Set, ref *ast.Refinement, provid
 		result = acc
 	}
 
+	return result, nil
+}
+
+// applyAttrSet filters focus by a boolean tree of attribute clauses.
+//
+// The invariant that makes OR work: every branch is evaluated against the SAME
+// incoming focus. Chaining them (feeding each branch the previous branch's
+// result) turns a union into an intersection.
+func applyAttrSet(ctx context.Context, focus Set, set *ast.AttributeSet, provider DataProvider) (Set, error) {
+	if set == nil || focus == nil || focus.Len() == 0 {
+		return focus, nil
+	}
+	if set.Attr != nil {
+		return filterByAttribute(ctx, focus, set.Attr, provider)
+	}
+
+	if set.Op == ast.AttrSetOr {
+		acc := NewSet()
+		for _, item := range set.Items {
+			sub, err := applyAttrSet(ctx, focus, item, provider) // focus, never acc
+			if err != nil {
+				return nil, err
+			}
+			acc = acc.Union(sub)
+		}
+		return acc, nil
+	}
+
+	result := focus
+	for _, item := range set.Items {
+		sub, err := applyAttrSet(ctx, result, item, provider)
+		if err != nil {
+			return nil, err
+		}
+		result = sub
+	}
 	return result, nil
 }
 
@@ -444,53 +504,27 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 	if focus == nil || focus.Len() == 0 {
 		return focus, nil
 	}
-	if grp == nil || len(grp.Attrs) == 0 {
+	set := grp.AttrSet
+	if set == nil {
+		// Hand-built AST using the deprecated field: rebuild the tree as a
+		// conjunction so both paths share one implementation.
+		set = attrSetFromSlice(grp.Attrs) //nolint:staticcheck // deprecated field support
+	}
+	if set == nil {
 		return focus, nil
 	}
-	// Pre-resolve each sub-attribute's type IDs and value set once.
-	clauses := make([]attrClause, 0, len(grp.Attrs))
-	for _, a := range grp.Attrs {
-		typeIDs, err := Evaluate(ctx, a.Name, provider)
-		if err != nil {
-			return nil, fmt.Errorf("evaluating attribute name: %w", err)
-		}
-		if isConcreteValue(a.Value) {
-			c := attrClause{op: a.Op, typeIDs: typeIDs, cardinality: a.Cardinality, isConcrete: true, reverse: a.Reverse}
-			switch v := a.Value.(type) {
-			case *ast.IntegerValue:
-				c.concreteKind = concreteKindNumeric
-				c.numericVal = float64(v.Value)
-			case *ast.DecimalValue:
-				c.concreteKind = concreteKindNumeric
-				c.numericVal = v.Value
-			case *ast.StringValue:
-				c.concreteKind = concreteKindString
-				c.stringVal = v.Value
-			case *ast.BooleanValue:
-				c.concreteKind = concreteKindBoolean
-				c.boolVal = v.Value
-			}
-			clauses = append(clauses, c)
-			continue
-		}
-		switch a.Op {
-		case "=", "!=":
-		case "<", "<=", ">", ">=":
-			return nil, fmt.Errorf("concrete-value operator %q requires a concrete value", a.Op)
-		default:
-			return nil, fmt.Errorf("unsupported attribute operator %q", a.Op)
-		}
-		c := attrClause{op: a.Op, typeIDs: typeIDs, cardinality: a.Cardinality, reverse: a.Reverse}
-		if _, isAny := a.Value.(*ast.Any); isAny {
-			c.valueIsAny = true
-		} else {
-			c.valueSet, err = Evaluate(ctx, a.Value, provider)
-			if err != nil {
-				return nil, fmt.Errorf("evaluating attribute value: %w", err)
-			}
-		}
-		clauses = append(clauses, c)
+
+	// Pre-resolve every leaf's type IDs and value set once, keeping the boolean
+	// shape so `{ a = x OR b = y }` is a disjunction within the group instead of
+	// a conjunction.
+	tree, err := resolveClauseSet(ctx, set, provider)
+	if err != nil {
+		return nil, err
 	}
+	// The reverse path below works on the flattened leaves, so it still treats a
+	// group's clauses as a conjunction: `{ R a = x OR b = y }` is evaluated as
+	// AND. Known limitation, tracked with the rest of the reverse-path work.
+	clauses := tree.leaves()
 
 	hasReverse := false
 	for _, c := range clauses {
@@ -512,7 +546,7 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 				return false
 			}
 			for _, rels := range groups {
-				if groupSatisfiesClauses(rels, clauses) {
+				if groupSatisfiesSet(rels, tree) {
 					anyGroupSatisfies = true
 					break
 				}
@@ -562,44 +596,179 @@ const (
 	concreteKindBoolean = "boolean"
 )
 
-// groupSatisfiesClauses reports whether a single relationship group satisfies
-// every clause. Each clause counts matching relationships and validates
-// against its cardinality constraint.
-func groupSatisfiesClauses(rels []Relationship, clauses []attrClause) bool {
-	for _, c := range clauses {
-		count := 0
-		for _, r := range rels {
-			if !c.typeIDs.Contains(r.TypeID) {
-				continue
-			}
-			if c.isConcrete {
-				if r.ConcreteValue == nil {
-					continue
-				}
-				if matchConcreteValue(r.ConcreteValue, c) {
-					count++
-				}
-			} else {
-				hit := c.valueIsAny || c.valueSet.Contains(r.TargetID)
-				if hit {
-					count++
-				}
+// clauseSet is the resolved counterpart of ast.AttributeSet: a boolean tree
+// whose leaves carry pre-resolved type IDs and value sets.
+type clauseSet struct {
+	op    ast.AttrSetOp
+	leaf  *attrClause
+	items []*clauseSet
+}
+
+// leaves flattens the tree into the clause slice the reverse path still uses.
+func (cs *clauseSet) leaves() []attrClause {
+	if cs == nil {
+		return nil
+	}
+	if cs.leaf != nil {
+		return []attrClause{*cs.leaf}
+	}
+	var out []attrClause
+	for _, item := range cs.items {
+		out = append(out, item.leaves()...)
+	}
+	return out
+}
+
+// attrSetFromSlice rebuilds a conjunction tree from the deprecated flat field,
+// so an AST built by hand against v1.1 still evaluates.
+func attrSetFromSlice(attrs []*ast.Attribute) *ast.AttributeSet {
+	switch len(attrs) {
+	case 0:
+		return nil
+	case 1:
+		return &ast.AttributeSet{Attr: attrs[0]}
+	}
+	items := make([]*ast.AttributeSet, 0, len(attrs))
+	for _, a := range attrs {
+		items = append(items, &ast.AttributeSet{Attr: a})
+	}
+	return &ast.AttributeSet{Op: ast.AttrSetAnd, Items: items}
+}
+
+// resolveClauseSet resolves every leaf of an attribute tree once, up front.
+func resolveClauseSet(ctx context.Context, set *ast.AttributeSet, provider DataProvider) (*clauseSet, error) {
+	if set == nil {
+		return nil, nil
+	}
+	if set.Attr != nil {
+		c, err := resolveAttrClause(ctx, set.Attr, provider)
+		if err != nil {
+			return nil, err
+		}
+		return &clauseSet{leaf: &c}, nil
+	}
+	out := &clauseSet{op: set.Op}
+	for _, item := range set.Items {
+		sub, err := resolveClauseSet(ctx, item, provider)
+		if err != nil {
+			return nil, err
+		}
+		if sub != nil {
+			out.items = append(out.items, sub)
+		}
+	}
+	return out, nil
+}
+
+// resolveAttrClause pre-resolves one attribute clause's type IDs and value.
+func resolveAttrClause(ctx context.Context, a *ast.Attribute, provider DataProvider) (attrClause, error) {
+	typeIDs, err := Evaluate(ctx, a.Name, provider)
+	if err != nil {
+		return attrClause{}, fmt.Errorf("evaluating attribute name: %w", err)
+	}
+
+	if isConcreteValue(a.Value) {
+		c := attrClause{op: a.Op, typeIDs: typeIDs, cardinality: a.Cardinality, isConcrete: true, reverse: a.Reverse}
+		switch v := a.Value.(type) {
+		case *ast.IntegerValue:
+			c.concreteKind = concreteKindNumeric
+			c.numericVal = float64(v.Value)
+		case *ast.DecimalValue:
+			c.concreteKind = concreteKindNumeric
+			c.numericVal = v.Value
+		case *ast.StringValue:
+			c.concreteKind = concreteKindString
+			c.stringVal = v.Value
+		case *ast.BooleanValue:
+			c.concreteKind = concreteKindBoolean
+			c.boolVal = v.Value
+		}
+		return c, nil
+	}
+
+	switch a.Op {
+	case "=", "!=":
+	case "<", "<=", ">", ">=":
+		return attrClause{}, fmt.Errorf("concrete-value operator %q requires a concrete value", a.Op)
+	default:
+		return attrClause{}, fmt.Errorf("unsupported attribute operator %q", a.Op)
+	}
+
+	c := attrClause{op: a.Op, typeIDs: typeIDs, cardinality: a.Cardinality, reverse: a.Reverse}
+	if _, isAny := a.Value.(*ast.Any); isAny {
+		c.valueIsAny = true
+		return c, nil
+	}
+	c.valueSet, err = Evaluate(ctx, a.Value, provider)
+	if err != nil {
+		return attrClause{}, fmt.Errorf("evaluating attribute value: %w", err)
+	}
+	return c, nil
+}
+
+// groupSatisfiesSet reports whether a single relationship group satisfies the
+// clause tree, honoring AND/OR at each level.
+func groupSatisfiesSet(rels []Relationship, cs *clauseSet) bool {
+	if cs == nil {
+		return true
+	}
+	if cs.leaf != nil {
+		return clauseSatisfied(rels, *cs.leaf)
+	}
+	if cs.op == ast.AttrSetOr {
+		for _, item := range cs.items {
+			if groupSatisfiesSet(rels, item) {
+				return true
 			}
 		}
-		if c.op == "!=" && !c.isConcrete {
-			totalOfType := 0
-			for _, r := range rels {
-				if c.typeIDs.Contains(r.TypeID) {
-					totalOfType++
-				}
-			}
-			count = totalOfType - count
-		}
-		if !cardinalitySatisfied(c.cardinality, count) {
+		return false
+	}
+	for _, item := range cs.items {
+		if !groupSatisfiesSet(rels, item) {
 			return false
 		}
 	}
 	return true
+}
+
+// clauseSatisfied reports whether one relationship group satisfies one clause:
+// it counts the matching relationships and validates the count against the
+// clause's cardinality.
+func clauseSatisfied(rels []Relationship, c attrClause) bool {
+	count := 0
+	for _, r := range rels {
+		if !c.typeIDs.Contains(r.TypeID) {
+			continue
+		}
+		if c.isConcrete {
+			if r.ConcreteValue == nil {
+				continue
+			}
+			if matchConcreteValue(r.ConcreteValue, c) {
+				count++
+			}
+			continue
+		}
+		if c.valueIsAny || c.valueSet.Contains(r.TargetID) {
+			count++
+		}
+	}
+
+	// "attr != X" selects relationships OF THAT TYPE whose value is not in X,
+	// so it counts the complement within the type — not the complement of the
+	// concept. For concrete values the operator is already applied inside
+	// matchConcreteValue, so no inversion happens here.
+	if c.op == "!=" && !c.isConcrete {
+		totalOfType := 0
+		for _, r := range rels {
+			if c.typeIDs.Contains(r.TypeID) {
+				totalOfType++
+			}
+		}
+		count = totalOfType - count
+	}
+
+	return cardinalitySatisfied(c.cardinality, count)
 }
 
 // conceptMatchesGroupWithReverse checks if a concept satisfies a group with

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/gofhir/ecl/ecl"
@@ -103,9 +104,13 @@ func printAST(out io.Writer, node ast.Expression, depth int) {
 		fmt.Fprintf(out, "%sRefined :\n", indent)
 		fmt.Fprintf(out, "%s  focus:\n", indent)
 		printAST(out, n.Focus, depth+2)
-		fmt.Fprintf(out, "%s  refinement: <%d ungrouped, %d groups, %d conjunction, %d disjunction>\n",
-			indent, len(n.Refinement.Ungrouped), len(n.Refinement.Groups),
+		fmt.Fprintf(out, "%s  refinement: <%d groups, %d conjunction, %d disjunction>\n",
+			indent, len(n.Refinement.Groups),
 			len(n.Refinement.Conjunction), len(n.Refinement.Disjunction))
+		if n.Refinement.AttrSet != nil {
+			fmt.Fprintf(out, "%s  attributes:\n", indent)
+			printAttrSet(out, n.Refinement.AttrSet, depth+2)
+		}
 	case *ast.Filtered:
 		fmt.Fprintf(out, "%sFiltered (%d clauses)\n", indent, len(n.Filters))
 		printAST(out, n.Operand, depth+1)
@@ -124,6 +129,40 @@ func printAST(out io.Writer, node ast.Expression, depth int) {
 		fmt.Fprintf(out, "%sAltIdentifier %s#%s\n", indent, n.Scheme, n.Code)
 	default:
 		fmt.Fprintf(out, "%s%T\n", indent, node)
+	}
+}
+
+// printAttrSet renders the boolean tree of a refinement's attribute clauses.
+// The operator matters: `a = x OR b = y` and `a = x, b = y` select different
+// sets, and a flat listing cannot tell them apart.
+func printAttrSet(out io.Writer, set *ast.AttributeSet, depth int) {
+	if set == nil {
+		return
+	}
+	indent := strings.Repeat("  ", depth)
+	if set.Attr != nil {
+		reverse := ""
+		if set.Attr.Reverse {
+			reverse = "R "
+		}
+		cardinality := ""
+		if c := set.Attr.Cardinality; c != nil {
+			maxVal := strconv.Itoa(c.Max)
+			if c.Max == -1 {
+				maxVal = "*"
+			}
+			cardinality = fmt.Sprintf("[%d..%s] ", c.Min, maxVal)
+		}
+		fmt.Fprintf(out, "%sAttribute %s%s%s\n", indent, cardinality, reverse, set.Attr.Op)
+		fmt.Fprintf(out, "%s  name:\n", indent)
+		printAST(out, set.Attr.Name, depth+2)
+		fmt.Fprintf(out, "%s  value:\n", indent)
+		printAST(out, set.Attr.Value, depth+2)
+		return
+	}
+	fmt.Fprintf(out, "%s%s\n", indent, set.Op)
+	for _, item := range set.Items {
+		printAttrSet(out, item, depth+1)
 	}
 }
 

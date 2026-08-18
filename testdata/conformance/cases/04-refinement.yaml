@@ -31,3 +31,46 @@ cases:
   - name: refinement with two attributes (AND in same group)
     expression: "<< 404684003 : { 363698007 = 74281007, 116676008 = 55641003 }"
     expectedIds: ["22298006"]
+
+  # Disjunction. The parser used to flatten AND and OR into one list, so these
+  # were evaluated as intersections and returned the empty set.
+  - name: disjunction of ungrouped attributes
+    expression: "* : 363698007 = 74281007 OR 363698007 = 113331007"
+    expectedIds: ["22298006", "73211009"]
+
+  - name: conjunction of the same two clauses still intersects
+    expression: "* : 363698007 = 74281007 , 363698007 = 113331007"
+    expectedIds: ["22298006"]
+
+  - name: disjunction of attribute groups
+    expression: "* : { 363698007 = 74281007 } OR { 1142139005 = #5 }"
+    expectedIds: ["22298006", "73211009"]
+
+  - name: conjunction of attribute groups matches nobody
+    expression: "* : { 363698007 = 74281007 } , { 1142139005 = #5 }"
+    expectedIds: []
+
+  - name: disjunction inside an attribute group
+    expression: "* : { 363698007 = 113331007 OR 116676008 = 55641003 }"
+    expectedIds: ["22298006", "73211009"]
+
+  # The grammar cannot put a group inside an attribute set, so the comma
+  # promotes the group to the refinement level. Dispatching on the attribute
+  # tree alone would drop the group and widen the result.
+  - name: attribute and group combined with a comma
+    expression: "* : 363698007 = 74281007 , { 116676008 = 55641003 }"
+    expectedIds: ["22298006"]
+
+  - name: attribute and group combined where the group excludes everything
+    expression: "* : 363698007 = 74281007 , { 1142139005 = #5 }"
+    expectedIds: []
+
+  # Parentheses are a scope: flattening them let the trailing conjunct escape
+  # the union.
+  - name: parenthesised disjunction keeps its scope
+    expression: "* : ({ 363698007 = 74281007 } OR { 363698007 = 113331007 }) , 1142139005 = #5"
+    expectedIds: ["73211009"]
+
+  - name: parenthesised disjunction of ungrouped attributes
+    expression: "* : (363698007 = 74281007 OR 1142139005 = #5)"
+    expectedIds: ["22298006", "73211009"]
