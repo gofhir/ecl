@@ -1,0 +1,9 @@
+# Coverage output from `make test-race` / `make check`.
+coverage.txt
+coverage.out
+
+# Compiled binaries from a local `go build`.
+/gofhir-ecl
+
+# macOS
+.DS_Store
