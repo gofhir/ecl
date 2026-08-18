@@ -89,3 +89,30 @@ func TestEvaluate_GroupZeroIsNotACountedGroup(t *testing.T) {
 	grouped := evalFixture(t, "* : { 363698007 = 74281007 }")
 	require.ElementsMatch(t, ungrouped.Slice(), grouped.Slice())
 }
+
+// TestEvaluate_TopUsesTransitiveAncestors covers !!>. The fixture chain is
+// 138875005 -> 404684003 -> 22298006, and the set below omits the middle link:
+// 22298006's immediate parent is outside the set but its grandparent is inside,
+// so Parents (depth 1) wrongly reported it as a top. Both were returned before.
+func TestEvaluate_TopUsesTransitiveAncestors(t *testing.T) {
+	set := evalFixture(t, "!!> (138875005 OR 22298006)")
+	require.ElementsMatch(t, []string{"138875005"}, set.Slice())
+}
+
+// TestEvaluate_BottomUsesTransitiveDescendants is the symmetric case for !!<,
+// which was equally broken and had no test at all.
+func TestEvaluate_BottomUsesTransitiveDescendants(t *testing.T) {
+	set := evalFixture(t, "!!< (138875005 OR 22298006)")
+	require.ElementsMatch(t, []string{"22298006"}, set.Slice())
+}
+
+// TestEvaluate_TopBottomOnClosedSets guards the cases that were already correct:
+// on a transitively closed set, Parents and Ancestors agree, which is why the
+// original tests passed while the operator was broken for every other input.
+func TestEvaluate_TopBottomOnClosedSets(t *testing.T) {
+	top := evalFixture(t, "!!> (<< 404684003)")
+	require.ElementsMatch(t, []string{"404684003"}, top.Slice())
+
+	bottom := evalFixture(t, "!!< (<< 404684003)")
+	require.ElementsMatch(t, []string{"11687002", "22298006", "95566004"}, bottom.Slice())
+}

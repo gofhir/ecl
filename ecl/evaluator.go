@@ -1347,6 +1347,12 @@ func compareBool(a bool, op string, b bool) bool {
 
 // topOfSet returns the concepts in baseSet that have no parent in baseSet
 // (i.e. the roots of the sub-graph induced by baseSet).
+// It uses Ancestors, not Parents: a member whose immediate parent is outside
+// baseSet may still have a grandparent inside it, and such a member is not a
+// top. With Parents (depth 1) it was wrongly reported as one, which happens for
+// any set that is not transitively closed -- i.e. the result of a refset, a
+// filter or a MINUS, which is the common case. `!!> << X` happened to be right
+// by construction, which is why the tests passed.
 func topOfSet(ctx context.Context, baseSet Set, provider DataProvider) (Set, error) {
 	if baseSet == nil || baseSet.Len() == 0 {
 		return baseSet, nil
@@ -1354,12 +1360,12 @@ func topOfSet(ctx context.Context, baseSet Set, provider DataProvider) (Set, err
 	out := newMapSet()
 	var iterErr error
 	baseSet.Iter(func(id string) bool {
-		parents, err := provider.Parents(ctx, []string{id}, false)
+		ancestors, err := provider.Ancestors(ctx, []string{id}, false)
 		if err != nil {
-			iterErr = fmt.Errorf("Parents(%s): %w", id, err)
+			iterErr = fmt.Errorf("Ancestors(%s): %w", id, err)
 			return false
 		}
-		if parents == nil || parents.Intersect(baseSet).Len() == 0 {
+		if ancestors == nil || ancestors.Intersect(baseSet).Len() == 0 {
 			out.m[id] = struct{}{}
 		}
 		return true
@@ -1370,8 +1376,11 @@ func topOfSet(ctx context.Context, baseSet Set, provider DataProvider) (Set, err
 	return out, nil
 }
 
-// bottomOfSet returns the concepts in baseSet that have no child in baseSet
-// (i.e. the leaves of the sub-graph induced by baseSet).
+// bottomOfSet returns the concepts in baseSet that have no proper descendant in
+// baseSet (i.e. the leaves of the sub-graph induced by baseSet).
+//
+// Symmetric to topOfSet: it uses Descendants rather than Children, for the same
+// reason.
 func bottomOfSet(ctx context.Context, baseSet Set, provider DataProvider) (Set, error) {
 	if baseSet == nil || baseSet.Len() == 0 {
 		return baseSet, nil
@@ -1379,12 +1388,12 @@ func bottomOfSet(ctx context.Context, baseSet Set, provider DataProvider) (Set, 
 	out := newMapSet()
 	var iterErr error
 	baseSet.Iter(func(id string) bool {
-		children, err := provider.Children(ctx, []string{id}, false)
+		descendants, err := provider.Descendants(ctx, []string{id}, false)
 		if err != nil {
-			iterErr = fmt.Errorf("Children(%s): %w", id, err)
+			iterErr = fmt.Errorf("Descendants(%s): %w", id, err)
 			return false
 		}
-		if children == nil || children.Intersect(baseSet).Len() == 0 {
+		if descendants == nil || descendants.Intersect(baseSet).Len() == 0 {
 			out.m[id] = struct{}{}
 		}
 		return true
