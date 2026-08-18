@@ -31,6 +31,29 @@ cases:
     expression: '<< 404684003 {{ D language = es }}'
     expectedIds: ["22298006"]
 
-  - name: term filter negated
-    expression: '<< 73211009 {{ D term != "Type 1 diabetes mellitus" }}'
-    expectedIds: ["73211009"]
+  # The negated description filters moved to 09-errors.yaml: their semantics are
+  # a per-description-row negation, which cannot be expressed as a set operation
+  # against the current DataProvider contract. The evaluator now reports
+  # ErrUnsupportedFeature instead of returning base.Minus(matches), which was
+  # wrong for any concept holding both a matching and a non-matching description.
+
+  # Concept filters, in contrast, identify sets of concepts, so each clause can
+  # be composed independently. A single global negate flag used to discard the
+  # positive sibling clauses.
+  - name: concept filter with mixed polarity keeps the positive clause
+    expression: '<< 404684003 {{ C definitionStatusId = 900000000000073002, moduleId != 900000000000012004 }}'
+    expectedIds: ["22298006", "73211009"]
+
+  # 22298006, 73211009 and 11687002 are in the core module, so "!=" excludes all
+  # three; 95566004 is in the model component module and the rest declare none.
+  - name: concept filter negated module
+    expression: '<< 404684003 {{ C moduleId != 900000000000207008 }}'
+    expectedIds: ["404684003", "64572001", "95566004"]
+
+  - name: concept filter positive module
+    expression: '<< 404684003 {{ C moduleId = 900000000000207008 }}'
+    expectedIds: ["11687002", "22298006", "73211009"]
+
+  - name: concept filter definition status
+    expression: '<< 404684003 {{ C definitionStatusId = 900000000000073002 }}'
+    expectedIds: ["22298006", "73211009"]

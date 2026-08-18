@@ -4,11 +4,22 @@ package ecl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 
 	"github.com/gofhir/ecl/ecl/ast"
 )
+
+// ErrUnsupportedFeature marks an ECL construct the evaluator recognizes but
+// cannot evaluate correctly yet. Callers can classify it and answer 422 or 501
+// instead of serving a wrong result set:
+//
+//	if errors.Is(err, ecl.ErrUnsupportedFeature) { /* not implemented */ }
+//
+// It is returned rather than a silently incorrect set whenever the semantics
+// cannot be expressed through the current DataProvider contract.
+var ErrUnsupportedFeature = errors.New("unsupported ECL feature")
 
 // Evaluate evaluates an ECL AST against the given DataProvider and returns
 // the set of matching SNOMED CT concept IDs.
@@ -22,7 +33,11 @@ import (
 //   - Reverse attribute (R flag) including wildcard and concrete values
 //   - DotExpression (attribute navigation)
 //   - Filter constraints: term, type, language, dialect, active, module,
-//     definitionStatus, effectiveTime — including negated (!=) operators
+//     definitionStatus, effectiveTime. Concept filters ({{ C ... }}) support
+//     the negated (!=) operator per clause; negated DESCRIPTION filters
+//     ({{ D ... }}) return ErrUnsupportedFeature, because their semantics is a
+//     per-description-row negation that the DataProvider contract cannot yet
+//     express — see ErrUnsupportedFeature.
 //   - Member field filters
 //   - Concrete value comparisons: integer, decimal, string, boolean
 //   - HistorySupplement with MIN/MOD/MAX profiles
@@ -970,7 +985,20 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 	// IDs whose descriptions match; intersect with the current base (or subtract
 	// when negated).
 	if len(descFilters) > 0 {
-		opts, negate, err := buildDescriptionFilterOpts(ctx, descFilters, provider)
+		// A negated description filter cannot be expressed as a set operation.
+		// `{{ D type != fsn }}` means "has a description whose type is not FSN",
+		// which is a per-DESCRIPTION-ROW negation. Subtracting the concepts that
+		// have an FSN also removes concepts that have both an FSN and a synonym,
+		// so the set-level Minus used here before produced wrong results
+		// silently. Expressing it properly needs negation fields on
+		// DescriptionFilterOpts, i.e. a provider contract change.
+		//
+		// Until then, fail loudly: a classifiable error beats a wrong set. The
+		// same choice is already made for ^[field] projections above.
+		if kind, negated := negatedDescriptionFilter(descFilters); negated {
+			return nil, fmt.Errorf("%w: negated description filter (%s) requires row-level negation in the DataProvider", ErrUnsupportedFeature, kind)
+		}
+		opts, err := buildDescriptionFilterOpts(ctx, descFilters, provider)
 		if err != nil {
 			return nil, err
 		}
@@ -978,22 +1006,34 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 		if err != nil {
 			return nil, fmt.Errorf("MatchDescription: %w", err)
 		}
-		switch {
-		case negate:
-			result = result.Minus(matches)
-		case result == nil:
+		if matches == nil {
+			matches = NewSet()
+		}
+		if result == nil {
 			result = matches
-		default:
+		} else {
 			result = result.Intersect(matches)
 		}
 	}
 
-	// Dialect filters — separate from description filters because they use
-	// a dedicated provider method.
+	// Dialect filters — separate from description filters because they use a
+	// dedicated provider method.
+	//
+	// Negated dialect filters are rejected above with the rest of the
+	// description family, so only the positive form reaches here. That also
+	// resolves a double-negation hazard: DialectFilterOpts.Negate already asks
+	// the provider to negate, and this loop used to apply Minus on top of it.
+	// The provider is the single owner of the negation.
 	for _, f := range descFilters {
 		df, ok := f.(*ast.DialectFilter)
 		if !ok {
 			continue
+		}
+		if len(df.Dialects) == 0 {
+			// The parser has not populated this node yet. Intersecting with an
+			// empty match would silently return the empty set for every dialect
+			// expression, so say so instead.
+			return nil, fmt.Errorf("%w: dialect filter is recognized but not yet populated by the parser", ErrUnsupportedFeature)
 		}
 		dOpts, err := buildDialectFilterOpts(ctx, df, provider)
 		if err != nil {
@@ -1003,32 +1043,121 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 		if err != nil {
 			return nil, fmt.Errorf("MatchDialect: %w", err)
 		}
-		if df.Op == "!=" {
-			result = result.Minus(matches)
-		} else {
-			result = result.Intersect(matches)
+		if matches == nil {
+			matches = NewSet()
 		}
+		result = result.Intersect(matches)
 	}
 
-	// Concept filters — build ConceptFilterOpts and delegate (or subtract when
-	// negated).
-	if len(conceptFilters) > 0 {
-		opts, negate, err := buildConceptFilterOpts(ctx, conceptFilters, provider)
+	// Concept filters — one provider call per clause, composed with Intersect
+	// for "=" and Minus for "!=".
+	//
+	// A concept filter clause identifies a set of CONCEPTS, so set-level
+	// composition is exact here. It is not exact for description filters, which
+	// is why those are handled separately above.
+	//
+	// The previous implementation collapsed every clause into one Opts plus a
+	// single `negate` bool, set by any clause using "!=", and then subtracted the
+	// set satisfying the whole conjunction. That silently discarded the sibling
+	// positive clauses: `{{ C active = false, definitionStatusId != X }}`
+	// returned active concepts, because the negated conjunction was empty and
+	// Minus subtracted nothing.
+	for _, cl := range buildConceptFilterClauses(conceptFilters) {
+		opts, err := conceptClauseOpts(ctx, cl.filter, provider)
 		if err != nil {
 			return nil, err
 		}
-		filtered, err := provider.FilterConcepts(ctx, result, opts)
+		matched, err := provider.FilterConcepts(ctx, result, opts)
 		if err != nil {
 			return nil, fmt.Errorf("FilterConcepts: %w", err)
 		}
-		if negate {
-			result = result.Minus(filtered)
+		if matched == nil {
+			matched = NewSet()
+		}
+		if cl.negate {
+			result = result.Minus(matched)
 		} else {
-			result = filtered
+			result = result.Intersect(matched)
 		}
 	}
 
 	return result, nil
+}
+
+// conceptFilterClause is a single concept filter clause with its own polarity,
+// so each one can be composed independently.
+type conceptFilterClause struct {
+	filter ast.Filter
+	negate bool
+}
+
+// buildConceptFilterClauses splits the concept filter family into individually
+// composable clauses.
+func buildConceptFilterClauses(filters []ast.Filter) []conceptFilterClause {
+	out := make([]conceptFilterClause, 0, len(filters))
+	for _, f := range filters {
+		negate := false
+		switch x := f.(type) {
+		case *ast.DefinitionStatusFilter:
+			negate = x.Op == "!="
+		case *ast.ModuleFilter:
+			negate = x.Op == "!="
+		case *ast.EffectiveTimeFilter:
+			// The operator is part of the comparison the provider performs
+			// (>=, <, ...), so it is passed through rather than negated here.
+		case *ast.ActiveFilter:
+			// ActiveFilter carries a bool, not an operator: `active = false` is
+			// a positive clause selecting inactive concepts.
+		}
+		out = append(out, conceptFilterClause{filter: f, negate: negate})
+	}
+	return out
+}
+
+// conceptClauseOpts builds the ConceptFilterOpts for exactly one clause.
+func conceptClauseOpts(ctx context.Context, f ast.Filter, provider DataProvider) (ConceptFilterOpts, error) {
+	var opts ConceptFilterOpts
+	switch x := f.(type) {
+	case *ast.ActiveFilter:
+		b := x.Value
+		opts.Active = &b
+	case *ast.DefinitionStatusFilter:
+		ids, err := resolveFilterIDs(ctx, x.Value, provider)
+		if err != nil {
+			return opts, fmt.Errorf("evaluating definitionStatus filter: %w", err)
+		}
+		opts.DefinitionStatusIDs = ids
+	case *ast.ModuleFilter:
+		ids, err := resolveFilterIDs(ctx, x.Module, provider)
+		if err != nil {
+			return opts, fmt.Errorf("evaluating module filter: %w", err)
+		}
+		opts.ModuleIDs = ids
+	case *ast.EffectiveTimeFilter:
+		opts.EffectiveTime = x.Value
+		opts.EffectiveTimeOp = x.Op
+	}
+	return opts, nil
+}
+
+// resolveFilterIDs evaluates a filter operand to concept IDs, falling back to
+// the literal SCTID when the provider does not enumerate it (well-known
+// metadata concepts are often absent from a test provider's ConceptExists).
+func resolveFilterIDs(ctx context.Context, e ast.Expression, provider DataProvider) ([]string, error) {
+	if e == nil {
+		return nil, nil
+	}
+	ids, err := Evaluate(ctx, e, provider)
+	if err != nil {
+		return nil, err
+	}
+	if ids != nil && ids.Len() > 0 {
+		return ids.Slice(), nil
+	}
+	if ref, ok := e.(*ast.ConceptRef); ok {
+		return []string{ref.ID}, nil
+	}
+	return nil, nil
 }
 
 // categorizeFilters splits a flat list of filters into description, concept,
@@ -1052,99 +1181,65 @@ func categorizeFilters(filters []ast.Filter) (desc, concept, member []ast.Filter
 	return desc, concept, member
 }
 
-// buildDescriptionFilterOpts accumulates description filter clauses into a
-// single DescriptionFilterOpts. Multiple clauses of the same kind are
-// simplified by taking the last one (rarely seen in practice).
-func buildDescriptionFilterOpts(ctx context.Context, filters []ast.Filter, provider DataProvider) (DescriptionFilterOpts, bool, error) {
-	var opts DescriptionFilterOpts
-	var negate bool
+// negatedDescriptionFilter reports whether any description filter clause uses
+// "!=", and which kind it was. Dialect filters count: they belong to the same
+// family and their negation is equally per-row.
+func negatedDescriptionFilter(filters []ast.Filter) (string, bool) {
 	for _, f := range filters {
 		switch x := f.(type) {
 		case *ast.TermFilter:
 			if x.Op == "!=" {
-				negate = true
+				return "term", true
 			}
+		case *ast.TypeFilter:
+			if x.Op == "!=" {
+				return "type", true
+			}
+		case *ast.LanguageFilter:
+			if x.Op == "!=" {
+				return "language", true
+			}
+		case *ast.DialectFilter:
+			if x.Op == "!=" {
+				return "dialect", true
+			}
+		}
+	}
+	return "", false
+}
+
+// buildDescriptionFilterOpts accumulates description filter clauses into a
+// single DescriptionFilterOpts. Multiple clauses of the same kind are
+// simplified by taking the last one (rarely seen in practice).
+//
+// Every clause here is positive: evaluateFiltered rejects the negated forms
+// before calling this, because they cannot be composed at set level.
+func buildDescriptionFilterOpts(ctx context.Context, filters []ast.Filter, provider DataProvider) (DescriptionFilterOpts, error) {
+	var opts DescriptionFilterOpts
+	for _, f := range filters {
+		switch x := f.(type) {
+		case *ast.TermFilter:
 			opts.Term = x.Term
 			if x.MatchType != "" {
 				opts.MatchType = x.MatchType
 			}
 		case *ast.TypeFilter:
-			if x.Op == "!=" {
-				negate = true
-			}
 			// Collect all type SCTIDs from the filter (any-of semantics).
 			for _, typeExpr := range x.Types {
-				ids, err := Evaluate(ctx, typeExpr, provider)
+				ids, err := resolveFilterIDs(ctx, typeExpr, provider)
 				if err != nil {
-					return opts, false, fmt.Errorf("evaluating type filter: %w", err)
+					return opts, fmt.Errorf("evaluating type filter: %w", err)
 				}
-				if ids != nil && ids.Len() > 0 {
-					opts.TypeIDs = append(opts.TypeIDs, ids.Slice()...)
-				} else if ref, ok := typeExpr.(*ast.ConceptRef); ok {
-					// Fallback to the literal ID even if provider didn't find
-					// it (tokens like FSN/SYN map to well-known SCTIDs that
-					// test providers may not enumerate in ConceptExists).
-					opts.TypeIDs = append(opts.TypeIDs, ref.ID)
-				}
+				opts.TypeIDs = append(opts.TypeIDs, ids...)
 			}
 		case *ast.LanguageFilter:
-			if x.Op == "!=" {
-				negate = true
-			}
 			opts.Languages = append(opts.Languages, x.Languages...)
 		case *ast.DialectFilter:
 			// Handled separately in evaluateFiltered.
 			continue
 		}
 	}
-	return opts, negate, nil
-}
-
-// buildConceptFilterOpts accumulates concept filter clauses into ConceptFilterOpts.
-func buildConceptFilterOpts(ctx context.Context, filters []ast.Filter, provider DataProvider) (ConceptFilterOpts, bool, error) {
-	var opts ConceptFilterOpts
-	var negate bool
-	for _, f := range filters {
-		switch x := f.(type) {
-		case *ast.ActiveFilter:
-			b := x.Value
-			opts.Active = &b
-		case *ast.DefinitionStatusFilter:
-			if x.Op == "!=" {
-				negate = true
-			}
-			if x.Value != nil {
-				ids, err := Evaluate(ctx, x.Value, provider)
-				if err != nil {
-					return opts, false, fmt.Errorf("evaluating definitionStatus filter: %w", err)
-				}
-				if ids != nil && ids.Len() > 0 {
-					opts.DefinitionStatusIDs = append(opts.DefinitionStatusIDs, ids.Slice()...)
-				} else if ref, ok := x.Value.(*ast.ConceptRef); ok {
-					opts.DefinitionStatusIDs = append(opts.DefinitionStatusIDs, ref.ID)
-				}
-			}
-		case *ast.ModuleFilter:
-			if x.Op == "!=" {
-				negate = true
-			}
-			if x.Module != nil {
-				ids, err := Evaluate(ctx, x.Module, provider)
-				if err != nil {
-					return opts, false, fmt.Errorf("evaluating module filter: %w", err)
-				}
-				if ids != nil && ids.Len() > 0 {
-					opts.ModuleIDs = append(opts.ModuleIDs, ids.Slice()...)
-				} else if ref, ok := x.Module.(*ast.ConceptRef); ok {
-					opts.ModuleIDs = append(opts.ModuleIDs, ref.ID)
-				}
-			}
-		case *ast.EffectiveTimeFilter:
-			opts.EffectiveTime = x.Value
-			opts.EffectiveTimeOp = x.Op
-		}
-	}
-	return opts, negate, nil
+	return opts, nil
 }
 
 // buildDialectFilterOpts converts an ast.DialectFilter into DialectFilterOpts

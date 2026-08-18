@@ -52,3 +52,26 @@ cases:
   - name: attribute without a value
     expression: "< 404684003 : 363698007 ="
     expectError: true
+
+  # Negated description filters. Their semantics are a per-description-row
+  # negation ("has a description whose type is not FSN"), which cannot be
+  # expressed as a set operation: subtracting the concepts that have an FSN also
+  # removes concepts that have both an FSN and a synonym. Reporting
+  # ErrUnsupportedFeature beats returning a silently wrong set. These were green
+  # before, asserting the incorrect set-level interpretation.
+  - name: negated term filter is reported as unsupported
+    expression: '<< 73211009 {{ D term != "Type 1 diabetes mellitus" }}'
+    expectError: true
+
+  - name: negated language filter is reported as unsupported
+    expression: "<< 404684003 {{ D language != es }}"
+    expectError: true
+
+  - name: negated description type filter is reported as unsupported
+    expression: "<< 404684003 {{ D type != fsn }}"
+    expectError: true
+
+  # Mixed polarity: the positive clause must not be silently dropped.
+  - name: mixed-polarity description filter is reported as unsupported
+    expression: '<< 404684003 {{ D term = "Myocardial", language != es }}'
+    expectError: true
