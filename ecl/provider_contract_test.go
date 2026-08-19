@@ -113,3 +113,41 @@ func TestEvaluate_WildcardIncludesInactiveConcepts(t *testing.T) {
 	require.NotContains(t, active.Slice(), "11111111")
 	require.Contains(t, active.Slice(), "22298006")
 }
+
+// TestUnimplementedDataProvider covers the embeddable base: an unimplemented
+// method must report "not supported" rather than answer the empty set, which a
+// caller would read as valid data.
+func TestUnimplementedDataProvider(t *testing.T) {
+	var p ecl.UnimplementedDataProvider
+
+	_, err := p.Descendants(context.Background(), []string{"404684003"}, true)
+	require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
+	require.Contains(t, err.Error(), "Descendants")
+
+	// Evaluating through it surfaces the same classifiable error.
+	_, err = ecl.Evaluate(context.Background(), mustParse(t, "<< 404684003"), p)
+	require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
+}
+
+// TestUnimplementedDataProvider_Embedding is the pattern the doc recommends: a
+// partial provider implements what it can and inherits the rest.
+func TestUnimplementedDataProvider_Embedding(t *testing.T) {
+	p := partialProvider{}
+
+	set, err := ecl.Evaluate(context.Background(), mustParse(t, "404684003"), p)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"404684003"}, set.Slice())
+
+	// Anything it did not implement is reported, not silently empty.
+	_, err = ecl.Evaluate(context.Background(), mustParse(t, "^ 900000000000497000"), p)
+	require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
+}
+
+// partialProvider implements one method and embeds the rest.
+type partialProvider struct {
+	ecl.UnimplementedDataProvider
+}
+
+func (partialProvider) ConceptExists(_ context.Context, ids []string) (ecl.Set, error) {
+	return ecl.NewSetFromSlice(ids), nil
+}

@@ -1,4 +1,4 @@
-package conformance
+package providertest
 
 import (
 	"context"
@@ -50,12 +50,22 @@ type RunOptions struct {
 	// FixtureDir is the directory used to resolve relative fixture paths
 	// declared in suite files.
 	FixtureDir string
+
+	// LoadFixture, when set, resolves a suite's fixture by name instead of by
+	// path. Used for embedded fixtures, which have no directory on disk.
+	LoadFixture func(name string) (ecl.DataProvider, error)
 }
 
 // RunSuite executes a single suite against the configured fixture and
 // returns a Report.
 func RunSuite(ctx context.Context, suite *Suite, opts RunOptions) (*Report, error) {
-	provider, err := loadFixtureRelative(suite.Fixture, opts.FixtureDir)
+	load := opts.LoadFixture
+	if load == nil {
+		load = func(name string) (ecl.DataProvider, error) {
+			return loadFixtureRelative(name, opts.FixtureDir)
+		}
+	}
+	provider, err := load(suite.Fixture)
 	if err != nil {
 		return nil, fmt.Errorf("loading fixture %q: %w", suite.Fixture, err)
 	}

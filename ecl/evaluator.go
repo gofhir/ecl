@@ -21,6 +21,12 @@ import (
 // cannot be expressed through the current DataProvider contract.
 var ErrUnsupportedFeature = errors.New("unsupported ECL feature")
 
+// ErrProvider wraps a failure that came from the DataProvider rather than from
+// the expression, so a caller can answer 503 instead of 400:
+//
+//	if errors.Is(err, ecl.ErrProvider) { /* the backend is unhealthy */ }
+var ErrProvider = errors.New("data provider error")
+
 // Evaluate evaluates an ECL AST against the given DataProvider and returns
 // the set of matching SNOMED CT concept IDs.
 //

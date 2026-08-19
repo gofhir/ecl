@@ -94,7 +94,26 @@ Most methods take sets or slices so they can be answered with one batch query. *
 | History | `HistoricalAssociations` |
 | v2.2 | `ResolveIdentifier` (alternate identifiers) |
 
-For tests and examples, the in-memory provider in [`internal/conformance/fixture.go`](internal/conformance/fixture.go) implements all 18 against a YAML fixture — read it to see the expected semantics. Note it lives under `internal/`, so Go will not let you import it; running the bundled conformance suite against your own provider is the supported way to check it, and exposing the runner as a public package is planned.
+Two things make implementing it tractable:
+
+**`ecl.UnimplementedDataProvider`** — embed it and implement only what you need. Every method you skip returns `ErrUnsupportedFeature` instead of the empty set, so a partial provider reports "not supported" rather than silently answering "no matches". It also means future methods are not a breaking change for you.
+
+```go
+type myProvider struct {
+    ecl.UnimplementedDataProvider
+    db *sql.DB
+}
+```
+
+**`ecl/providertest`** — run the bundled conformance suite against your implementation. This is how you check the rules the godoc cannot fully state:
+
+```go
+func TestMyProvider(t *testing.T) {
+    providertest.Verify(t, func() ecl.DataProvider { return newMyProvider(t) })
+}
+```
+
+The reference in-memory provider is [`ecl/providertest/fixture.go`](ecl/providertest/fixture.go) — read it to see the expected semantics.
 
 ### SCG + MRCM
 
@@ -173,12 +192,12 @@ Refined :
 ### `eval`
 
 ```bash
-$ gofhir-ecl eval --fixture testdata/conformance/fixtures/standard.yaml "<< 73211009"
+$ gofhir-ecl eval --fixture ecl/providertest/testdata/fixtures/standard.yaml "<< 73211009"
 11687002
 73211009
 ```
 
-The fixture is a YAML file describing concepts, parents, descriptions, relationships, refsets, and history associations. See [`testdata/conformance/fixtures/standard.yaml`](testdata/conformance/fixtures/standard.yaml) for the schema.
+The fixture is a YAML file describing concepts, parents, descriptions, relationships, refsets, dialects, member fields, and history associations. See [`ecl/providertest/testdata/fixtures/standard.yaml`](ecl/providertest/testdata/fixtures/standard.yaml) for the schema.
 
 ### `conformance`
 
@@ -196,7 +215,7 @@ Useful in CI to prove your `DataProvider` implementation matches the spec.
 
 ## Conformance suite
 
-The bundled suite lives in [`testdata/conformance/`](testdata/conformance/) and currently covers 95 cases across 9 areas of the spec, including a suite of expressions that must be REJECTED.
+The bundled suite lives in [`ecl/providertest/testdata/`](ecl/providertest/testdata/) and is **embedded in the binary**, so `gofhir-ecl conformance` works from any directory, including after `go install`. It currently covers 95 cases across 9 areas of the spec, including a suite of expressions that must be REJECTED.
 
 | Area | Cases | Spec section |
 |---|---|---|
@@ -223,15 +242,16 @@ Cases can also assert error paths via `expectError: true`. The runner is reusabl
 ## Project layout
 
 ```
-ecl/                  ECL parser, AST, evaluator, set, DataProvider interface
-ecl/grammar/          Generated ANTLR4 grammar (do not edit)
-ecl/ast/              AST node types
-scg/                  Compositional Grammar (SCG) parser + validator
-mrcm/                 MRCM loader + validator (uses ecl/ for constraints)
-sctid/                SCTID Verhoeff checksum + partition validation
-cmd/gofhir-ecl/       CLI binary
-internal/conformance/ YAML fixture loader, in-memory provider, suite runner
-testdata/conformance/ Bundled fixtures + cases
+ecl/                       ECL parser, AST, evaluator, set, DataProvider interface
+ecl/grammar/               Generated ANTLR4 grammar (run `make generate`, do not edit)
+ecl/ast/                   AST node types
+ecl/providertest/          Conformance runner + in-memory fixture provider, for
+                           verifying your own DataProvider
+ecl/providertest/testdata/ Bundled suites + fixtures (embedded in the binary)
+scg/                       Compositional Grammar (SCG) parser + validator
+mrcm/                      MRCM loader + validator (uses ecl/ for constraints)
+sctid/                     SCTID Verhoeff checksum + partition validation
+cmd/gofhir-ecl/            CLI binary
 ```
 
 ## Versioning

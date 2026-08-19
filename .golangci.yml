@@ -180,9 +180,16 @@ linters:
       # The in-memory DataProvider implementation methods are required to be
       # exported (they satisfy the ecl.DataProvider interface) but the
       # receiver type is intentionally unexported.
+      # UnimplementedDataProvider's 18 methods are interface satisfaction only.
+      # The type's doc comment explains all of them; a one-line comment per method
+      # would be 18 restatements of "returns ErrUnsupportedFeature".
       - linters:
           - revive
-        path: internal/conformance/fixture\.go
+        path: ecl/unimplemented\.go
+        text: "exported method UnimplementedDataProvider\\."
+      - linters:
+          - revive
+        path: ecl/providertest/fixture\.go
         text: "exported method inMemoryProvider\\."
       # CLI subcommands print to stdout via fmt.Fprintf/Fprintln; their
       # error returns are not actionable in a CLI context.

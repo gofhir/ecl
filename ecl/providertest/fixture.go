@@ -1,6 +1,4 @@
-// Package conformance provides an in-memory DataProvider built from a YAML
-// fixture, plus a runner for the bundled ECL v2.2 conformance suite.
-package conformance
+package providertest
 
 import (
 	"context"

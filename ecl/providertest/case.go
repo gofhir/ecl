@@ -1,4 +1,4 @@
-package conformance
+package providertest
 
 import (
 	"fmt"
@@ -54,8 +54,14 @@ func LoadSuite(path string) (*Suite, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read suite: %w", err)
 	}
+	return ParseSuite(b)
+}
+
+// ParseSuite parses a YAML conformance suite from memory, for callers holding an
+// embedded or downloaded suite rather than a file.
+func ParseSuite(data []byte) (*Suite, error) {
 	var s Suite
-	if err := yaml.Unmarshal(b, &s); err != nil {
+	if err := yaml.Unmarshal(data, &s); err != nil {
 		return nil, fmt.Errorf("parse suite YAML: %w", err)
 	}
 	return &s, nil

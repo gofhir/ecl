@@ -29,7 +29,7 @@ func repoRoot(t *testing.T) string {
 
 func standardFixture(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(repoRoot(t), "testdata", "conformance", "fixtures", "standard.yaml")
+	return filepath.Join(repoRoot(t), "ecl", "providertest", "testdata", "fixtures", "standard.yaml")
 }
 
 func TestExitCode(t *testing.T) {
@@ -126,12 +126,25 @@ func TestRunEval(t *testing.T) {
 }
 
 func TestRunConformance(t *testing.T) {
+	// No flags: the suite is embedded, so this must work from any directory --
+	// which is the case a `go install`ed binary hits, and which used to fail with
+	// "no such file or directory".
 	var out bytes.Buffer
+	require.NoError(t, runConformanceWithOutput(nil, &out))
+	assert.Contains(t, out.String(), "0 failed")
+
+	// A caller may still point at a directory of their own suites.
+	out.Reset()
 	root := repoRoot(t)
 	err := runConformanceWithOutput([]string{
-		"-suites", filepath.Join(root, "testdata", "conformance", "cases"),
-		"-fixtures", filepath.Join(root, "testdata", "conformance", "fixtures"),
+		"-suites", filepath.Join(root, "ecl", "providertest", "testdata", "cases"),
+		"-fixtures", filepath.Join(root, "ecl", "providertest", "testdata", "fixtures"),
 	}, &out)
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "0 failed")
+
+	// The filter narrows the run.
+	out.Reset()
+	require.NoError(t, runConformanceWithOutput([]string{"-filter", "^descendantOrSelfOf", "-v"}, &out))
+	assert.Contains(t, out.String(), "PASS")
 }

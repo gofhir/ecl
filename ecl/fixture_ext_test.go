@@ -22,9 +22,6 @@ package ecl_test
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -32,29 +29,16 @@ import (
 
 	"github.com/gofhir/ecl/ecl"
 	"github.com/gofhir/ecl/ecl/ast"
-	"github.com/gofhir/ecl/internal/conformance"
+	"github.com/gofhir/ecl/ecl/providertest"
 )
 
-// repoRoot resolves the repository root from this file's path so the helpers
-// reach testdata/ regardless of the caller's working directory.
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	require.True(t, ok, "runtime.Caller failed")
-	// .../go-ecl/ecl/fixture_ext_test.go → .../go-ecl
-	return filepath.Join(filepath.Dir(file), "..")
-}
-
-// standardFixturePath returns the path of the bundled standard fixture.
-func standardFixturePath(t *testing.T) string {
-	t.Helper()
-	return filepath.Join(repoRoot(t), "testdata", "conformance", "fixtures", "standard.yaml")
-}
-
 // standardProvider loads the bundled standard fixture as a DataProvider.
+//
+// The fixture is embedded in providertest, so this works regardless of the
+// caller's working directory and survives the file being moved.
 func standardProvider(t *testing.T) ecl.DataProvider {
 	t.Helper()
-	p, err := conformance.LoadFixtureFile(standardFixturePath(t))
+	p, err := providertest.BundledFixture("standard.yaml")
 	require.NoError(t, err, "loading standard.yaml")
 	return p
 }
@@ -90,11 +74,11 @@ func mustParse(t *testing.T, expr string) ast.Expression {
 
 // standardSpec unmarshals standard.yaml into its spec so tests can assert on
 // the fixture's own declarations rather than hardcoding them.
-func standardSpec(t *testing.T) *conformance.FixtureSpec {
+func standardSpec(t *testing.T) *providertest.FixtureSpec {
 	t.Helper()
-	data, err := os.ReadFile(standardFixturePath(t))
+	data, err := providertest.BundledFixtureBytes("standard.yaml")
 	require.NoError(t, err)
-	var spec conformance.FixtureSpec
+	var spec providertest.FixtureSpec
 	require.NoError(t, yaml.Unmarshal(data, &spec))
 	return &spec
 }
@@ -130,12 +114,7 @@ func TestHarness(t *testing.T) {
 // exampleProvider loads the bundled fixture for the Example functions, which
 // cannot take a *testing.T.
 func exampleProvider() ecl.DataProvider {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		panic("runtime.Caller failed")
-	}
-	path := filepath.Join(filepath.Dir(file), "..", "testdata", "conformance", "fixtures", "standard.yaml")
-	p, err := conformance.LoadFixtureFile(path)
+	p, err := providertest.BundledFixture("standard.yaml")
 	if err != nil {
 		panic(err)
 	}

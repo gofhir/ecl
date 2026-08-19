@@ -10,7 +10,7 @@ import (
 	"regexp"
 	"sort"
 
-	"github.com/gofhir/ecl/internal/conformance"
+	"github.com/gofhir/ecl/ecl/providertest"
 )
 
 func runConformance(args []string) error {
@@ -20,8 +20,13 @@ func runConformance(args []string) error {
 func runConformanceWithOutput(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("conformance", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr) // diagnostics go to stderr; out carries results only
-	suiteDir := fs.String("suites", "testdata/conformance/cases", "directory containing suite YAML files")
-	fixtureDir := fs.String("fixtures", "testdata/conformance/fixtures", "directory for fixture YAML files referenced by suites")
+	// Empty by default: the suites and fixtures are embedded in the
+	// providertest package, so the command works from any directory. It used to
+	// default to a path relative to the working directory, which meant a
+	// `go install`ed binary failed with "no such file or directory" -- the exact
+	// use the README recommends for CI.
+	suiteDir := fs.String("suites", "", "directory of suite YAML files (default: the embedded suite)")
+	fixtureDir := fs.String("fixtures", "", "directory of fixture YAML files referenced by suites (default: embedded)")
 	filter := fs.String("filter", "", "regex; only cases whose name matches are run")
 	verbose := fs.Bool("v", false, "print PASS lines (failures and skips are always printed)")
 	fs.Usage = func() {
@@ -43,18 +48,7 @@ func runConformanceWithOutput(args []string, out io.Writer) error {
 		pattern = p
 	}
 
-	suites, err := loadSuites(*suiteDir)
-	if err != nil {
-		return err
-	}
-	if len(suites) == 0 {
-		return fmt.Errorf("no suite YAML files found in %q", *suiteDir)
-	}
-
-	rep, err := conformance.RunSuites(context.Background(), suites, conformance.RunOptions{
-		Filter:     pattern,
-		FixtureDir: *fixtureDir,
-	})
+	rep, err := runSuites(context.Background(), *suiteDir, *fixtureDir, pattern)
 	if err != nil {
 		return err
 	}
@@ -63,7 +57,7 @@ func runConformanceWithOutput(args []string, out io.Writer) error {
 		if r.Passed && !*verbose {
 			continue
 		}
-		fmt.Fprintln(out, conformance.FormatResult(r))
+		fmt.Fprintln(out, providertest.FormatResult(r))
 	}
 
 	passed, failed, skipped, total := rep.Summary()
@@ -74,7 +68,30 @@ func runConformanceWithOutput(args []string, out io.Writer) error {
 	return nil
 }
 
-func loadSuites(dir string) ([]*conformance.Suite, error) {
+// runSuites executes the embedded suite, or the one in suiteDir when the caller
+// points at a directory of their own.
+func runSuites(ctx context.Context, suiteDir, fixtureDir string, pattern *regexp.Regexp) (*providertest.Report, error) {
+	if suiteDir == "" {
+		return providertest.RunBundled(ctx, pattern)
+	}
+	suites, err := loadSuites(suiteDir)
+	if err != nil {
+		return nil, err
+	}
+	if len(suites) == 0 {
+		return nil, fmt.Errorf("no suite YAML files found in %q", suiteDir)
+	}
+	if fixtureDir == "" {
+		// Suites declare fixture paths relative to their own directory.
+		fixtureDir = filepath.Join(suiteDir, "..", "fixtures")
+	}
+	return providertest.RunSuites(ctx, suites, providertest.RunOptions{
+		Filter:     pattern,
+		FixtureDir: fixtureDir,
+	})
+}
+
+func loadSuites(dir string) ([]*providertest.Suite, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("read suites dir %q: %w", dir, err)
@@ -92,9 +109,9 @@ func loadSuites(dir string) ([]*conformance.Suite, error) {
 	}
 	sort.Strings(paths)
 
-	suites := make([]*conformance.Suite, 0, len(paths))
+	suites := make([]*providertest.Suite, 0, len(paths))
 	for _, p := range paths {
-		s, err := conformance.LoadSuite(p)
+		s, err := providertest.LoadSuite(p)
 		if err != nil {
 			return nil, fmt.Errorf("loading suite %q: %w", p, err)
 		}

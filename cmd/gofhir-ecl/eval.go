@@ -9,7 +9,7 @@ import (
 	"sort"
 
 	"github.com/gofhir/ecl/ecl"
-	"github.com/gofhir/ecl/internal/conformance"
+	"github.com/gofhir/ecl/ecl/providertest"
 )
 
 func runEval(args []string) error {
@@ -47,7 +47,7 @@ func runEvalWithOutput(args []string, out io.Writer) error {
 		return fmt.Errorf("parse: %w", err)
 	}
 
-	provider, err := conformance.LoadFixtureFile(*fixturePath)
+	provider, err := providertest.LoadFixtureFile(*fixturePath)
 	if err != nil {
 		return fmt.Errorf("load fixture: %w", err)
 	}

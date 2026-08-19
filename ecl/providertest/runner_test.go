@@ -1,25 +1,13 @@
-package conformance
+package providertest
 
 import (
 	"context"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// repoRoot resolves the repository root from this file's path so tests can
-// reach testdata/ without depending on the caller's working directory.
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	require.True(t, ok, "runtime.Caller failed")
-	// .../go-ecl/internal/conformance/runner_test.go → .../go-ecl
-	return filepath.Join(filepath.Dir(file), "..", "..")
-}
 
 // wantTotalCases is the number of bundled conformance cases. Raise it when you
 // add cases — never lower it without explaining why in the commit message. The
@@ -35,23 +23,14 @@ const wantTotalCases = 95
 // the CLI by hand. A regression in refsets, filters, history, concrete values
 // or v2.2 features could be merged with a green build.
 func TestRunAllSuites(t *testing.T) {
-	root := repoRoot(t)
-	casesDir := filepath.Join(root, "testdata", "conformance", "cases")
-	fixtureDir := filepath.Join(root, "testdata", "conformance", "fixtures")
-
-	paths, err := filepath.Glob(filepath.Join(casesDir, "*.yaml"))
+	suites, err := LoadBundledSuites()
 	require.NoError(t, err)
-	require.NotEmpty(t, paths, "no suites found in %s", casesDir)
-
-	suites := make([]*Suite, 0, len(paths))
-	for _, p := range paths {
-		s, err := LoadSuite(p)
-		require.NoErrorf(t, err, "LoadSuite(%s)", p)
-		require.NotEmptyf(t, s.Cases, "suite %s has no cases", p)
-		suites = append(suites, s)
+	require.NotEmpty(t, suites)
+	for _, s := range suites {
+		require.NotEmptyf(t, s.Cases, "suite %s has no cases", s.Name)
 	}
 
-	rep, err := RunSuites(context.Background(), suites, RunOptions{FixtureDir: fixtureDir})
+	rep, err := RunBundled(context.Background(), nil)
 	require.NoError(t, err)
 
 	for _, r := range rep.Results {
