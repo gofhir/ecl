@@ -248,7 +248,7 @@ func evaluateNode(ctx context.Context, expr ast.Expression, provider DataProvide
 		}
 		historical, err := provider.HistoricalAssociations(ctx, base, profile)
 		if err != nil {
-			return nil, fmt.Errorf("HistoricalAssociations: %w", err)
+			return nil, fmt.Errorf("%w: HistoricalAssociations: %w", ErrProvider, err)
 		}
 		if historical == nil {
 			return base, nil
@@ -315,13 +315,24 @@ func applyRefinement(ctx context.Context, focus Set, ref *ast.Refinement, provid
 		return focus, nil
 	}
 
-	// A node must never hold both, or the parenthesised scope was lost while
-	// parsing and the disjunction below cannot be composed correctly.
+	// The grammar admits a conjunction set OR a disjunction set at a level, never
+	// both, and the disjunction below is composed on that basis. A node holding
+	// both means the parenthesised scope was lost while parsing.
 	if len(ref.Conjunction) > 0 && len(ref.Disjunction) > 0 {
 		return nil, fmt.Errorf("refinement has both a conjunction and a disjunction in one node: the parenthesised scope was lost while parsing")
 	}
 
 	result := focus
+
+	// A parenthesised sub-refinement is part of the first operand, so it filters
+	// before the conjunction and disjunction stages below.
+	if ref.Nested != nil {
+		filtered, err := applyRefinement(ctx, result, ref.Nested, provider)
+		if err != nil {
+			return nil, err
+		}
+		result = filtered
+	}
 
 	// Ungrouped attribute clauses. AttrSet is the boolean tree; it replaces the
 	// Ungrouped loop only, and the group/conjunction/disjunction stages below
@@ -478,7 +489,7 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 			inbound, err = provider.RelationshipTargets(ctx, valueSet, typeIDs)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("reverse attribute lookup: %w", err)
+			return nil, fmt.Errorf("%w: reverse attribute lookup: %w", ErrProvider, err)
 		}
 		if attr.Op == "=" {
 			return focus.Intersect(inbound), nil
@@ -502,6 +513,13 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 	out := newMapSet()
 	var iterErr error
 	focus.Iter(func(id string) bool {
+		// One provider call per concept, so this is where a canceled request has
+		// to stop. Checking only on entry to Evaluate let a canceled context run
+		// the whole loop.
+		if err := ctx.Err(); err != nil {
+			iterErr = err
+			return false
+		}
 		rels, err := conceptRelationships(ctx, id, provider)
 		if err != nil {
 			iterErr = err
@@ -524,7 +542,7 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 func conceptRelationships(ctx context.Context, conceptID string, provider DataProvider) ([]Relationship, error) {
 	groups, err := provider.PropertiesByGroup(ctx, conceptID)
 	if err != nil {
-		return nil, fmt.Errorf("PropertiesByGroup(%s): %w", conceptID, err)
+		return nil, fmt.Errorf("%w: PropertiesByGroup(%s): %w", ErrProvider, conceptID, err)
 	}
 	var out []Relationship
 	for _, rels := range groups {
@@ -553,6 +571,11 @@ func cardinalitySatisfied(c *ast.Cardinality, count int) bool {
 // relationship group in which ALL the group's sub-attributes are satisfied.
 func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGroup, provider DataProvider) (Set, error) {
 	if focus == nil || focus.Len() == 0 {
+		return focus, nil
+	}
+	// A hand-built AST may carry a nil group; ecl/ast is public, so this is
+	// reachable without the parser.
+	if grp == nil {
 		return focus, nil
 	}
 	set := grp.AttrSet
@@ -588,6 +611,13 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 	out := newMapSet()
 	var iterErr error
 	focus.Iter(func(id string) bool {
+		// One provider call per concept, so this is where a canceled request has
+		// to stop. Checking only on entry to Evaluate let a canceled context run
+		// the whole loop.
+		if err := ctx.Err(); err != nil {
+			iterErr = err
+			return false
+		}
 		// matchingGroups is how many relationship groups satisfy the clause
 		// tree. Counting is what makes group cardinality work at all: the code
 		// used to stop at the first match, so [0..0], [1..1] and [2..*] were
@@ -598,7 +628,7 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 			// Fast path: all forward clauses — check groups directly.
 			groups, err := provider.PropertiesByGroup(ctx, id)
 			if err != nil {
-				iterErr = fmt.Errorf("PropertiesByGroup(%s): %w", id, err)
+				iterErr = fmt.Errorf("%w: PropertiesByGroup(%s): %w", ErrProvider, id, err)
 				return false
 			}
 			for gnum, rels := range groups {
@@ -852,8 +882,12 @@ func conceptMatchesGroupWithReverse(ctx context.Context, conceptID string, claus
 		focusSet := NewSetFromSlice([]string{conceptID})
 		sources, err := provider.RelationshipSources(ctx, focusSet, c.typeIDs)
 		if err != nil {
-			return false, fmt.Errorf("reverse group lookup: %w", err)
+			return false, fmt.Errorf("%w: reverse group lookup: %w", ErrProvider, err)
 		}
+		// A provider that breaks the non-nil contract must not panic the
+		// evaluator: this path was missed by the normalization at the top level,
+		// because the Set never travels through Evaluate.
+		sources = nonNil(sources)
 		// Filter sources to those in the value set (unless wildcard).
 		if !c.valueIsAny && c.valueSet != nil {
 			sources = sources.Intersect(c.valueSet)
@@ -1018,7 +1052,7 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 			}
 			filtered, innerErr := provider.RefsetMembersFiltered(ctx, refsetIDs, opts)
 			if innerErr != nil {
-				return nil, fmt.Errorf("RefsetMembersFiltered: %w", innerErr)
+				return nil, fmt.Errorf("%w: RefsetMembersFiltered: %w", ErrProvider, innerErr)
 			}
 			result = result.Intersect(filtered)
 		}
@@ -1042,16 +1076,17 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 		if kind, negated := negatedDescriptionFilter(descFilters); negated {
 			return nil, fmt.Errorf("%w: negated description filter (%s) requires row-level negation in the DataProvider", ErrUnsupportedFeature, kind)
 		}
-		opts, err := buildDescriptionFilterOpts(ctx, descFilters, provider)
+		opts, matchesNothing, err := buildDescriptionFilterOpts(ctx, descFilters, provider)
 		if err != nil {
 			return nil, err
 		}
-		matches, err := provider.MatchDescription(ctx, opts)
-		if err != nil {
-			return nil, fmt.Errorf("MatchDescription: %w", err)
-		}
-		if matches == nil {
-			matches = NewSet()
+		matches := NewSet()
+		if !matchesNothing {
+			matches, err = provider.MatchDescription(ctx, opts)
+			if err != nil {
+				return nil, fmt.Errorf("%w: MatchDescription: %w", ErrProvider, err)
+			}
+			matches = nonNil(matches)
 		}
 		if result == nil {
 			result = matches
@@ -1091,7 +1126,7 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 		}
 		matches, err := provider.MatchDialect(ctx, result, dOpts)
 		if err != nil {
-			return nil, fmt.Errorf("MatchDialect: %w", err)
+			return nil, fmt.Errorf("%w: MatchDialect: %w", ErrProvider, err)
 		}
 		if matches == nil {
 			matches = NewSet()
@@ -1113,16 +1148,20 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 	// returned active concepts, because the negated conjunction was empty and
 	// Minus subtracted nothing.
 	for _, cl := range buildConceptFilterClauses(conceptFilters) {
-		opts, err := conceptClauseOpts(ctx, cl.filter, provider)
+		opts, matchesNothing, err := conceptClauseOpts(ctx, cl.filter, provider)
 		if err != nil {
 			return nil, err
 		}
-		matched, err := provider.FilterConcepts(ctx, result, opts)
-		if err != nil {
-			return nil, fmt.Errorf("FilterConcepts: %w", err)
-		}
-		if matched == nil {
-			matched = NewSet()
+		// The clause names no concept, so it matches nothing. Passing empty Opts
+		// to the provider would instead mean "no filter on this dimension" and
+		// the clause would match everything.
+		matched := NewSet()
+		if !matchesNothing {
+			matched, err = provider.FilterConcepts(ctx, result, opts)
+			if err != nil {
+				return nil, fmt.Errorf("%w: FilterConcepts: %w", ErrProvider, err)
+			}
+			matched = nonNil(matched)
 		}
 		if cl.negate {
 			result = result.Minus(matched)
@@ -1165,49 +1204,70 @@ func buildConceptFilterClauses(filters []ast.Filter) []conceptFilterClause {
 }
 
 // conceptClauseOpts builds the ConceptFilterOpts for exactly one clause.
-func conceptClauseOpts(ctx context.Context, f ast.Filter, provider DataProvider) (ConceptFilterOpts, error) {
+//
+// The bool reports that the clause's operand names no concept, so the clause
+// matches nothing. It cannot be expressed through the Opts, where an empty field
+// means "do not filter on this dimension".
+func conceptClauseOpts(ctx context.Context, f ast.Filter, provider DataProvider) (ConceptFilterOpts, bool, error) {
 	var opts ConceptFilterOpts
 	switch x := f.(type) {
 	case *ast.ActiveFilter:
 		b := x.Value
 		opts.Active = &b
 	case *ast.DefinitionStatusFilter:
-		ids, err := resolveFilterIDs(ctx, x.Value, provider)
+		ids, resolved, err := resolveFilterIDs(ctx, x.Value, provider)
 		if err != nil {
-			return opts, fmt.Errorf("evaluating definitionStatus filter: %w", err)
+			return opts, false, fmt.Errorf("evaluating definitionStatus filter: %w", err)
+		}
+		if x.Value != nil && !resolved {
+			return opts, true, nil
 		}
 		opts.DefinitionStatusIDs = ids
 	case *ast.ModuleFilter:
-		ids, err := resolveFilterIDs(ctx, x.Module, provider)
+		ids, resolved, err := resolveFilterIDs(ctx, x.Module, provider)
 		if err != nil {
-			return opts, fmt.Errorf("evaluating module filter: %w", err)
+			return opts, false, fmt.Errorf("evaluating module filter: %w", err)
+		}
+		if x.Module != nil && !resolved {
+			return opts, true, nil
 		}
 		opts.ModuleIDs = ids
 	case *ast.EffectiveTimeFilter:
 		opts.EffectiveTime = x.Value
 		opts.EffectiveTimeOp = x.Op
 	}
-	return opts, nil
+	return opts, false, nil
 }
 
 // resolveFilterIDs evaluates a filter operand to concept IDs, falling back to
-// the literal SCTID when the provider does not enumerate it (well-known
-// metadata concepts are often absent from a test provider's ConceptExists).
-func resolveFilterIDs(ctx context.Context, e ast.Expression, provider DataProvider) ([]string, error) {
+// the literal SCTID when the provider does not enumerate it (well-known metadata
+// concepts are often absent from a test provider's ConceptExists).
+//
+// The second result distinguishes "no operand" from "an operand that resolved to
+// nothing", which the ID slice alone cannot express: an empty slice in the Opts
+// means "do not filter on this dimension", so returning nil for an operand that
+// legitimately matched no concept turned the clause into a no-op and the filter
+// matched EVERYTHING. Measured before the fix:
+//
+//	{{ C definitionStatusId = (< 900000000000073002) }}  -> the whole base set
+//
+// when the correct answer is the empty set.
+func resolveFilterIDs(ctx context.Context, e ast.Expression, provider DataProvider) (ids []string, resolved bool, err error) {
 	if e == nil {
-		return nil, nil
+		return nil, false, nil
 	}
-	ids, err := Evaluate(ctx, e, provider)
+	set, err := Evaluate(ctx, e, provider)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if ids != nil && ids.Len() > 0 {
-		return ids.Slice(), nil
+	if set != nil && set.Len() > 0 {
+		return set.Slice(), true, nil
 	}
 	if ref, ok := e.(*ast.ConceptRef); ok {
-		return []string{ref.ID}, nil
+		return []string{ref.ID}, true, nil
 	}
-	return nil, nil
+	// The operand is present but names nothing, so the clause matches nothing.
+	return nil, false, nil
 }
 
 // categorizeFilters splits a flat list of filters into description, concept,
@@ -1264,7 +1324,7 @@ func negatedDescriptionFilter(filters []ast.Filter) (string, bool) {
 //
 // Every clause here is positive: evaluateFiltered rejects the negated forms
 // before calling this, because they cannot be composed at set level.
-func buildDescriptionFilterOpts(ctx context.Context, filters []ast.Filter, provider DataProvider) (DescriptionFilterOpts, error) {
+func buildDescriptionFilterOpts(ctx context.Context, filters []ast.Filter, provider DataProvider) (DescriptionFilterOpts, bool, error) {
 	var opts DescriptionFilterOpts
 	for _, f := range filters {
 		switch x := f.(type) {
@@ -1276,9 +1336,14 @@ func buildDescriptionFilterOpts(ctx context.Context, filters []ast.Filter, provi
 		case *ast.TypeFilter:
 			// Collect all type SCTIDs from the filter (any-of semantics).
 			for _, typeExpr := range x.Types {
-				ids, err := resolveFilterIDs(ctx, typeExpr, provider)
+				ids, resolved, err := resolveFilterIDs(ctx, typeExpr, provider)
 				if err != nil {
-					return opts, fmt.Errorf("evaluating type filter: %w", err)
+					return opts, false, fmt.Errorf("evaluating type filter: %w", err)
+				}
+				if !resolved {
+					// The operand names no description type, so the filter
+					// matches nothing.
+					return opts, true, nil
 				}
 				opts.TypeIDs = append(opts.TypeIDs, ids...)
 			}
@@ -1289,7 +1354,7 @@ func buildDescriptionFilterOpts(ctx context.Context, filters []ast.Filter, provi
 			continue
 		}
 	}
-	return opts, nil
+	return opts, false, nil
 }
 
 // buildDialectFilterOpts converts an ast.DialectFilter into DialectFilterOpts
@@ -1416,6 +1481,13 @@ func filterByConcreteValue(ctx context.Context, focus Set, attr *ast.Attribute, 
 	out := newMapSet()
 	var iterErr error
 	focus.Iter(func(id string) bool {
+		// One provider call per concept, so this is where a canceled request has
+		// to stop. Checking only on entry to Evaluate let a canceled context run
+		// the whole loop.
+		if err := ctx.Err(); err != nil {
+			iterErr = err
+			return false
+		}
 		// Count the values that satisfy the comparison, so the clause's
 		// cardinality can be applied. This used to be a bool with an early
 		// break, which made [0..0], [1..1] and [2..*] all behave as "at least
@@ -1424,7 +1496,7 @@ func filterByConcreteValue(ctx context.Context, focus Set, attr *ast.Attribute, 
 		for _, typeID := range typeIDList {
 			values, err := provider.ConcreteValues(ctx, id, typeID)
 			if err != nil {
-				iterErr = fmt.Errorf("ConcreteValues(%s, %s): %w", id, typeID, err)
+				iterErr = fmt.Errorf("%w: ConcreteValues(%s, %s): %w", ErrProvider, id, typeID, err)
 				return false
 			}
 			for _, cv := range values {
@@ -1524,9 +1596,16 @@ func topOfSet(ctx context.Context, baseSet Set, provider DataProvider) (Set, err
 	out := newMapSet()
 	var iterErr error
 	baseSet.Iter(func(id string) bool {
+		// One provider call per concept, so this is where a canceled request has
+		// to stop. Checking only on entry to Evaluate let a canceled context run
+		// the whole loop.
+		if err := ctx.Err(); err != nil {
+			iterErr = err
+			return false
+		}
 		ancestors, err := provider.Ancestors(ctx, []string{id}, false)
 		if err != nil {
-			iterErr = fmt.Errorf("Ancestors(%s): %w", id, err)
+			iterErr = fmt.Errorf("%w: Ancestors(%s): %w", ErrProvider, id, err)
 			return false
 		}
 		if ancestors == nil || ancestors.Intersect(baseSet).Len() == 0 {
@@ -1552,9 +1631,16 @@ func bottomOfSet(ctx context.Context, baseSet Set, provider DataProvider) (Set, 
 	out := newMapSet()
 	var iterErr error
 	baseSet.Iter(func(id string) bool {
+		// One provider call per concept, so this is where a canceled request has
+		// to stop. Checking only on entry to Evaluate let a canceled context run
+		// the whole loop.
+		if err := ctx.Err(); err != nil {
+			iterErr = err
+			return false
+		}
 		descendants, err := provider.Descendants(ctx, []string{id}, false)
 		if err != nil {
-			iterErr = fmt.Errorf("Descendants(%s): %w", id, err)
+			iterErr = fmt.Errorf("%w: Descendants(%s): %w", ErrProvider, id, err)
 			return false
 		}
 		if descendants == nil || descendants.Intersect(baseSet).Len() == 0 {

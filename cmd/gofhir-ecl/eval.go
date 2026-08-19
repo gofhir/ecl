@@ -31,7 +31,7 @@ func runEvalWithOutput(args []string, out io.Writer) error {
 	}
 	if *fixturePath == "" {
 		fs.Usage()
-		return fmt.Errorf("--fixture is required")
+		return fmt.Errorf("%w: --fixture is required", errUsage)
 	}
 	if fs.NArg() != 1 {
 		fs.Usage()

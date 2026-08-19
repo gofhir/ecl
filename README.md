@@ -5,7 +5,7 @@
 [![Release](https://img.shields.io/github/v/release/gofhir/ecl)](https://github.com/gofhir/ecl/releases)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-Embeddable parser and evaluator for the SNOMED CT **Expression Constraint Language (ECL) v2.2** in pure Go. Comes with parsers for **SNOMED Compositional Grammar (SCG)** and a **Machine Readable Concept Model (MRCM)** validator, plus a `gofhir-ecl` CLI and a 95-case conformance suite.
+Embeddable parser and evaluator for the SNOMED CT **Expression Constraint Language (ECL) v2.2** in pure Go. Comes with parsers for **SNOMED Compositional Grammar (SCG)** and a **Machine Readable Concept Model (MRCM)** validator, plus a `gofhir-ecl` CLI and a 100-case conformance suite.
 
 ```go
 import "github.com/gofhir/ecl/ecl"
@@ -26,7 +26,7 @@ ECL is the standard query language for SNOMED CT. Until now, evaluating it from 
 - ✅ **SCG** parser + validator
 - ✅ **MRCM** loader + validator (uses ECL evaluator internally)
 - ✅ **SCTID** Verhoeff checksum + partition validation
-- ✅ **95/95** bundled conformance cases pass, all executed by CI
+- ✅ **100/100** bundled conformance cases pass, all executed by CI
 - 📦 Latest release: see [GitHub Releases](https://github.com/gofhir/ecl/releases)
 
 ### Known limitations
@@ -203,7 +203,7 @@ The fixture is a YAML file describing concepts, parents, descriptions, relations
 
 ```bash
 $ gofhir-ecl conformance
-95 passed, 0 failed, 0 skipped, 95 total
+100 passed, 0 failed, 0 skipped, 100 total
 
 $ gofhir-ecl conformance -filter '^memberOf'
 PASS  ECL v2.2 features (Top, Bottom, AltIdentifier, ^R, MemberOf) :: memberOf refset
@@ -215,7 +215,7 @@ Useful in CI to prove your `DataProvider` implementation matches the spec.
 
 ## Conformance suite
 
-The bundled suite lives in [`ecl/providertest/testdata/`](ecl/providertest/testdata/) and is **embedded in the binary**, so `gofhir-ecl conformance` works from any directory, including after `go install`. It currently covers 95 cases across 9 areas of the spec, including a suite of expressions that must be REJECTED.
+The bundled suite lives in [`ecl/providertest/testdata/`](ecl/providertest/testdata/) and is **embedded in the binary**, so `gofhir-ecl conformance` works from any directory, including after `go install`. It currently covers 100 cases across 9 areas of the spec, including a suite of expressions that must be REJECTED.
 
 | Area | Cases | Spec section |
 |---|---|---|

@@ -463,37 +463,40 @@ func wordPrefixMatch(value, lowerTerm string) bool {
 	return true
 }
 
-// globMatch implements '*' glob matching (no '?', no character classes) for
-// the in-memory fixture. Sufficient for conformance tests.
+// globMatch implements the wild search type for the in-memory fixture: a '*'
+// matches any run of characters and anything else matches literally. There is no
+// '?' and no character classes, which the grammar does not offer either.
+//
+// A pattern with no '*' must match the WHOLE string. The previous
+// implementation split on '*' and treated a single-segment pattern as case 0,
+// which only checked HasPrefix -- so `wild: "Diabet"` matched
+// "Diabetes mellitus" even though the pattern asks for an exact match.
 func globMatch(s, pattern string) bool {
-	if pattern == "" {
-		return s == ""
-	}
 	parts := strings.Split(pattern, "*")
-	idx := 0
-	for i, part := range parts {
-		if part == "" {
-			continue
-		}
-		switch i {
-		case 0:
-			if !strings.HasPrefix(s[idx:], part) {
-				return false
-			}
-			idx += len(part)
-		case len(parts) - 1:
-			if !strings.HasSuffix(s, part) {
-				return false
-			}
-		default:
-			pos := strings.Index(s[idx:], part)
-			if pos < 0 {
-				return false
-			}
-			idx += pos + len(part)
-		}
+	if len(parts) == 1 {
+		return s == pattern
 	}
-	return true
+
+	// First segment is anchored at the start, last at the end, the rest match in
+	// order anywhere between.
+	if !strings.HasPrefix(s, parts[0]) {
+		return false
+	}
+	s = s[len(parts[0]):]
+
+	last := parts[len(parts)-1]
+	for _, part := range parts[1 : len(parts)-1] {
+		idx := strings.Index(s, part)
+		if idx < 0 {
+			return false
+		}
+		s = s[idx+len(part):]
+	}
+
+	if len(s) < len(last) {
+		return false
+	}
+	return strings.HasSuffix(s, last)
 }
 
 func (p *inMemoryProvider) FilterConcepts(_ context.Context, concepts ecl.Set, opts ecl.ConceptFilterOpts) (ecl.Set, error) {

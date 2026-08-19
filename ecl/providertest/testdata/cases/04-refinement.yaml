@@ -124,3 +124,10 @@ cases:
   - name: parenthesised disjunction of ungrouped attributes
     expression: "* : (363698007 = 74281007 OR 1142139005 = #5)"
     expectedIds: ["22298006", "73211009"]
+
+  # A parenthesised sub-refinement followed by OR is valid. Keeping it in
+  # Refinement.Conjunction made this look like a node holding both a conjunction
+  # and a disjunction, and the scope guard rejected it outright.
+  - name: parenthesised refinement followed by a disjunct
+    expression: "* : ({ 363698007 = 74281007 }) OR 1142139005 = #5"
+    expectedIds: ["22298006", "73211009"]

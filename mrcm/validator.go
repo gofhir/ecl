@@ -2,12 +2,23 @@ package mrcm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/gofhir/ecl/ecl"
 	"github.com/gofhir/ecl/scg"
 )
+
+// errInvalidRule marks a failure caused by the MODEL — a rule whose ECL does not
+// parse, or that names a construct the evaluator cannot handle. Those are
+// reported as an invalid_rule Issue.
+//
+// It exists to keep that case apart from a provider or context failure, where the
+// expression may be perfectly valid and we simply could not check it. Reporting
+// the latter as an MRCM violation would tell the caller their data is wrong when
+// the truth is that the backend is down.
+var errInvalidRule = errors.New("invalid MRCM rule")
 
 // Issue Kind constants.
 const (
@@ -174,7 +185,10 @@ func (v *validator) validateExpression(expr *scg.Expression, pathPrefix string) 
 // Valid=true with no issues.
 func (v *validator) validateCardinality(focusID string, counts map[string]int, pathPrefix string) error {
 	for attrID, domains := range v.model.AllDomains() {
-		applicable := v.applicableDomains(focusID, attrID, domains)
+		applicable, err := v.applicableDomains(focusID, attrID, domains)
+		if err != nil {
+			return err
+		}
 		if len(applicable) == 0 {
 			// The attribute does not apply to this focus concept, so its
 			// cardinality says nothing about this expression.
@@ -215,7 +229,7 @@ func (v *validator) validateCardinality(focusID string, counts map[string]int, p
 // An invalid domain ECL is reported as an issue rather than aborting the whole
 // validation: a broken rule must not hide the violations already collected, nor
 // the rules that are fine.
-func (v *validator) applicableDomains(focusID, attrID string, domains []AttributeDomain) []AttributeDomain {
+func (v *validator) applicableDomains(focusID, attrID string, domains []AttributeDomain) ([]AttributeDomain, error) {
 	var applicable []AttributeDomain
 	for _, rule := range domains {
 		if rule.RuleStrengthID != "" && rule.RuleStrengthID != RuleStrengthMandatory {
@@ -223,10 +237,17 @@ func (v *validator) applicableDomains(focusID, attrID string, domains []Attribut
 		}
 		ok, err := v.eclContains(rule.DomainECL, focusID)
 		if err != nil {
-			v.issues = append(v.issues, Issue{
+			// A malformed rule is a defect in the MODEL, reported as an issue so
+			// one bad rule cannot hide the rest of the report. A provider or
+			// context failure is not: the expression may be perfectly valid and we
+			// simply could not check it, so reporting it as invalid would be a
+			// false accusation. Propagate those.
+			if !errors.Is(err, errInvalidRule) {
+				return nil, fmt.Errorf("evaluating domain ECL of attribute %s: %w", attrID, err)
+			}
+			v.addIssueOnce(Issue{
 				Kind:        IssueKindInvalidRule,
 				AttributeID: attrID,
-				FocusID:     focusID,
 				Message: fmt.Sprintf("domain ECL %q of attribute %s could not be evaluated: %v",
 					rule.DomainECL, attrID, err),
 			})
@@ -236,7 +257,21 @@ func (v *validator) applicableDomains(focusID, attrID string, domains []Attribut
 			applicable = append(applicable, rule)
 		}
 	}
-	return applicable
+	return applicable, nil
+}
+
+// addIssueOnce appends an issue unless an identical one is already recorded.
+//
+// A model-level defect does not depend on the focus concept or on where in the
+// expression it was noticed, so walking every attribute occurrence and every
+// focus concept would otherwise report it several times.
+func (v *validator) addIssueOnce(issue Issue) {
+	for _, existing := range v.issues {
+		if existing == issue {
+			return
+		}
+	}
+	v.issues = append(v.issues, issue)
 }
 
 // domainSummary renders the domain ECLs of a rule set for an error message.
@@ -279,7 +314,10 @@ func (v *validator) validateAttribute(focusID string, attr scg.Attribute, groupe
 	//
 	// So: collect the applicable rows first, report a domain violation only if
 	// none apply, and check grouped/cardinality against the applicable rows alone.
-	applicable := v.applicableDomains(focusID, attrID, domains)
+	applicable, err := v.applicableDomains(focusID, attrID, domains)
+	if err != nil {
+		return err
+	}
 
 	if len(domains) > 0 && len(applicable) == 0 {
 		v.issues = append(v.issues, Issue{
@@ -320,25 +358,50 @@ func (v *validator) validateAttribute(focusID string, attr scg.Attribute, groupe
 	// are validated by recursion).
 	if attr.Value.Concept != nil {
 		valueID := attr.Value.Concept.SCTID
+
+		// Range rows are ALTERNATIVES, like domain rows: the MRCM Attribute Range
+		// refset holds one row per contentTypeId, so the value has to satisfy at
+		// least one. Requiring every row reported a spurious range_violation for
+		// each row it did not match.
+		var (
+			checked   int
+			satisfied bool
+			ecls      []string
+		)
 		for _, rule := range ranges {
 			if rule.RuleStrengthID != "" && rule.RuleStrengthID != RuleStrengthMandatory {
 				continue
 			}
 			ok, err := v.eclContains(rule.RangeECL, valueID)
 			if err != nil {
-				return fmt.Errorf("evaluating range ECL for attribute %s: %w", attrID, err)
-			}
-			if !ok {
-				v.issues = append(v.issues, Issue{
-					Kind:        IssueKindRangeViolation,
+				if !errors.Is(err, errInvalidRule) {
+					return fmt.Errorf("evaluating range ECL of attribute %s: %w", attrID, err)
+				}
+				v.addIssueOnce(Issue{
+					Kind:        IssueKindInvalidRule,
 					AttributeID: attrID,
-					FocusID:     focusID,
-					ValueID:     valueID,
-					Message: fmt.Sprintf("value %s is not in range (%s) of attribute %s",
-						valueID, rule.RangeECL, attrID),
-					Path: path + ".value",
+					Message: fmt.Sprintf("range ECL %q of attribute %s could not be evaluated: %v",
+						rule.RangeECL, attrID, err),
 				})
+				continue
 			}
+			checked++
+			ecls = append(ecls, rule.RangeECL)
+			if ok {
+				satisfied = true
+				break
+			}
+		}
+		if checked > 0 && !satisfied {
+			v.issues = append(v.issues, Issue{
+				Kind:        IssueKindRangeViolation,
+				AttributeID: attrID,
+				FocusID:     focusID,
+				ValueID:     valueID,
+				Message: fmt.Sprintf("value %s is not in range (%s) of attribute %s",
+					valueID, strings.Join(ecls, " OR "), attrID),
+				Path: path + ".value",
+			})
 		}
 	}
 
@@ -366,10 +429,15 @@ func (v *validator) evalECL(eclExpr string) (ecl.Set, error) {
 	}
 	parsed, err := ecl.Parse(eclExpr)
 	if err != nil {
-		return nil, fmt.Errorf("parse ECL %q: %w", eclExpr, err)
+		return nil, fmt.Errorf("%w: parse ECL %q: %w", errInvalidRule, eclExpr, err)
 	}
 	set, err := ecl.Evaluate(v.ctx, parsed, v.provider)
 	if err != nil {
+		// A construct the evaluator does not support is a property of the rule;
+		// anything else (provider failure, cancellation) is not.
+		if errors.Is(err, ecl.ErrUnsupportedFeature) {
+			return nil, fmt.Errorf("%w: evaluate ECL %q: %w", errInvalidRule, eclExpr, err)
+		}
 		return nil, fmt.Errorf("evaluate ECL %q: %w", eclExpr, err)
 	}
 	v.memo[eclExpr] = set

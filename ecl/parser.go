@@ -1083,15 +1083,21 @@ func (v *astBuilder) collectSubrefinement(ctx grammar.ISubrefinementContext, ref
 		ref.AttrSet = mergeAttrSet(ref.AttrSet, set)
 		ref.Ungrouped = append(ref.Ungrouped, flattenAttrSet(set)...) //nolint:staticcheck // deprecated field kept populated for v1 readers
 	case concrete.Eclrefinement() != nil:
-		// A parenthesised refinement is a SCOPE: keep it as one sub-node.
+		// A parenthesised refinement is a SCOPE: keep it as its own node.
 		//
 		// This used to merge inner.Groups/Ungrouped/Conjunction/Disjunction into
-		// the parent, which destroyed the parentheses. The parent then held both
+		// the parent, which destroyed the parentheses: the parent then held both
 		// a Conjunction and a Disjunction with no record of which operands
 		// belonged to the inner scope, so `({A} OR {B}) , C` became
 		// indistinguishable from `{A} , ({B} OR C)`.
+		//
+		// It goes in its own field rather than in Conjunction. Reusing
+		// Conjunction conflated "the first sub-refinement was parenthesised" with
+		// "there is a conjunction set", which made the legitimate shape
+		// `(<refinement>) OR <clause>` look like a node holding both a
+		// conjunction and a disjunction.
 		if inner := v.visitRefinement(concrete.Eclrefinement()); inner != nil {
-			ref.Conjunction = append(ref.Conjunction, inner)
+			ref.Nested = inner
 		}
 	}
 }

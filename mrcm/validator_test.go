@@ -2,6 +2,7 @@ package mrcm
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -474,4 +475,97 @@ func TestLoad_RejectsInvalidRuleECL(t *testing.T) {
 	// A well-formed model still loads.
 	_, err := LoadFromBytes([]byte(`{"domains":[{"attributeId":"363698007","domainEcl":"<< 404684003","grouped":true}]}`))
 	require.NoError(t, err)
+}
+
+// TestValidate_ProviderFailureIsNotAnMRCMViolation covers the difference between
+// a broken rule and a broken backend.
+//
+// Every evaluation failure used to be reported as an invalid_rule issue, so a
+// database outage came back as "your expression is MRCM-invalid" -- a false
+// accusation about the caller's data. A provider failure now propagates.
+func TestValidate_ProviderFailureIsNotAnMRCMViolation(t *testing.T) {
+	model := newTestModel()
+	expr := mustParseSCG(t, "22298006:{363698007=74281007}")
+
+	res, err := Validate(context.Background(), expr, model, failingStubProvider{})
+	require.Error(t, err, "a provider failure must propagate, not be reported as invalid")
+	require.Nil(t, res)
+
+	// A malformed rule, in contrast, IS an issue: one bad rule must not hide the
+	// rest of the report.
+	broken := newTestModel()
+	broken.Domains = append(broken.Domains, AttributeDomain{
+		AttributeID:    "246075003",
+		DomainECL:      "<< invalid!!!",
+		Cardinality:    Cardinality{Min: 0, Max: -1},
+		RuleStrengthID: RuleStrengthMandatory,
+	})
+	provider := newTestProvider()
+	provider.exists["246075003"] = true
+
+	res, err = Validate(context.Background(), mustParseSCG(t, "22298006:246075003=425391005"), broken, provider)
+	require.NoError(t, err)
+	require.False(t, res.Valid)
+
+	var invalid int
+	for _, issue := range res.Issues {
+		if issue.Kind == IssueKindInvalidRule {
+			invalid++
+		}
+	}
+	require.Equal(t, 1, invalid, "the invalid_rule issue must be reported exactly once, not per focus/occurrence")
+}
+
+// TestValidate_RangeRowsAreAlternatives covers range rows being alternatives, the
+// same shape already fixed for domain rows. Two mandatory range rules for one
+// attribute produced a spurious range_violation for whichever row did not match.
+func TestValidate_RangeRowsAreAlternatives(t *testing.T) {
+	model := &Model{
+		Domains: []AttributeDomain{
+			{
+				AttributeID:    "363698007",
+				DomainECL:      "<< 404684003",
+				Grouped:        true,
+				Cardinality:    Cardinality{Min: 0, Max: -1},
+				RuleStrengthID: RuleStrengthMandatory,
+			},
+		},
+		Ranges: []AttributeRange{
+			// One row per contentTypeId, as the refset distributes them.
+			{AttributeID: "363698007", RangeECL: "<< 386053000", RuleStrengthID: RuleStrengthMandatory},
+			{AttributeID: "363698007", RangeECL: "<< 442083009", RuleStrengthID: RuleStrengthMandatory},
+		},
+	}
+
+	// 74281007 is under 442083009 but not under 386053000: satisfying one row is
+	// enough.
+	expr := mustParseSCG(t, "22298006:{363698007=74281007}")
+	res, err := Validate(context.Background(), expr, model, newTestProvider())
+	require.NoError(t, err)
+	require.True(t, res.Valid, "issues: %+v", res.Issues)
+
+	// A value in neither row is still reported, once. 363698007 is under neither
+	// 386053000 nor 442083009 (note `<< X` includes X itself, so the value cannot
+	// be one of the range roots).
+	bad := mustParseSCG(t, "22298006:{363698007=363698007}")
+	res, err = Validate(context.Background(), bad, model, newTestProvider())
+	require.NoError(t, err)
+	require.False(t, res.Valid)
+	require.Len(t, res.Issues, 1)
+	require.Equal(t, IssueKindRangeViolation, res.Issues[0].Kind)
+}
+
+// failingStubProvider stands in for an unhealthy backend. It returns a PLAIN
+// error, not ErrUnsupportedFeature: the latter is a property of the rule and is
+// deliberately classified as an invalid_rule issue instead.
+type failingStubProvider struct{ ecl.UnimplementedDataProvider }
+
+var errBackendDown = errors.New("backend down")
+
+func (failingStubProvider) ConceptExists(_ context.Context, ids []string) (ecl.Set, error) {
+	return ecl.NewSetFromSlice(ids), nil
+}
+
+func (failingStubProvider) Descendants(context.Context, []string, bool) (ecl.Set, error) {
+	return nil, errBackendDown
 }

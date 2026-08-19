@@ -95,10 +95,20 @@ type Refinement struct {
 
 	Groups []*AttributeGroup
 
+	// Nested is a parenthesised sub-refinement, which the grammar allows as the
+	// first operand of a refinement. It is kept as its own node so the
+	// parentheses survive: `({A} OR {B}) , C` must stay distinguishable from
+	// `{A} , ({B} OR C)`.
+	Nested *Refinement
+
 	// Deprecated: use AttrSet. Kept populated for compatibility with readers
 	// written against v1.1; it flattens AND and OR into one list and will be
 	// removed in v2.
-	Ungrouped   []*Attribute
+	Ungrouped []*Attribute
+
+	// Conjunction and Disjunction hold the sub-refinements of a
+	// conjunctionRefinementSet or disjunctionRefinementSet. The grammar admits
+	// one or the other at a level, never both.
 	Conjunction []*Refinement
 	Disjunction []*Refinement
 }

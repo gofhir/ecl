@@ -113,3 +113,23 @@ cases:
   - name: term match requires every word to match
     expression: '<< 404684003 {{ D term = "myocardial diabetes" }}'
     expectedIds: []
+
+  # An operand that names no concept must make the clause match NOTHING. An empty
+  # field in the provider Opts means "do not filter on this dimension", so
+  # returning no IDs for it turned the clause into a no-op and matched everything.
+  - name: filter operand naming no concept matches nothing
+    expression: "<< 404684003 {{ C definitionStatusId = (< 900000000000073002) }}"
+    expectedIds: []
+
+  - name: negated filter operand naming no concept removes nothing
+    expression: "<< 404684003 {{ C definitionStatusId != (< 900000000000073002) }}"
+    expectedIds: ["11687002", "22298006", "404684003", "64572001", "73211009", "95566004"]
+
+  # A wild pattern with no '*' is an exact match, not a prefix.
+  - name: wild pattern without a star is exact
+    expression: '<< 404684003 {{ D term = wild: "Diabet" }}'
+    expectedIds: []
+
+  - name: wild pattern matching the whole term
+    expression: '<< 404684003 {{ D term = wild: "Diabetes mellitus" }}'
+    expectedIds: ["73211009"]
