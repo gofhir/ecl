@@ -7,3 +7,6 @@ coverage.out
 
 # macOS
 .DS_Store
+
+# Local agent/editor settings: machine-specific absolute paths.
+.claude/

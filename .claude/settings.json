@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Read(//Users/robertoaraneda/projects/personal/opensource/go-validator/**)",
-      "WebSearch",
-      "Read(//Users/robertoaraneda/projects/personal/opensource/go-fhir-server/**)"
-    ]
-  }
-}
