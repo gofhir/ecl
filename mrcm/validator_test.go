@@ -569,3 +569,84 @@ func (failingStubProvider) ConceptExists(_ context.Context, ids []string) (ecl.S
 func (failingStubProvider) Descendants(context.Context, []string, bool) (ecl.Set, error) {
 	return nil, errBackendDown
 }
+
+// TestValidate_OptionalDomainRowIsNotAViolation covers an attribute whose domain
+// rows are all advisory.
+//
+// Non-mandatory rows are filtered out, so `len(applicable) == 0` fired even
+// though the focus concept WAS in the domain, and a perfectly valid expression
+// came back with a domain_violation. That was a regression: the
+// previous code skipped optional rows silently.
+func TestValidate_OptionalDomainRowIsNotAViolation(t *testing.T) {
+	model := &Model{Domains: []AttributeDomain{{
+		AttributeID:    "363698007",
+		DomainECL:      "<< 404684003",
+		Grouped:        true,
+		Cardinality:    Cardinality{Min: 0, Max: -1},
+		RuleStrengthID: RuleStrengthOptional,
+	}}}
+
+	res, err := Validate(context.Background(), mustParseSCG(t, "22298006:{363698007=74281007}"), model, newTestProvider())
+	require.NoError(t, err)
+	assert.True(t, res.Valid, "an advisory rule must not produce a violation; issues: %+v", res.Issues)
+}
+
+// TestValidate_UncheckableRuleIsNotADomainViolation covers the same distinction
+// for a rule whose ECL does not parse: it is reported as invalid_rule, and must
+// NOT also claim the focus concept is out of domain, which was never tested.
+func TestValidate_UncheckableRuleIsNotADomainViolation(t *testing.T) {
+	model := &Model{Domains: []AttributeDomain{{
+		AttributeID:    "363698007",
+		DomainECL:      "<< invalid!!!",
+		Grouped:        true,
+		Cardinality:    Cardinality{Min: 0, Max: -1},
+		RuleStrengthID: RuleStrengthMandatory,
+	}}}
+
+	res, err := Validate(context.Background(), mustParseSCG(t, "22298006:{363698007=74281007}"), model, newTestProvider())
+	require.NoError(t, err)
+	require.False(t, res.Valid)
+	for _, issue := range res.Issues {
+		assert.NotEqual(t, IssueKindDomainViolation, issue.Kind,
+			"a rule that could not be evaluated must not be reported as a domain violation")
+	}
+}
+
+// TestValidate_GroupedRowsAreAlternatives covers applicable rows disagreeing on
+// Grouped. Requiring every row made the attribute unwritable: both the grouped
+// and the ungrouped violation were reachable and no expression could avoid them.
+func TestValidate_GroupedRowsAreAlternatives(t *testing.T) {
+	model := &Model{
+		Domains: []AttributeDomain{
+			{AttributeID: "363698007", DomainECL: "<< 404684003", Grouped: true, Cardinality: Cardinality{Min: 0, Max: -1}, RuleStrengthID: RuleStrengthMandatory},
+			{AttributeID: "363698007", DomainECL: "<< 404684003", Grouped: false, Cardinality: Cardinality{Min: 0, Max: -1}, RuleStrengthID: RuleStrengthMandatory},
+		},
+		Ranges: []AttributeRange{{AttributeID: "363698007", RangeECL: "<< 442083009", RuleStrengthID: RuleStrengthMandatory}},
+	}
+
+	for _, expr := range []string{"22298006:{363698007=74281007}", "22298006:363698007=74281007"} {
+		t.Run(expr, func(t *testing.T) {
+			res, err := Validate(context.Background(), mustParseSCG(t, expr), model, newTestProvider())
+			require.NoError(t, err)
+			assert.True(t, res.Valid, "satisfying one applicable row is enough; issues: %+v", res.Issues)
+		})
+	}
+}
+
+// TestValidate_CardinalityRowsAreAlternatives covers applicable rows disagreeing
+// on Max, which produced a spurious cardinality violation.
+func TestValidate_CardinalityRowsAreAlternatives(t *testing.T) {
+	model := &Model{
+		Domains: []AttributeDomain{
+			{AttributeID: "363698007", DomainECL: "<< 404684003", Grouped: true, Cardinality: Cardinality{Min: 0, Max: 1}, RuleStrengthID: RuleStrengthMandatory},
+			{AttributeID: "363698007", DomainECL: "<< 404684003", Grouped: true, Cardinality: Cardinality{Min: 0, Max: -1}, RuleStrengthID: RuleStrengthMandatory},
+		},
+		Ranges: []AttributeRange{{AttributeID: "363698007", RangeECL: "<< 442083009", RuleStrengthID: RuleStrengthMandatory}},
+	}
+
+	// Two occurrences fit the second row but not the first.
+	expr := mustParseSCG(t, "22298006:{363698007=74281007,363698007=425391005}")
+	res, err := Validate(context.Background(), expr, model, newTestProvider())
+	require.NoError(t, err)
+	assert.True(t, res.Valid, "issues: %+v", res.Issues)
+}

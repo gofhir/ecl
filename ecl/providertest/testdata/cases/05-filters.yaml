@@ -148,3 +148,14 @@ cases:
   - name: definition status filter with a token set
     expression: '<< 404684003 {{ C definitionStatus = (primitive defined) }}'
     expectedIds: ["11687002", "22298006", "73211009", "95566004"]
+
+  # A dialect-only constraint must not consult MatchDescription: dialect clauses
+  # are answered by MatchDialect, and passing zero-value DescriptionFilterOpts
+  # asks "every description", dropping every concept that has none.
+  - name: dialect-only filter over a hierarchy query
+    expression: "<< 138875005 {{ D dialectId = 900000000000508004 }}"
+    expectedIds: ["22298006"]
+
+  - name: dialect combined with a term clause
+    expression: '<< 138875005 {{ D term = "Myocardial", dialectId = 900000000000508004 }}'
+    expectedIds: ["22298006"]

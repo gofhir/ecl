@@ -608,6 +608,16 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 		}
 	}
 
+	// The reverse path cannot count matching groups: it walks the groups of the
+	// SOURCE concepts, so any count from it would be counting someone else's
+	// groups. Applying a cardinality to that 1/0 pseudo-count answered `[2..*]`
+	// with the empty set and `[0..0]` with everything -- silently wrong, where
+	// the rest of this package reports what it cannot do.
+	if hasReverse && grp.Cardinality != nil {
+		return nil, fmt.Errorf("%w: group cardinality [%d..%s] combined with a reverse attribute needs a provider method that preserves inbound multiplicity",
+			ErrUnsupportedFeature, grp.Cardinality.Min, cardinalityMaxText(grp.Cardinality))
+	}
+
 	out := newMapSet()
 	var iterErr error
 	focus.Iter(func(id string) bool {
@@ -694,6 +704,14 @@ const (
 	concreteKindString  = "string"
 	concreteKindBoolean = "boolean"
 )
+
+// cardinalityMaxText renders a cardinality's upper bound, with "*" for unbounded.
+func cardinalityMaxText(c *ast.Cardinality) string {
+	if c == nil || c.Max < 0 {
+		return "*"
+	}
+	return strconv.Itoa(c.Max)
+}
 
 // clauseSet is the resolved counterpart of ast.AttributeSet: a boolean tree
 // whose leaves carry pre-resolved type IDs and value sets.
@@ -903,7 +921,15 @@ func conceptMatchesGroupWithReverse(ctx context.Context, conceptID string, claus
 				iterErr = err
 				return false
 			}
-			for _, rels := range srcGroups {
+			for gnum, rels := range srcGroups {
+				// Group 0 is "ungrouped" per the PropertiesByGroup contract, so it
+				// is not a relationship group. The forward path skips it, and this
+				// one has to agree: otherwise the same ungrouped data made
+				// `{ 363698007 = X }` return nothing while
+				// `{ R 363698007 = Y }` matched.
+				if gnum == 0 {
+					continue
+				}
 				if groupSatisfiesClausesWithReverse(rels, clauses, conceptID) {
 					found = true
 					return false
@@ -1062,7 +1088,20 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 	// clauses, then call MatchDescription once. The result is a set of concept
 	// IDs whose descriptions match; intersect with the current base (or subtract
 	// when negated).
-	if len(descFilters) > 0 {
+	// Dialect clauses are answered by MatchDialect, not MatchDescription, so a
+	// dialect-only constraint must not consult MatchDescription at all: passing
+	// it zero-value Opts asks "every description", and under the contract an
+	// empty input yields the empty Set. Even a lenient provider drops every
+	// concept that happens to have no descriptions.
+	hasDescriptionClause := false
+	for _, f := range descFilters {
+		if _, isDialect := f.(*ast.DialectFilter); !isDialect {
+			hasDescriptionClause = true
+			break
+		}
+	}
+
+	if hasDescriptionClause {
 		// A negated description filter cannot be expressed as a set operation.
 		// `{{ D type != fsn }}` means "has a description whose type is not FSN",
 		// which is a per-DESCRIPTION-ROW negation. Subtracting the concepts that
@@ -1423,17 +1462,15 @@ func buildDialectFilterOpts(ctx context.Context, df *ast.DialectFilter, provider
 				dialectIDs = []string{ref.ID}
 			}
 		}
+		// Every acceptability, not just the first: AcceptabilityIDs is an any-of
+		// slice, so a set is expressible here.
 		var acceptIDs []string
-		if entry.Acceptability != nil {
-			ids, err := Evaluate(ctx, entry.Acceptability, provider)
+		for _, acc := range entry.Acceptabilities {
+			ids, _, err := resolveFilterIDs(ctx, acc, provider)
 			if err != nil {
 				return opts, fmt.Errorf("evaluating acceptability: %w", err)
 			}
-			if ids != nil && ids.Len() > 0 {
-				acceptIDs = ids.Slice()
-			} else if ref, ok := entry.Acceptability.(*ast.ConceptRef); ok {
-				acceptIDs = []string{ref.ID}
-			}
+			acceptIDs = append(acceptIDs, ids...)
 		}
 		opts.Dialects = append(opts.Dialects, DialectEntryOpts{
 			DialectIDs:       dialectIDs,

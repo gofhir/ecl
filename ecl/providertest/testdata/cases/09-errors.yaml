@@ -98,3 +98,10 @@ cases:
   - name: effectiveTime set is reported as unsupported
     expression: '<< 404684003 {{ C effectiveTime = ("20240131" "20230731") }}'
     expectError: true
+
+  # The reverse path walks the groups of the SOURCE concepts, so it cannot count
+  # the focus concept's groups. Applying a cardinality to that 1/0 pseudo-count
+  # answered [2..*] with the empty set and [0..0] with everything.
+  - name: group cardinality with a reverse attribute is reported as unsupported
+    expression: "* : [2..*] { R 363698007 = 22298006 }"
+    expectError: true

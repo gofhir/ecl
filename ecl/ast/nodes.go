@@ -241,10 +241,17 @@ type DialectFilter struct {
 	Dialects []DialectEntry
 }
 
-// DialectEntry pairs a dialect (concept ref or alias) with an optional acceptability.
+// DialectEntry pairs a dialect (concept ref or alias) with its optional
+// acceptabilities.
 type DialectEntry struct {
-	Dialect       Expression // concept ref or alias
-	Acceptability Expression // optional
+	Dialect Expression // concept ref or alias
+
+	// Acceptabilities holds every acceptability the entry names, with any-of
+	// semantics. The grammar allows a set: `(preferred acceptable)`.
+	Acceptabilities []Expression
+
+	// Deprecated: use Acceptabilities. Holds the first one only.
+	Acceptability Expression
 }
 
 // ActiveFilter represents an active status filter.

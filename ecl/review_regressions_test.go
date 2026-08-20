@@ -3,6 +3,7 @@ package ecl_test
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -142,4 +143,94 @@ func (c *countingProvider) PropertiesByGroup(ctx context.Context, id string) (ma
 		c.onPropertiesByGroup()
 	}
 	return c.DataProvider.PropertiesByGroup(ctx, id)
+}
+
+// TestEvaluate_DialectOnlyFilterSkipsMatchDescription covers a constraint whose
+// only description clause is a dialect.
+//
+// Dialect clauses are answered by MatchDialect, so calling MatchDescription with
+// zero-value Opts asks "every description" — which, under the contract stating
+// that empty input yields the empty Set, returns nothing, and which even with a
+// lenient provider drops every concept that has no descriptions at all.
+func TestEvaluate_DialectOnlyFilterSkipsMatchDescription(t *testing.T) {
+	// 22298006 is preferred in en-gb, 73211009 only exists in en-us.
+	gb := evalFixture(t, "<< 138875005 {{ D dialectId = 900000000000508004 }}")
+	require.ElementsMatch(t, []string{"22298006"}, gb.Slice())
+
+	us := evalFixture(t, "<< 138875005 {{ D dialectId = 900000000000509007 }}")
+	require.ElementsMatch(t, []string{"22298006", "73211009"}, us.Slice())
+
+	// Combining a dialect with a real description clause must still work.
+	both := evalFixture(t, `<< 138875005 {{ D term = "Myocardial", dialectId = 900000000000508004 }}`)
+	require.ElementsMatch(t, []string{"22298006"}, both.Slice())
+}
+
+// TestEvaluate_GroupCardinalityWithReverseIsRejected covers group cardinality
+// combined with a reverse clause.
+//
+// The reverse path walks the groups of the SOURCE concepts, so it can only report
+// 1 or 0 — not a count of the focus concept's groups. Applying a cardinality to
+// that pseudo-count answered `[2..*]` with the empty set and `[0..0]` with
+// everything: silently wrong, where the rest of the package reports what it
+// cannot do.
+func TestEvaluate_GroupCardinalityWithReverseIsRejected(t *testing.T) {
+	for _, expr := range []string{
+		"* : [2..*] { R 363698007 = 22298006 }",
+		"* : [0..0] { R 363698007 = 22298006 }",
+		"* : [1..1] { R 363698007 = 22298006 }",
+	} {
+		t.Run(expr, func(t *testing.T) {
+			_, err := evalFixtureErr(t, expr)
+			require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
+		})
+	}
+
+	// Without a cardinality the reverse group still works.
+	set := evalFixture(t, "* : { R 363698007 = 22298006 }")
+	require.ElementsMatch(t, []string{"74281007", "113331007"}, set.Slice())
+}
+
+// TestParse_DialectAcceptabilityIsPairedInOrder covers pairing each dialect with
+// the acceptability that follows it.
+//
+// The grammar makes acceptability optional per entry, so ANTLR's flat
+// AllEclconceptreference() and AllAcceptabilityset() lists cannot be zipped by
+// index: doing that gave the first acceptability to the first dialect wherever it
+// appeared, and made `(A B (X))` and `(A (X) B)` produce identical ASTs.
+func TestParse_DialectAcceptabilityIsPairedInOrder(t *testing.T) {
+	first := dialectFilterOf(t, "<< 404684003 {{ D dialectId = (900000000000508004 (900000000000548007) 900000000000509007) }}")
+	require.Len(t, first.Dialects, 2)
+	require.Len(t, first.Dialects[0].Acceptabilities, 1, "the acceptability belongs to the dialect it follows")
+	require.Empty(t, first.Dialects[1].Acceptabilities)
+
+	second := dialectFilterOf(t, "<< 404684003 {{ D dialectId = (900000000000508004 900000000000509007 (900000000000548007)) }}")
+	require.Len(t, second.Dialects, 2)
+	require.Empty(t, second.Dialects[0].Acceptabilities)
+	require.Len(t, second.Dialects[1].Acceptabilities, 1)
+
+	require.False(t, reflect.DeepEqual(first, second),
+		"the two orderings must not produce the same AST")
+}
+
+// TestParse_AcceptabilitySetKeepsEveryValue covers an acceptability set, which
+// used to be truncated to its first value and silently narrowed the query.
+func TestParse_AcceptabilitySetKeepsEveryValue(t *testing.T) {
+	f := dialectFilterOf(t, "<< 404684003 {{ D dialectId = 900000000000508004 (900000000000548007 900000000000549004) }}")
+	require.Len(t, f.Dialects, 1)
+	require.Len(t, f.Dialects[0].Acceptabilities, 2)
+}
+
+// dialectFilterOf returns the DialectFilter of a parsed expression.
+func dialectFilterOf(t *testing.T, expr string) *ast.DialectFilter {
+	t.Helper()
+	tree := mustParse(t, expr)
+	filtered, ok := tree.(*ast.Filtered)
+	require.Truef(t, ok, "expected *ast.Filtered, got %T", tree)
+	for _, f := range filtered.Filters {
+		if df, ok := f.(*ast.DialectFilter); ok {
+			return df
+		}
+	}
+	require.FailNow(t, "no DialectFilter found")
+	return nil
 }

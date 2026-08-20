@@ -813,10 +813,11 @@ func (v *astBuilder) buildDialectFilter(ctx grammar.IDialectfilterContext) *ast.
 
 	df := &ast.DialectFilter{Op: "="}
 
-	// Acceptability applies to every entry of the filter.
-	var acceptability ast.Expression
+	// A filter-level acceptability applies to every entry that declares none of
+	// its own.
+	var acceptability []ast.Expression
 	if as := concrete.Acceptabilityset(); as != nil {
-		acceptability = v.buildAcceptability(as)
+		acceptability = v.buildAcceptabilities(as)
 	}
 
 	if idf, ok := concrete.Dialectidfilter().(*grammar.DialectidfilterContext); ok && idf != nil {
@@ -825,26 +826,15 @@ func (v *astBuilder) buildDialectFilter(ctx grammar.IDialectfilterContext) *ast.
 		}
 		if sub := idf.Subexpressionconstraint(); sub != nil {
 			if expr := v.visitExpr(sub); expr != nil {
-				df.Dialects = append(df.Dialects, ast.DialectEntry{Dialect: expr, Acceptability: acceptability})
+				entry := ast.DialectEntry{Dialect: expr, Acceptabilities: acceptability}
+				if len(acceptability) > 0 {
+					entry.Acceptability = acceptability[0] //nolint:staticcheck // deprecated field kept populated for v1 readers
+				}
+				df.Dialects = append(df.Dialects, entry)
 			}
 		}
 		if set, ok := idf.Dialectidset().(*grammar.DialectidsetContext); ok && set != nil {
-			// Each entry of the set may carry its own acceptability, falling back
-			// to the filter-level one.
-			perEntry := set.AllAcceptabilityset()
-			for i, ref := range set.AllEclconceptreference() {
-				expr := v.visitExpr(ref)
-				if expr == nil {
-					continue
-				}
-				accept := acceptability
-				if i < len(perEntry) && perEntry[i] != nil {
-					if a := v.buildAcceptability(perEntry[i]); a != nil {
-						accept = a
-					}
-				}
-				df.Dialects = append(df.Dialects, ast.DialectEntry{Dialect: expr, Acceptability: accept})
-			}
+			df.Dialects = append(df.Dialects, v.dialectEntriesOf(set, acceptability)...)
 		}
 		return df
 	}
@@ -859,24 +849,73 @@ func (v *astBuilder) buildDialectFilter(ctx grammar.IDialectfilterContext) *ast.
 	return df
 }
 
-// buildAcceptability renders an acceptabilityset as a concept reference when it
-// is expressed as SCTIDs. Token forms (preferred / acceptable) resolve to
-// well-known SCTIDs, which the caller's provider may or may not enumerate.
-func (v *astBuilder) buildAcceptability(as grammar.IAcceptabilitysetContext) ast.Expression {
+// dialectEntriesOf pairs each dialect of a dialectidset with the acceptability
+// that follows it, walking the children IN ORDER.
+//
+// The grammar makes acceptability optional per entry:
+//
+//	dialectidset : LEFT_PAREN ws eclconceptreference (ws acceptabilityset)?
+//	               (mws eclconceptreference (ws acceptabilityset)? )* ws RIGHT_PAREN
+//
+// so ANTLR's flat AllEclconceptreference() and AllAcceptabilityset() lists cannot
+// be zipped by index. Doing that attached the first acceptability to the first
+// dialect regardless of where it appeared: `(A B (X))` gave X to A and left B
+// bare, and `(A (X) B)` produced the identical AST.
+func (v *astBuilder) dialectEntriesOf(set *grammar.DialectidsetContext, fallback []ast.Expression) []ast.DialectEntry {
+	var (
+		entries []ast.DialectEntry
+		pending *ast.DialectEntry
+	)
+	flush := func() {
+		if pending == nil {
+			return
+		}
+		if len(pending.Acceptabilities) == 0 {
+			pending.Acceptabilities = fallback
+		}
+		if len(pending.Acceptabilities) > 0 {
+			pending.Acceptability = pending.Acceptabilities[0] //nolint:staticcheck // deprecated field kept populated for v1 readers
+		}
+		entries = append(entries, *pending)
+		pending = nil
+	}
+
+	for _, child := range set.GetChildren() {
+		switch c := child.(type) {
+		case grammar.IEclconceptreferenceContext:
+			flush()
+			if expr := v.visitExpr(c); expr != nil {
+				pending = &ast.DialectEntry{Dialect: expr}
+			}
+		case grammar.IAcceptabilitysetContext:
+			if pending != nil {
+				pending.Acceptabilities = v.buildAcceptabilities(c)
+			}
+		}
+	}
+	flush()
+	return entries
+}
+
+// buildAcceptabilities renders an acceptabilityset as concept references, with
+// any-of semantics.
+//
+// It used to return on the first reference, so `(preferred acceptable)` silently
+// became `preferred` and narrowed the result.
+func (v *astBuilder) buildAcceptabilities(as grammar.IAcceptabilitysetContext) []ast.Expression {
 	concrete, ok := as.(*grammar.AcceptabilitysetContext)
 	if !ok {
 		return nil
 	}
-	if crs := concrete.Acceptabilityconceptreferenceset(); crs != nil {
-		if set, ok := crs.(*grammar.AcceptabilityconceptreferencesetContext); ok {
-			for _, ref := range set.AllEclconceptreference() {
-				if expr := v.visitExpr(ref); expr != nil {
-					return expr
-				}
+	var out []ast.Expression
+	if crs, ok := concrete.Acceptabilityconceptreferenceset().(*grammar.AcceptabilityconceptreferencesetContext); ok && crs != nil {
+		for _, ref := range crs.AllEclconceptreference() {
+			if expr := v.visitExpr(ref); expr != nil {
+				out = append(out, expr)
 			}
 		}
 	}
-	return nil
+	return out
 }
 
 // buildDescriptionIDFilter builds an *ast.DescriptionIDFilter.

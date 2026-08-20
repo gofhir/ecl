@@ -185,7 +185,7 @@ func (v *validator) validateExpression(expr *scg.Expression, pathPrefix string) 
 // Valid=true with no issues.
 func (v *validator) validateCardinality(focusID string, counts map[string]int, pathPrefix string) error {
 	for attrID, domains := range v.model.AllDomains() {
-		applicable, err := v.applicableDomains(focusID, attrID, domains)
+		applicable, _, err := v.applicableDomains(focusID, attrID, domains)
 		if err != nil {
 			return err
 		}
@@ -194,28 +194,26 @@ func (v *validator) validateCardinality(focusID string, counts map[string]int, p
 			// cardinality says nothing about this expression.
 			continue
 		}
+		// The applicable rows are alternatives here too: the count only has to fit
+		// ONE of them. Checking every row produced a spurious violation whenever
+		// two applicable rows disagreed on Min or Max.
 		count := counts[attrID]
+		satisfied := false
 		for _, r := range applicable {
-			if count < r.Cardinality.Min {
-				v.issues = append(v.issues, Issue{
-					Kind:        IssueKindCardinalityViolation,
-					AttributeID: attrID,
-					FocusID:     focusID,
-					Message: fmt.Sprintf("attribute %s occurs %d time(s) on focus %s, MRCM requires at least %d",
-						attrID, count, focusID, r.Cardinality.Min),
-					Path: pathPrefix,
-				})
+			if count >= r.Cardinality.Min && (r.Cardinality.Max < 0 || count <= r.Cardinality.Max) {
+				satisfied = true
+				break
 			}
-			if r.Cardinality.Max >= 0 && count > r.Cardinality.Max {
-				v.issues = append(v.issues, Issue{
-					Kind:        IssueKindCardinalityViolation,
-					AttributeID: attrID,
-					FocusID:     focusID,
-					Message: fmt.Sprintf("attribute %s occurs %d time(s) on focus %s, MRCM allows at most %d",
-						attrID, count, focusID, r.Cardinality.Max),
-					Path: pathPrefix,
-				})
-			}
+		}
+		if !satisfied {
+			v.issues = append(v.issues, Issue{
+				Kind:        IssueKindCardinalityViolation,
+				AttributeID: attrID,
+				FocusID:     focusID,
+				Message: fmt.Sprintf("attribute %s occurs %d time(s) on focus %s, which fits none of its MRCM cardinalities (%s)",
+					attrID, count, focusID, cardinalitySummary(applicable)),
+				Path: pathPrefix,
+			})
 		}
 	}
 	return nil
@@ -229,12 +227,15 @@ func (v *validator) validateCardinality(focusID string, counts map[string]int, p
 // An invalid domain ECL is reported as an issue rather than aborting the whole
 // validation: a broken rule must not hide the violations already collected, nor
 // the rules that are fine.
-func (v *validator) applicableDomains(focusID, attrID string, domains []AttributeDomain) ([]AttributeDomain, error) {
-	var applicable []AttributeDomain
+func (v *validator) applicableDomains(focusID, attrID string, domains []AttributeDomain) (applicable []AttributeDomain, mandatory int, err error) {
 	for _, rule := range domains {
 		if rule.RuleStrengthID != "" && rule.RuleStrengthID != RuleStrengthMandatory {
+			// Advisory rows are not enforced, and they must not be counted as
+			// mandatory either: doing so made an attribute whose only rows are
+			// optional look like a domain violation.
 			continue
 		}
+		mandatory++
 		ok, err := v.eclContains(rule.DomainECL, focusID)
 		if err != nil {
 			// A malformed rule is a defect in the MODEL, reported as an issue so
@@ -243,7 +244,7 @@ func (v *validator) applicableDomains(focusID, attrID string, domains []Attribut
 			// simply could not check it, so reporting it as invalid would be a
 			// false accusation. Propagate those.
 			if !errors.Is(err, errInvalidRule) {
-				return nil, fmt.Errorf("evaluating domain ECL of attribute %s: %w", attrID, err)
+				return nil, 0, fmt.Errorf("evaluating domain ECL of attribute %s: %w", attrID, err)
 			}
 			v.addIssueOnce(Issue{
 				Kind:        IssueKindInvalidRule,
@@ -251,13 +252,16 @@ func (v *validator) applicableDomains(focusID, attrID string, domains []Attribut
 				Message: fmt.Sprintf("domain ECL %q of attribute %s could not be evaluated: %v",
 					rule.DomainECL, attrID, err),
 			})
+			// The rule could not be checked, so it says nothing about the focus
+			// concept. Do not let it stand in for "the focus is out of domain".
+			mandatory--
 			continue
 		}
 		if ok {
 			applicable = append(applicable, rule)
 		}
 	}
-	return applicable, nil
+	return applicable, mandatory, nil
 }
 
 // addIssueOnce appends an issue unless an identical one is already recorded.
@@ -272,6 +276,19 @@ func (v *validator) addIssueOnce(issue Issue) {
 		}
 	}
 	v.issues = append(v.issues, issue)
+}
+
+// cardinalitySummary renders the cardinalities of a rule set for an error message.
+func cardinalitySummary(rules []AttributeDomain) string {
+	out := make([]string, 0, len(rules))
+	for _, r := range rules {
+		maxVal := "*"
+		if r.Cardinality.Max >= 0 {
+			maxVal = fmt.Sprintf("%d", r.Cardinality.Max)
+		}
+		out = append(out, fmt.Sprintf("[%d..%s]", r.Cardinality.Min, maxVal))
+	}
+	return strings.Join(out, " or ")
 }
 
 // domainSummary renders the domain ECLs of a rule set for an error message.
@@ -314,12 +331,16 @@ func (v *validator) validateAttribute(focusID string, attr scg.Attribute, groupe
 	//
 	// So: collect the applicable rows first, report a domain violation only if
 	// none apply, and check grouped/cardinality against the applicable rows alone.
-	applicable, err := v.applicableDomains(focusID, attrID, domains)
+	applicable, mandatory, err := v.applicableDomains(focusID, attrID, domains)
 	if err != nil {
 		return err
 	}
 
-	if len(domains) > 0 && len(applicable) == 0 {
+	// Report a violation only when a mandatory rule was actually checked and none
+	// of them contained the focus. Using len(domains) here made an attribute
+	// whose rows are all advisory, or whose ECL failed to parse, come back as a
+	// domain violation -- a claim about the caller's data that was never tested.
+	if mandatory > 0 && len(applicable) == 0 {
 		v.issues = append(v.issues, Issue{
 			Kind:        IssueKindDomainViolation,
 			AttributeID: attrID,
@@ -330,25 +351,29 @@ func (v *validator) validateAttribute(focusID string, attr scg.Attribute, groupe
 		})
 	}
 
-	for _, rule := range applicable {
-		// Grouped / ungrouped check.
-		if rule.Grouped && !grouped {
+	// Grouped / ungrouped. The applicable rows are ALTERNATIVES, so satisfying
+	// one is enough. Requiring every row made an attribute unwritable whenever
+	// two applicable rows disagreed on Grouped: both violations were reported at
+	// once, and no expression could avoid them.
+	if len(applicable) > 0 {
+		satisfied := false
+		for _, rule := range applicable {
+			if rule.Grouped == grouped {
+				satisfied = true
+				break
+			}
+		}
+		if !satisfied {
+			kind, msg := IssueKindGroupedViolation, "attribute %s must not appear inside a relationship group"
+			if !grouped {
+				kind, msg = IssueKindUngroupedViolation, "attribute %s must appear inside a relationship group"
+			}
 			v.issues = append(v.issues, Issue{
-				Kind:        IssueKindUngroupedViolation,
+				Kind:        kind,
 				AttributeID: attrID,
 				FocusID:     focusID,
-				Message: fmt.Sprintf("attribute %s must appear inside a relationship group",
-					attrID),
-				Path: path,
-			})
-		} else if !rule.Grouped && grouped {
-			v.issues = append(v.issues, Issue{
-				Kind:        IssueKindGroupedViolation,
-				AttributeID: attrID,
-				FocusID:     focusID,
-				Message: fmt.Sprintf("attribute %s must not appear inside a relationship group",
-					attrID),
-				Path: path,
+				Message:     fmt.Sprintf(msg, attrID),
+				Path:        path,
 			})
 		}
 	}
