@@ -13,7 +13,7 @@ import (
 // add cases — never lower it without explaining why in the commit message. The
 // explicit count makes adding or deleting a case file a visible change in the
 // diff instead of a silent loss of coverage.
-const wantTotalCases = 100
+const wantTotalCases = 106
 
 // TestRunAllSuites runs EVERY bundled conformance suite against the bundled
 // fixtures, one subtest per case.

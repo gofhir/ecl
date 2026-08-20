@@ -133,3 +133,18 @@ cases:
   - name: wild pattern matching the whole term
     expression: '<< 404684003 {{ D term = wild: "Diabetes mellitus" }}'
     expectedIds: ["73211009"]
+
+  # Escape sequences must be decoded before the term reaches the provider. The raw
+  # token text keeps the backslashes, so an undecoded term searched for those too.
+  - name: term filter with an escaped quote
+    expression: '<< 404684003 {{ D term = "Myocardial" }}'
+    expectedIds: ["22298006"]
+
+  # A module set has any-of semantics; only the first reference used to survive.
+  - name: module filter with a set
+    expression: '<< 404684003 {{ C moduleId = (900000000000207008 900000000000012004) }}'
+    expectedIds: ["11687002", "22298006", "73211009", "95566004"]
+
+  - name: definition status filter with a token set
+    expression: '<< 404684003 {{ C definitionStatus = (primitive defined) }}'
+    expectedIds: ["11687002", "22298006", "73211009", "95566004"]

@@ -5,7 +5,7 @@
 [![Release](https://img.shields.io/github/v/release/gofhir/ecl)](https://github.com/gofhir/ecl/releases)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-Embeddable parser and evaluator for the SNOMED CT **Expression Constraint Language (ECL) v2.2** in pure Go. Comes with parsers for **SNOMED Compositional Grammar (SCG)** and a **Machine Readable Concept Model (MRCM)** validator, plus a `gofhir-ecl` CLI and a 100-case conformance suite.
+Embeddable parser and evaluator for the SNOMED CT **Expression Constraint Language (ECL) v2.2** in pure Go. Comes with parsers for **SNOMED Compositional Grammar (SCG)** and a **Machine Readable Concept Model (MRCM)** validator, plus a `gofhir-ecl` CLI and a 106-case conformance suite.
 
 ```go
 import "github.com/gofhir/ecl/ecl"
@@ -26,7 +26,7 @@ ECL is the standard query language for SNOMED CT. Until now, evaluating it from 
 - ✅ **SCG** parser + validator
 - ✅ **MRCM** loader + validator (uses ECL evaluator internally)
 - ✅ **SCTID** Verhoeff checksum + partition validation
-- ✅ **100/100** bundled conformance cases pass, all executed by CI
+- ✅ **106/106** bundled conformance cases pass, all executed by CI
 - 📦 Latest release: see [GitHub Releases](https://github.com/gofhir/ecl/releases)
 
 ### Known limitations
@@ -40,6 +40,9 @@ bad data:
 | `{{ D term != … }}`, `{{ D language != … }}`, `{{ D type != … }}` | Negating a description filter is a per-row operation. Expressing it needs negation fields on `DescriptionFilterOpts`, which changes the provider contract. Negated **concept** filters (`{{ C … != … }}`) do work. |
 | `{{ D dialect = en-gb }}` (alias form) | Mapping a dialect alias to a language reference set's SCTID is terminology data; only the international English aliases are universal. Use `{{ D dialectId = 900000000000508004 }}`. |
 | `^[field]` projection | `Set` carries concept IDs only. Use a `{{ M … }}` member filter. |
+| `{{ D id = … }}` | The parser models it, but `DescriptionFilterOpts` has no field to carry the ids to the provider. |
+| A term filter with a SET of terms — `{{ D term = ("a" "b") }}` | Any-of semantics, which `DescriptionFilterOpts.Term` cannot express. A single term, including a multi-word one, works. |
+| An `effectiveTime` filter with a set of values | Same reason: `ConceptFilterOpts` carries one value and one operator. |
 | Cardinality on a reverse clause inside a group | Counting inbound relationships needs a provider signature that preserves multiplicity. |
 | `AttributeDomain.InGroupCardinality` (MRCM) | Loaded and exposed, not yet enforced. |
 
@@ -203,7 +206,7 @@ The fixture is a YAML file describing concepts, parents, descriptions, relations
 
 ```bash
 $ gofhir-ecl conformance
-100 passed, 0 failed, 0 skipped, 100 total
+106 passed, 0 failed, 0 skipped, 106 total
 
 $ gofhir-ecl conformance -filter '^memberOf'
 PASS  ECL v2.2 features (Top, Bottom, AltIdentifier, ^R, MemberOf) :: memberOf refset
@@ -215,7 +218,7 @@ Useful in CI to prove your `DataProvider` implementation matches the spec.
 
 ## Conformance suite
 
-The bundled suite lives in [`ecl/providertest/testdata/`](ecl/providertest/testdata/) and is **embedded in the binary**, so `gofhir-ecl conformance` works from any directory, including after `go install`. It currently covers 100 cases across 9 areas of the spec, including a suite of expressions that must be REJECTED.
+The bundled suite lives in [`ecl/providertest/testdata/`](ecl/providertest/testdata/) and is **embedded in the binary**, so `gofhir-ecl conformance` works from any directory, including after `go install`. It currently covers 106 cases across 9 areas of the spec, including a suite of expressions that must be REJECTED.
 
 | Area | Cases | Spec section |
 |---|---|---|

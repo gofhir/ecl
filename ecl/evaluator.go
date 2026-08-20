@@ -1076,6 +1076,9 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 		if kind, negated := negatedDescriptionFilter(descFilters); negated {
 			return nil, fmt.Errorf("%w: negated description filter (%s) requires row-level negation in the DataProvider", ErrUnsupportedFeature, kind)
 		}
+		if err := unsupportedDescriptionFilter(descFilters); err != nil {
+			return nil, err
+		}
 		opts, matchesNothing, err := buildDescriptionFilterOpts(ctx, descFilters, provider)
 		if err != nil {
 			return nil, err
@@ -1215,25 +1218,45 @@ func conceptClauseOpts(ctx context.Context, f ast.Filter, provider DataProvider)
 		b := x.Value
 		opts.Active = &b
 	case *ast.DefinitionStatusFilter:
-		ids, resolved, err := resolveFilterIDs(ctx, x.Value, provider)
-		if err != nil {
-			return opts, false, fmt.Errorf("evaluating definitionStatus filter: %w", err)
+		// Every value, not just the first: DefinitionStatusIDs is an any-of
+		// slice, so a set is expressible here.
+		for _, val := range x.Values {
+			ids, resolved, err := resolveFilterIDs(ctx, val, provider)
+			if err != nil {
+				return opts, false, fmt.Errorf("evaluating definitionStatus filter: %w", err)
+			}
+			if !resolved {
+				continue
+			}
+			opts.DefinitionStatusIDs = append(opts.DefinitionStatusIDs, ids...)
 		}
-		if x.Value != nil && !resolved {
+		if len(x.Values) > 0 && len(opts.DefinitionStatusIDs) == 0 {
 			return opts, true, nil
 		}
-		opts.DefinitionStatusIDs = ids
 	case *ast.ModuleFilter:
-		ids, resolved, err := resolveFilterIDs(ctx, x.Module, provider)
-		if err != nil {
-			return opts, false, fmt.Errorf("evaluating module filter: %w", err)
+		for _, mod := range x.Modules {
+			ids, resolved, err := resolveFilterIDs(ctx, mod, provider)
+			if err != nil {
+				return opts, false, fmt.Errorf("evaluating module filter: %w", err)
+			}
+			if !resolved {
+				continue
+			}
+			opts.ModuleIDs = append(opts.ModuleIDs, ids...)
 		}
-		if x.Module != nil && !resolved {
+		if len(x.Modules) > 0 && len(opts.ModuleIDs) == 0 {
 			return opts, true, nil
 		}
-		opts.ModuleIDs = ids
 	case *ast.EffectiveTimeFilter:
-		opts.EffectiveTime = x.Value
+		// ConceptFilterOpts carries one time value and one operator, so a set
+		// cannot be passed to the provider. Report it rather than comparing
+		// against the first value only.
+		if len(x.Values) > 1 {
+			return opts, false, fmt.Errorf("%w: an effectiveTime filter with %d values has any-of semantics, which ConceptFilterOpts cannot express", ErrUnsupportedFeature, len(x.Values))
+		}
+		if len(x.Values) == 1 {
+			opts.EffectiveTime = x.Values[0]
+		}
 		opts.EffectiveTimeOp = x.Op
 	}
 	return opts, false, nil
@@ -1276,7 +1299,8 @@ func resolveFilterIDs(ctx context.Context, e ast.Expression, provider DataProvid
 func categorizeFilters(filters []ast.Filter) (desc, concept, member []ast.Filter) {
 	for _, f := range filters {
 		switch f.(type) {
-		case *ast.TermFilter, *ast.TypeFilter, *ast.LanguageFilter, *ast.DialectFilter:
+		case *ast.TermFilter, *ast.TypeFilter, *ast.LanguageFilter, *ast.DialectFilter,
+			*ast.DescriptionIDFilter:
 			desc = append(desc, f)
 		case *ast.DefinitionStatusFilter:
 			concept = append(concept, f)
@@ -1318,6 +1342,27 @@ func negatedDescriptionFilter(filters []ast.Filter) (string, bool) {
 	return "", false
 }
 
+// unsupportedDescriptionFilter reports the description filter forms that
+// DescriptionFilterOpts cannot express.
+//
+// The parser now models all of them, so the alternative would be to build Opts
+// that silently drop part of the constraint — which is how a description-id
+// filter used to widen a query to every descendant. Expressing them needs new
+// Opts fields, i.e. a provider contract change.
+func unsupportedDescriptionFilter(filters []ast.Filter) error {
+	for _, f := range filters {
+		switch x := f.(type) {
+		case *ast.DescriptionIDFilter:
+			return fmt.Errorf("%w: description id filter needs a DescriptionFilterOpts field to pass the ids to the provider", ErrUnsupportedFeature)
+		case *ast.TermFilter:
+			if len(x.Terms) > 1 {
+				return fmt.Errorf("%w: a term filter with %d terms has any-of semantics, which DescriptionFilterOpts.Term cannot express", ErrUnsupportedFeature, len(x.Terms))
+			}
+		}
+	}
+	return nil
+}
+
 // buildDescriptionFilterOpts accumulates description filter clauses into a
 // single DescriptionFilterOpts. Multiple clauses of the same kind are
 // simplified by taking the last one (rarely seen in practice).
@@ -1329,9 +1374,13 @@ func buildDescriptionFilterOpts(ctx context.Context, filters []ast.Filter, provi
 	for _, f := range filters {
 		switch x := f.(type) {
 		case *ast.TermFilter:
-			opts.Term = x.Term
-			if x.MatchType != "" {
-				opts.MatchType = x.MatchType
+			// unsupportedDescriptionFilter has already rejected a set, so there
+			// is exactly one term here.
+			if len(x.Terms) > 0 {
+				opts.Term = x.Terms[0].Text
+				if mt := x.Terms[0].MatchType; mt != "" {
+					opts.MatchType = mt
+				}
 			}
 		case *ast.TypeFilter:
 			// Collect all type SCTIDs from the filter (any-of semantics).

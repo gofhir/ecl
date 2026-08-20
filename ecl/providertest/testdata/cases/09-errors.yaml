@@ -82,3 +82,19 @@ cases:
   - name: dialect alias filter is reported as unsupported
     expression: "<< 404684003 {{ D dialect = en-gb }}"
     expectError: true
+
+  # The parser now models these, but DescriptionFilterOpts cannot carry them to
+  # the provider. Reporting beats building Opts that silently drop part of the
+  # constraint -- which is how the description id filter used to widen a query to
+  # every descendant.
+  - name: description id filter is reported as unsupported
+    expression: "< 404684003 {{ D id = 123456789012 }}"
+    expectError: true
+
+  - name: term filter set is reported as unsupported
+    expression: '<< 404684003 {{ D term = ("heart" "attack") }}'
+    expectError: true
+
+  - name: effectiveTime set is reported as unsupported
+    expression: '<< 404684003 {{ C effectiveTime = ("20240131" "20230731") }}'
+    expectError: true

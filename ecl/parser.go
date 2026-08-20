@@ -431,57 +431,65 @@ func (v *astBuilder) buildDescriptionFilterClauses(fc grammar.IDescriptionfilter
 	if !ok {
 		return nil
 	}
+
 	var out []ast.Filter
 	for _, df := range concrete.AllDescriptionfilter() {
 		d, ok := df.(*grammar.DescriptionfilterContext)
 		if !ok {
 			continue
 		}
-		if c := d.Termfilter(); c != nil {
-			if f := v.buildTermFilter(c); f != nil {
+		// One entry per sub-rule of `descriptionfilter`. A table rather than a
+		// chain of ifs so the set of handled branches is visible at a glance:
+		// every sub-rule the grammar defines must appear here, or its clause
+		// disappears from the AST and the query silently widens.
+		for _, branch := range []struct {
+			present bool
+			build   func() ast.Filter
+		}{
+			{d.Termfilter() != nil, func() ast.Filter { return v.buildTermFilter(d.Termfilter()) }},
+			{d.Typefilter() != nil, func() ast.Filter { return v.buildTypeFilter(d.Typefilter()) }},
+			{d.Languagefilter() != nil, func() ast.Filter { return v.buildLanguageFilter(d.Languagefilter()) }},
+			{d.Dialectfilter() != nil, func() ast.Filter { return v.buildDialectFilter(d.Dialectfilter()) }},
+			{d.Activefilter() != nil, func() ast.Filter { return v.buildActiveFilter(d.Activefilter()) }},
+			{d.Modulefilter() != nil, func() ast.Filter { return v.buildModuleFilter(d.Modulefilter()) }},
+			{d.Effectivetimefilter() != nil, func() ast.Filter { return v.buildEffectiveTimeFilter(d.Effectivetimefilter()) }},
+			{d.Descriptionidfilter() != nil, func() ast.Filter { return v.buildDescriptionIDFilter(d.Descriptionidfilter()) }},
+		} {
+			if !branch.present {
+				continue
+			}
+			if f := branch.build(); f != nil && !isNilFilter(f) {
 				out = append(out, f)
 			}
-			continue
+			break
 		}
-		if c := d.Typefilter(); c != nil {
-			if f := v.buildTypeFilter(c); f != nil {
-				out = append(out, f)
-			}
-			continue
-		}
-		if c := d.Languagefilter(); c != nil {
-			if f := v.buildLanguageFilter(c); f != nil {
-				out = append(out, f)
-			}
-			continue
-		}
-		if c := d.Dialectfilter(); c != nil {
-			if f := v.buildDialectFilter(c); f != nil {
-				out = append(out, f)
-			}
-			continue
-		}
-		if c := d.Activefilter(); c != nil {
-			if f := v.buildActiveFilter(c); f != nil {
-				out = append(out, f)
-			}
-			continue
-		}
-		if c := d.Modulefilter(); c != nil {
-			if f := v.buildModuleFilter(c); f != nil {
-				out = append(out, f)
-			}
-			continue
-		}
-		if c := d.Effectivetimefilter(); c != nil {
-			if f := v.buildEffectiveTimeFilter(c); f != nil {
-				out = append(out, f)
-			}
-			continue
-		}
-		// descriptionidfilter not modeled — skip.
 	}
 	return out
+}
+
+// isNilFilter reports whether f is a typed nil, which a builder returns when the
+// clause carried nothing usable. Appending it would put a nil-valued interface in
+// the filter list and panic later.
+func isNilFilter(f ast.Filter) bool {
+	switch x := f.(type) {
+	case *ast.TermFilter:
+		return x == nil
+	case *ast.TypeFilter:
+		return x == nil
+	case *ast.LanguageFilter:
+		return x == nil
+	case *ast.DialectFilter:
+		return x == nil
+	case *ast.ActiveFilter:
+		return x == nil
+	case *ast.ModuleFilter:
+		return x == nil
+	case *ast.EffectiveTimeFilter:
+		return x == nil
+	case *ast.DescriptionIDFilter:
+		return x == nil
+	}
+	return false
 }
 
 // buildConceptFilterClauses extracts typed clauses from a conceptfilterconstraint.
@@ -581,18 +589,32 @@ func (v *astBuilder) buildTermFilter(ctx grammar.ITermfilterContext) *ast.TermFi
 	if concrete.Stringcomparisonoperator() != nil {
 		op = v.extractComparisonOp(concrete.Stringcomparisonoperator().GetText())
 	}
-	var (
-		term      string
-		matchType = "match"
-	)
+	var terms []ast.SearchTerm
 	if c := concrete.Typedsearchterm(); c != nil {
-		term, matchType = extractTypedSearchTerm(c)
-	} else if c := concrete.Typedsearchtermset(); c != nil {
-		// Take the first term in the set; multi-term sets are treated as the
-		// first term for now (evaluator documents the simplification).
-		term = stripWrappingQuotes(c.GetText())
+		terms = append(terms, searchTermOf(c))
+	} else if set, ok := concrete.Typedsearchtermset().(*grammar.TypedsearchtermsetContext); ok && set != nil {
+		// A set has any-of semantics and each member declares its own search
+		// style. Taking GetText() of the whole set used to produce one "term"
+		// containing the parentheses and the inner quotes, which matched nothing.
+		for _, tst := range set.AllTypedsearchterm() {
+			terms = append(terms, searchTermOf(tst))
+		}
 	}
-	return &ast.TermFilter{Op: op, Term: term, MatchType: matchType}
+	if len(terms) == 0 {
+		return nil
+	}
+
+	tf := &ast.TermFilter{Op: op, Terms: terms}
+	// Deprecated scalars, kept populated for readers written against v1.1.
+	tf.Term = terms[0].Text           //nolint:staticcheck // deprecated field kept populated for v1 readers
+	tf.MatchType = terms[0].MatchType //nolint:staticcheck // deprecated field kept populated for v1 readers
+	return tf
+}
+
+// searchTermOf extracts one typedsearchterm with its search style.
+func searchTermOf(ctx grammar.ITypedsearchtermContext) ast.SearchTerm {
+	text, matchType := extractTypedSearchTerm(ctx)
+	return ast.SearchTerm{Text: text, MatchType: matchType}
 }
 
 // extractTypedSearchTerm returns the raw search term and its match-type
@@ -602,19 +624,60 @@ func extractTypedSearchTerm(ctx grammar.ITypedsearchtermContext) (term, matchTyp
 	matchType = "match"
 	concrete, ok := ctx.(*grammar.TypedsearchtermContext)
 	if !ok {
-		return stripWrappingQuotes(ctx.GetText()), matchType
+		return unescapeECLString(stripWrappingQuotes(ctx.GetText()), false), matchType
 	}
 	if s := concrete.Matchsearchtermset(); s != nil {
-		return stripWrappingQuotes(s.GetText()), "match"
+		return unescapeECLString(stripWrappingQuotes(s.GetText()), false), "match"
 	}
 	if s := concrete.Wildsearchtermset(); s != nil {
-		return stripWrappingQuotes(s.GetText()), "wild"
+		return unescapeECLString(stripWrappingQuotes(s.GetText()), true), "wild"
 	}
-	return stripWrappingQuotes(concrete.GetText()), matchType
+	return unescapeECLString(stripWrappingQuotes(concrete.GetText()), false), matchType
 }
 
-// stripWrappingQuotes removes a single layer of surrounding " quotes if present
-// and trims whitespace that commonly surrounds the quoted content.
+// unescapeECLString decodes the escape sequences the ECL grammar defines:
+//
+//	escapedchar     : (bs qm) | (bs bs)              -- \" and \\
+//	escapedwildchar : (bs qm) | (bs bs) | (bs star)  -- also \*
+//
+// The raw token text keeps the backslashes, so a term that reached the provider
+// undecoded never matched: `{{ term = "a\"b" }}` searched for the six characters
+// a \ " b rather than the three a " b.
+//
+// Note that keepWildEscape leaves `\*` untouched for a wild pattern: decoding it
+// to a bare asterisk would turn a LITERAL asterisk into a wildcard, so the glob
+// matcher is the one responsible for reading `\*` as a literal.
+func unescapeECLString(s string, keepWildEscape bool) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 >= len(s) {
+			b.WriteByte(s[i])
+			continue
+		}
+		switch s[i+1] {
+		case '"', '\\':
+			b.WriteByte(s[i+1])
+			i++
+		case '*':
+			if keepWildEscape {
+				b.WriteString(`\*`)
+			} else {
+				b.WriteByte('*')
+			}
+			i++
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
+
+// stripWrappingQuotes removes a single layer of surrounding quotes if present and
+// trims the whitespace that commonly surrounds the quoted content.
 func stripWrappingQuotes(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
@@ -816,6 +879,35 @@ func (v *astBuilder) buildAcceptability(as grammar.IAcceptabilitysetContext) ast
 	return nil
 }
 
+// buildDescriptionIDFilter builds an *ast.DescriptionIDFilter.
+//
+// This branch used to be skipped without emitting anything, and when the filter
+// was a constraint's only clause the ast.Filtered node was never created at all:
+// `< 404684003 {{ D id = 123456789012 }}` produced an AST identical to
+// `< 404684003` and the query silently returned every descendant.
+func (v *astBuilder) buildDescriptionIDFilter(ctx grammar.IDescriptionidfilterContext) *ast.DescriptionIDFilter {
+	concrete, ok := ctx.(*grammar.DescriptionidfilterContext)
+	if !ok {
+		return nil
+	}
+	op := "="
+	if c := concrete.Idcomparisonoperator(); c != nil {
+		op = v.extractComparisonOp(c.GetText())
+	}
+	f := &ast.DescriptionIDFilter{Op: op}
+	if id := concrete.Descriptionid(); id != nil {
+		f.IDs = append(f.IDs, strings.TrimSpace(id.GetText()))
+	} else if set, ok := concrete.Descriptionidset().(*grammar.DescriptionidsetContext); ok && set != nil {
+		for _, id := range set.AllDescriptionid() {
+			f.IDs = append(f.IDs, strings.TrimSpace(id.GetText()))
+		}
+	}
+	if len(f.IDs) == 0 {
+		return nil
+	}
+	return f
+}
+
 func (v *astBuilder) buildActiveFilter(ctx grammar.IActivefilterContext) *ast.ActiveFilter {
 	concrete, ok := ctx.(*grammar.ActivefilterContext)
 	if !ok {
@@ -858,17 +950,23 @@ func (v *astBuilder) buildModuleFilter(ctx grammar.IModulefilterContext) *ast.Mo
 	}
 	mf := &ast.ModuleFilter{Op: op}
 	if sc := concrete.Subexpressionconstraint(); sc != nil {
-		mf.Module = v.visitExpr(sc)
-	} else if crs := concrete.Eclconceptreferenceset(); crs != nil {
-		// Pick the first ref from the set; multi-module sets represented as
-		// a single module is a simplification (most ECL uses single module).
-		if crsCtx, ok := crs.(*grammar.EclconceptreferencesetContext); ok {
-			refs := crsCtx.AllEclconceptreference()
-			if len(refs) > 0 {
-				mf.Module = v.visitExpr(refs[0])
+		if expr := v.visitExpr(sc); expr != nil {
+			mf.Modules = append(mf.Modules, expr)
+		}
+	} else if crs, ok := concrete.Eclconceptreferenceset().(*grammar.EclconceptreferencesetContext); ok && crs != nil {
+		// The set has any-of semantics. Only the first reference used to be
+		// kept, so `moduleId = (A B)` silently became `moduleId = A`.
+		for _, ref := range crs.AllEclconceptreference() {
+			if expr := v.visitExpr(ref); expr != nil {
+				mf.Modules = append(mf.Modules, expr)
 			}
 		}
 	}
+	if len(mf.Modules) == 0 {
+		return nil
+	}
+	// Deprecated scalar, kept populated for readers written against v1.1.
+	mf.Module = mf.Modules[0] //nolint:staticcheck // deprecated field kept populated for v1 readers
 	return mf
 }
 
@@ -881,13 +979,22 @@ func (v *astBuilder) buildEffectiveTimeFilter(ctx grammar.IEffectivetimefilterCo
 	if concrete.Timecomparisonoperator() != nil {
 		op = concrete.Timecomparisonoperator().GetText()
 	}
-	var value string
+	ef := &ast.EffectiveTimeFilter{Op: op}
 	if tv := concrete.Timevalue(); tv != nil {
-		value = stripWrappingQuotes(tv.GetText())
-	} else if tvs := concrete.Timevalueset(); tvs != nil {
-		value = stripWrappingQuotes(tvs.GetText())
+		ef.Values = append(ef.Values, stripWrappingQuotes(tv.GetText()))
+	} else if tvs, ok := concrete.Timevalueset().(*grammar.TimevaluesetContext); ok && tvs != nil {
+		// GetText() of the whole set used to be stored as ONE value, parentheses
+		// and inner quotes included, which no provider could match.
+		for _, tv := range tvs.AllTimevalue() {
+			ef.Values = append(ef.Values, stripWrappingQuotes(tv.GetText()))
+		}
 	}
-	return &ast.EffectiveTimeFilter{Op: op, Value: value}
+	if len(ef.Values) == 0 {
+		return nil
+	}
+	// Deprecated scalar, kept populated for readers written against v1.1.
+	ef.Value = ef.Values[0] //nolint:staticcheck // deprecated field kept populated for v1 readers
+	return ef
 }
 
 func (v *astBuilder) buildDefinitionStatusFilter(ctx grammar.IDefinitionstatusfilterContext) *ast.DefinitionStatusFilter {
@@ -903,15 +1010,21 @@ func (v *astBuilder) buildDefinitionStatusFilter(ctx grammar.IDefinitionstatusfi
 			}
 			f := &ast.DefinitionStatusFilter{Op: op}
 			if sc := idCtx.Subexpressionconstraint(); sc != nil {
-				f.Value = v.visitExpr(sc)
-			} else if crs := idCtx.Eclconceptreferenceset(); crs != nil {
-				if crsCtx, ok := crs.(*grammar.EclconceptreferencesetContext); ok {
-					refs := crsCtx.AllEclconceptreference()
-					if len(refs) > 0 {
-						f.Value = v.visitExpr(refs[0])
+				if expr := v.visitExpr(sc); expr != nil {
+					f.Values = append(f.Values, expr)
+				}
+			} else if crs, ok := idCtx.Eclconceptreferenceset().(*grammar.EclconceptreferencesetContext); ok && crs != nil {
+				// Any-of. Only the first reference used to survive.
+				for _, ref := range crs.AllEclconceptreference() {
+					if expr := v.visitExpr(ref); expr != nil {
+						f.Values = append(f.Values, expr)
 					}
 				}
 			}
+			if len(f.Values) == 0 {
+				return nil
+			}
+			f.Value = f.Values[0] //nolint:staticcheck // deprecated field kept populated for v1 readers
 			return f
 		}
 	}
@@ -928,25 +1041,28 @@ func (v *astBuilder) buildDefinitionStatusFilter(ctx grammar.IDefinitionstatusfi
 					return
 				}
 				var id string
-				if dt.Primitivetoken() != nil {
+				switch {
+				case dt.Primitivetoken() != nil:
 					id = "900000000000074008" // primitive
-				} else if dt.Definedtoken() != nil {
+				case dt.Definedtoken() != nil:
 					id = "900000000000073002" // defined
 				}
 				if id != "" {
-					f.Value = &ast.ConceptRef{ID: id}
+					f.Values = append(f.Values, &ast.ConceptRef{ID: id})
 				}
 			}
 			if single := tCtx.Definitionstatustoken(); single != nil {
 				addToken(single)
-			} else if set := tCtx.Definitionstatustokenset(); set != nil {
-				if setCtx, ok := set.(*grammar.DefinitionstatustokensetContext); ok {
-					toks := setCtx.AllDefinitionstatustoken()
-					if len(toks) > 0 {
-						addToken(toks[0])
-					}
+			} else if set, ok := tCtx.Definitionstatustokenset().(*grammar.DefinitionstatustokensetContext); ok && set != nil {
+				// `definitionStatus = (primitive defined)` kept only the first.
+				for _, tok := range set.AllDefinitionstatustoken() {
+					addToken(tok)
 				}
 			}
+			if len(f.Values) == 0 {
+				return nil
+			}
+			f.Value = f.Values[0] //nolint:staticcheck // deprecated field kept populated for v1 readers
 			return f
 		}
 	}

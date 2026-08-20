@@ -194,17 +194,33 @@ type Filter interface {
 	filterKind() string
 }
 
+// SearchTerm is one search term of a term filter, with the search style the
+// grammar declared for it.
+type SearchTerm struct {
+	// Text is the term with its escape sequences decoded, except that a wild
+	// term keeps `\*` as-is so a literal asterisk stays distinguishable from a
+	// wildcard.
+	Text string
+
+	// MatchType is "match" (word match, the default) or "wild" (glob).
+	MatchType string
+}
+
 // TermFilter represents a description term filter ({{ term = "..." }}).
 //
-// MatchType captures the search style declared by the grammar:
-//   - "match" (default): substring/word match
-//   - "wild":            glob-style wildcard match
-//   - "regex":           regular-expression match (extension; not in the
-//     official grammar but reserved for implementations that support it)
+// The grammar allows a SET of terms — `{{ term = ("heart" "attack") }}` — with
+// any-of semantics, and each member may declare its own search style. Terms
+// carries them all.
 type TermFilter struct {
-	Op        string // "=" or "!="
-	Term      string
-	MatchType string // "match", "wild", "regex"
+	Op string // "=" or "!="
+
+	// Terms holds every search term, with any-of semantics.
+	Terms []SearchTerm
+
+	// Deprecated: use Terms. Holds the first term, and cannot represent a set.
+	Term string
+	// Deprecated: use Terms. Holds the first term's match type.
+	MatchType string
 }
 
 // TypeFilter represents a description type filter.
@@ -238,13 +254,24 @@ type ActiveFilter struct {
 
 // ModuleFilter represents a module filter.
 type ModuleFilter struct {
-	Op     string
+	Op string
+
+	// Modules holds every module the filter names, with any-of semantics. The
+	// grammar allows a set: `{{ C moduleId = (900000000000207008 900000000000012004) }}`.
+	Modules []Expression
+
+	// Deprecated: use Modules. Holds the first module only.
 	Module Expression
 }
 
 // EffectiveTimeFilter represents an effective time filter.
 type EffectiveTimeFilter struct {
-	Op    string
+	Op string
+
+	// Values holds every time value the filter names, with any-of semantics.
+	Values []string
+
+	// Deprecated: use Values. Holds the first value only.
 	Value string
 }
 
@@ -259,8 +286,21 @@ type ConceptEffectiveTimeFilter = EffectiveTimeFilter
 
 // DefinitionStatusFilter represents a concept definition status filter.
 type DefinitionStatusFilter struct {
-	Op    string
+	Op string
+
+	// Values holds every definition status the filter names, with any-of
+	// semantics.
+	Values []Expression
+
+	// Deprecated: use Values. Holds the first value only.
 	Value Expression
+}
+
+// DescriptionIDFilter represents a description identifier filter
+// ({{ D id = 123456789012 }}).
+type DescriptionIDFilter struct {
+	Op  string // "=" or "!="
+	IDs []string
 }
 
 // MemberFieldFilter represents a member field filter in member filter constraints.
@@ -327,7 +367,9 @@ func (*IntegerValue) eclNode()           {}
 func (*DecimalValue) eclNode()           {}
 func (*BooleanValue) eclNode()           {}
 func (*Filtered) eclNode()               {}
+func (*SearchTerm) eclNode()             {}
 func (*TermFilter) eclNode()             {}
+func (*DescriptionIDFilter) eclNode()    {}
 func (*TypeFilter) eclNode()             {}
 func (*LanguageFilter) eclNode()         {}
 func (*DialectFilter) eclNode()          {}
@@ -345,6 +387,7 @@ func (*Bottom) eclNode()                 {}
 // --- filterKind() implementations ---.
 
 func (*TermFilter) filterKind() string             { return "term" }
+func (*DescriptionIDFilter) filterKind() string    { return "descriptionId" }
 func (*TypeFilter) filterKind() string             { return "type" }
 func (*LanguageFilter) filterKind() string         { return "language" }
 func (*DialectFilter) filterKind() string          { return "dialect" }

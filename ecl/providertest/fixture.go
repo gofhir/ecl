@@ -472,20 +472,20 @@ func wordPrefixMatch(value, lowerTerm string) bool {
 // which only checked HasPrefix -- so `wild: "Diabet"` matched
 // "Diabetes mellitus" even though the pattern asks for an exact match.
 func globMatch(s, pattern string) bool {
-	parts := strings.Split(pattern, "*")
-	if len(parts) == 1 {
-		return s == pattern
+	segments := splitGlob(pattern)
+	if len(segments) == 1 {
+		return s == segments[0]
 	}
 
 	// First segment is anchored at the start, last at the end, the rest match in
 	// order anywhere between.
-	if !strings.HasPrefix(s, parts[0]) {
+	if !strings.HasPrefix(s, segments[0]) {
 		return false
 	}
-	s = s[len(parts[0]):]
+	s = s[len(segments[0]):]
 
-	last := parts[len(parts)-1]
-	for _, part := range parts[1 : len(parts)-1] {
+	last := segments[len(segments)-1]
+	for _, part := range segments[1 : len(segments)-1] {
 		idx := strings.Index(s, part)
 		if idx < 0 {
 			return false
@@ -497,6 +497,32 @@ func globMatch(s, pattern string) bool {
 		return false
 	}
 	return strings.HasSuffix(s, last)
+}
+
+// splitGlob splits a wild pattern on its unescaped '*' separators, decoding `\*`
+// into a literal asterisk inside the segments.
+//
+// The parser deliberately leaves `\*` encoded so a literal asterisk stays
+// distinguishable from a wildcard; splitting on a plain "*" would have turned
+// every escaped asterisk into one.
+func splitGlob(pattern string) []string {
+	var (
+		segments []string
+		cur      strings.Builder
+	)
+	for i := 0; i < len(pattern); i++ {
+		switch {
+		case pattern[i] == '\\' && i+1 < len(pattern) && pattern[i+1] == '*':
+			cur.WriteByte('*') // escaped: a literal asterisk
+			i++
+		case pattern[i] == '*':
+			segments = append(segments, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(pattern[i])
+		}
+	}
+	return append(segments, cur.String())
 }
 
 func (p *inMemoryProvider) FilterConcepts(_ context.Context, concepts ecl.Set, opts ecl.ConceptFilterOpts) (ecl.Set, error) {
