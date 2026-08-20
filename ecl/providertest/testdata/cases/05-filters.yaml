@@ -136,9 +136,11 @@ cases:
 
   # Escape sequences must be decoded before the term reaches the provider. The raw
   # token text keeps the backslashes, so an undecoded term searched for those too.
+  # A real escape: the search term is `"brittle"`, quotes included. Undecoded, the
+  # provider received a backslash too and matched nothing.
   - name: term filter with an escaped quote
-    expression: '<< 404684003 {{ D term = "Myocardial" }}'
-    expectedIds: ["22298006"]
+    expression: '<< 404684003 {{ D term = "\"brittle\"" }}'
+    expectedIds: ["11687002"]
 
   # A module set has any-of semantics; only the first reference used to survive.
   - name: module filter with a set
@@ -158,4 +160,19 @@ cases:
 
   - name: dialect combined with a term clause
     expression: '<< 138875005 {{ D term = "Myocardial", dialectId = 900000000000508004 }}'
+    expectedIds: ["22298006"]
+
+  # The acceptability token form. Reading only the SCTID set dropped it entirely,
+  # and an empty AcceptabilityIDs means "any" to the provider, so the query
+  # silently widened instead of narrowing.
+  - name: dialect filter with an acceptability token
+    expression: "<< 138875005 {{ D dialectId = 900000000000509007 (prefer) }}"
+    expectedIds: ["73211009"]
+
+  - name: dialect filter with the equivalent acceptability SCTID
+    expression: "<< 138875005 {{ D dialectId = 900000000000509007 (900000000000548007) }}"
+    expectedIds: ["73211009"]
+
+  - name: dialect filter with the acceptable token
+    expression: "<< 138875005 {{ D dialectId = 900000000000509007 (accept) }}"
     expectedIds: ["22298006"]

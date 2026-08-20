@@ -38,9 +38,12 @@ func Parse(input string) (ast.Expression, error) {
 	// The message quotes the remaining INPUT, not the token text: the ECL
 	// lexer is character-level, so GetText() would be just "G" here.
 	if tok := stream.LT(1); tok != nil && tok.GetTokenType() != antlr.TokenEOF {
+		// GetStart is a RUNE index, not a byte offset, so slicing the string
+		// directly cut multi-byte characters in half and produced mojibake:
+		// `404684003 |ááá| GARBAGE` reported trailing input "\xa1| GARBAGE".
 		rest := input
-		if start := tok.GetStart(); start >= 0 && start < len(input) {
-			rest = input[start:]
+		if runes := []rune(input); tok.GetStart() >= 0 && tok.GetStart() < len(runes) {
+			rest = string(runes[tok.GetStart():])
 		}
 		errListener.errs = append(errListener.errs, SyntaxError{
 			Line:   tok.GetLine(),
@@ -915,7 +918,32 @@ func (v *astBuilder) buildAcceptabilities(as grammar.IAcceptabilitysetContext) [
 			}
 		}
 	}
+	// The token form. Handling only the SCTID set above dropped `(prefer)` and
+	// `(accept)` entirely, and an empty AcceptabilityIDs means "any acceptability"
+	// to the provider — so the query silently widened instead of narrowing.
+	if ts, ok := concrete.Acceptabilitytokenset().(*grammar.AcceptabilitytokensetContext); ok && ts != nil {
+		for _, tok := range ts.AllAcceptabilitytoken() {
+			if id := acceptabilityTokenID(tok); id != "" {
+				out = append(out, &ast.ConceptRef{ID: id})
+			}
+		}
+	}
 	return out
+}
+
+// acceptabilityTokenID maps an acceptability token to its well-known SCTID.
+func acceptabilityTokenID(tok grammar.IAcceptabilitytokenContext) string {
+	concrete, ok := tok.(*grammar.AcceptabilitytokenContext)
+	if !ok {
+		return ""
+	}
+	switch {
+	case concrete.Preferred() != nil:
+		return "900000000000548007" // preferred
+	case concrete.Acceptable() != nil:
+		return "900000000000549004" // acceptable
+	}
+	return ""
 }
 
 // buildDescriptionIDFilter builds an *ast.DescriptionIDFilter.

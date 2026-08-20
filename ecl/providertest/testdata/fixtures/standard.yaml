@@ -71,6 +71,8 @@ descriptions:
   - {concept: "22298006",  language: "es", typeId: "900000000000013009", value: "Infarto de miocardio"}
   - {concept: "73211009",  language: "en", typeId: "900000000000003001", value: "Diabetes mellitus"}
   - {concept: "11687002",  language: "en", typeId: "900000000000003001", value: "Type 1 diabetes mellitus"}
+  # Carries a literal double quote so a term filter can exercise the \" escape.
+  - {concept: "11687002",  language: "en", typeId: "900000000000013009", value: 'Type 1 "brittle" diabetes'}
   - {concept: "64572001",  language: "en", typeId: "900000000000003001", value: "Disease"}
   - {concept: "95566004",  language: "en", typeId: "900000000000003001", value: "Hypertensive disorder"}
 

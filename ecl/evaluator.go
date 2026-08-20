@@ -381,7 +381,13 @@ func applyRefinement(ctx context.Context, focus Set, ref *ast.Refinement, provid
 	// Evaluating the disjuncts against `result` instead of `focus` is what made
 	// `A OR B` behave as `focus ∩ A ∩ B`, i.e. usually the empty set.
 	if len(ref.Disjunction) > 0 {
-		acc := result
+		// Start from `result` only when a first operand actually filtered it.
+		// Seeding with the unfiltered focus made a hand-built
+		// Refinement{Disjunction: ...} a no-op that returned everything.
+		acc := NewSet()
+		if ref.AttrSet != nil || len(ref.Ungrouped) > 0 || len(ref.Groups) > 0 || ref.Nested != nil || len(ref.Conjunction) > 0 { //nolint:staticcheck // deprecated field read for hand-built ASTs
+			acc = result
+		}
 		for _, sub := range ref.Disjunction {
 			subResult, err := applyRefinement(ctx, focus, sub, provider)
 			if err != nil {
@@ -475,12 +481,33 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 	}
 
 	// Reverse attribute (R flag): "keep concepts in focus that appear as the
-	// TARGET of a relationship where source ∈ valueSet and type ∈ typeIDs".
-	// Implementation: compute the set of concepts that ARE such targets (using
-	// RelationshipTargets with the value set as sources), then intersect with
-	// focus. The "!=" semantics (no such inbound relationship) are the
-	// complement within the focus.
+	// TARGET of a relationship whose source is in valueSet and type is in
+	// typeIDs". Implemented by asking the provider for those targets and
+	// intersecting with the focus.
+	//
+	// Two forms cannot be answered that way, because RelationshipTargets returns
+	// a Set and so loses how MANY inbound relationships each concept has, and of
+	// which types:
+	//
+	//   - a cardinality, which needs the count;
+	//   - "!=", which per the spec selects concepts having an inbound
+	//     relationship OF THAT TYPE from some other source, and so needs the
+	//     per-type total.
+	//
+	// Both used to be answered anyway, and wrongly: `[0..0] R a = x` returned
+	// exactly the concepts that DO have the relationship, and `R a != x` kept the
+	// "does not have it at all" reading that the forward path abandoned. Report
+	// them instead, as the group-level analog already does.
 	if attr.Reverse {
+		if attr.Cardinality != nil {
+			return nil, fmt.Errorf("%w: cardinality [%d..%s] on a reverse attribute needs a provider method that preserves inbound multiplicity",
+				ErrUnsupportedFeature, attr.Cardinality.Min, cardinalityMaxText(attr.Cardinality))
+		}
+		if attr.Op == "!=" {
+			return nil, fmt.Errorf("%w: %q on a reverse attribute needs the per-type inbound total, which RelationshipTargets does not return",
+				ErrUnsupportedFeature, attr.Op)
+		}
+
 		var inbound Set
 		var err error
 		if valueIsAny {
@@ -491,10 +518,7 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 		if err != nil {
 			return nil, fmt.Errorf("%w: reverse attribute lookup: %w", ErrProvider, err)
 		}
-		if attr.Op == "=" {
-			return focus.Intersect(inbound), nil
-		}
-		return focus.Minus(inbound), nil
+		return focus.Intersect(nonNil(inbound)), nil
 	}
 
 	// Forward attribute: iterate per-concept via PropertiesByGroup.
@@ -608,14 +632,8 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 		}
 	}
 
-	// The reverse path cannot count matching groups: it walks the groups of the
-	// SOURCE concepts, so any count from it would be counting someone else's
-	// groups. Applying a cardinality to that 1/0 pseudo-count answered `[2..*]`
-	// with the empty set and `[0..0]` with everything -- silently wrong, where
-	// the rest of this package reports what it cannot do.
-	if hasReverse && grp.Cardinality != nil {
-		return nil, fmt.Errorf("%w: group cardinality [%d..%s] combined with a reverse attribute needs a provider method that preserves inbound multiplicity",
-			ErrUnsupportedFeature, grp.Cardinality.Min, cardinalityMaxText(grp.Cardinality))
+	if err := checkReverseGroupSupport(clauses, tree, grp.Cardinality); err != nil {
+		return nil, err
 	}
 
 	out := newMapSet()
@@ -704,6 +722,62 @@ const (
 	concreteKindString  = "string"
 	concreteKindBoolean = "boolean"
 )
+
+// checkReverseGroupSupport reports the group forms the reverse path cannot answer.
+//
+// The reverse path walks the groups of the SOURCE concepts using the FLATTENED
+// clause list, which costs it three things. Each used to be answered anyway, with
+// a wrong result rather than an error:
+//
+//   - "!=": groupSatisfiesClausesWithReverse skips the complement-within-type
+//     step for reverse clauses, so `{ R a != x }` behaved exactly like
+//     `{ R a = x }`.
+//   - a disjunction: the flattened list can only be conjoined, so
+//     `{ R a = x OR R b = y }` returned the empty set instead of the union.
+//   - a group cardinality: the path can only report 1 or 0, and it counts the
+//     source concepts' groups rather than the focus concept's, so `[2..*]`
+//     returned the empty set and `[0..0]` returned everything.
+func checkReverseGroupSupport(clauses []attrClause, tree *clauseSet, cardinality *ast.Cardinality) error {
+	hasReverse := false
+	for _, c := range clauses {
+		if !c.reverse {
+			continue
+		}
+		hasReverse = true
+		if c.op == "!=" {
+			return fmt.Errorf("%w: %q on a reverse attribute inside a group needs the per-type inbound total",
+				ErrUnsupportedFeature, c.op)
+		}
+	}
+	if !hasReverse {
+		return nil
+	}
+	if containsDisjunction(tree) {
+		return fmt.Errorf("%w: a disjunction inside an attribute group containing a reverse attribute is evaluated on the flattened clause list, which cannot express OR",
+			ErrUnsupportedFeature)
+	}
+	if cardinality != nil {
+		return fmt.Errorf("%w: group cardinality [%d..%s] combined with a reverse attribute needs a provider method that preserves inbound multiplicity",
+			ErrUnsupportedFeature, cardinality.Min, cardinalityMaxText(cardinality))
+	}
+	return nil
+}
+
+// containsDisjunction reports whether a resolved clause tree has an OR anywhere.
+func containsDisjunction(cs *clauseSet) bool {
+	if cs == nil || cs.leaf != nil {
+		return false
+	}
+	if cs.op == ast.AttrSetOr && len(cs.items) > 1 {
+		return true
+	}
+	for _, item := range cs.items {
+		if containsDisjunction(item) {
+			return true
+		}
+	}
+	return false
+}
 
 // cardinalityMaxText renders a cardinality's upper bound, with "*" for unbounded.
 func cardinalityMaxText(c *ast.Cardinality) string {

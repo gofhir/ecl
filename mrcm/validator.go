@@ -185,6 +185,13 @@ func (v *validator) validateExpression(expr *scg.Expression, pathPrefix string) 
 // Valid=true with no issues.
 func (v *validator) validateCardinality(focusID string, counts map[string]int, pathPrefix string) error {
 	for attrID, domains := range v.model.AllDomains() {
+		// Only rules that could constrain THIS expression. Without the guard an
+		// unevaluatable rule for an attribute the expression never mentions
+		// emitted invalid_rule and flipped Valid=false — an accusation about a
+		// part of the model the caller did not touch.
+		if counts[attrID] == 0 && !v.hasMandatoryMinimum(domains) {
+			continue
+		}
 		applicable, _, err := v.applicableDomains(focusID, attrID, domains)
 		if err != nil {
 			return err
@@ -217,6 +224,21 @@ func (v *validator) validateCardinality(focusID string, counts map[string]int, p
 		}
 	}
 	return nil
+}
+
+// hasMandatoryMinimum reports whether any mandatory row of an attribute demands
+// at least one occurrence. Only those matter for an attribute the expression does
+// not mention: every other rule is vacuously satisfied by a count of zero.
+func (v *validator) hasMandatoryMinimum(domains []AttributeDomain) bool {
+	for _, r := range domains {
+		if r.RuleStrengthID != "" && r.RuleStrengthID != RuleStrengthMandatory {
+			continue
+		}
+		if r.Cardinality.Min > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // applicableDomains returns the mandatory domain rows of an attribute whose

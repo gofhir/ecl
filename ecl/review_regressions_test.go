@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 
@@ -233,4 +234,94 @@ func dialectFilterOf(t *testing.T, expr string) *ast.DialectFilter {
 	}
 	require.FailNow(t, "no DialectFilter found")
 	return nil
+}
+
+// TestEvaluate_ReversePathIsConsistent covers the reverse (R) attribute. Every
+// form that RelationshipTargets cannot answer is now reported instead of being
+// answered wrongly.
+//
+// RelationshipTargets returns a Set, so it loses how many inbound relationships
+// each concept has and of which types. A cardinality needs the count, and "!="
+// needs the per-type total. Both used to be answered anyway:
+// `[0..0] R a = x` returned exactly the concepts that DO have the relationship,
+// and `R a != x` kept the "does not have it at all" reading that the forward path
+// abandoned.
+func TestEvaluate_ReversePathIsConsistent(t *testing.T) {
+	// The form that IS expressible keeps working.
+	set := evalFixture(t, "* : R 363698007 = 22298006")
+	require.ElementsMatch(t, []string{"74281007", "113331007"}, set.Slice())
+
+	for _, expr := range []string{
+		"* : [0..0] R 363698007 = 22298006",
+		"* : [2..*] R 363698007 = 22298006",
+		"* : R 363698007 != 22298006",
+		"* : { R 363698007 != 22298006 }",
+		"* : { R 363698007 = 22298006 OR R 116676008 = 22298006 }",
+		"* : [2..*] { R 363698007 = 22298006 }",
+	} {
+		t.Run(expr, func(t *testing.T) {
+			_, err := evalFixtureErr(t, expr)
+			require.ErrorIs(t, err, ecl.ErrUnsupportedFeature,
+				"this form cannot be answered from a Set and must be reported")
+		})
+	}
+}
+
+// TestEvaluate_HandBuiltDisjunctionOnlyRefinement covers a refinement carrying
+// only a Disjunction, which the parser cannot produce but a consumer can build:
+// ecl/ast is public.
+//
+// Seeding the accumulator with the incoming focus (rather than the empty set)
+// made it a no-op that returned everything.
+func TestEvaluate_HandBuiltDisjunctionOnlyRefinement(t *testing.T) {
+	clause := func(typeID, target string) *ast.Refinement {
+		return &ast.Refinement{AttrSet: &ast.AttributeSet{Attr: &ast.Attribute{
+			Name:  &ast.ConceptRef{ID: typeID},
+			Op:    "=",
+			Value: &ast.ConceptRef{ID: target},
+		}}}
+	}
+	expr := &ast.Refined{
+		Focus: &ast.Any{},
+		Refinement: &ast.Refinement{Disjunction: []*ast.Refinement{
+			clause("363698007", "74281007"),
+			clause("1142139005", "5"),
+		}},
+	}
+
+	set, err := ecl.Evaluate(context.Background(), expr, standardProvider(t))
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"22298006"}, set.Slice(),
+		"the disjunction must be the union of its operands, not the whole focus")
+}
+
+// TestParse_AcceptabilityTokenForm covers `(prefer)` / `(accept)`.
+//
+// Only the SCTID set used to be read, so the token form was dropped entirely --
+// and an empty AcceptabilityIDs means "any acceptability" to the provider, so the
+// query silently WIDENED instead of narrowing.
+func TestParse_AcceptabilityTokenForm(t *testing.T) {
+	tokens := dialectFilterOf(t, "<< 404684003 {{ D dialectId = 900000000000509007 (prefer) }}")
+	require.Len(t, tokens.Dialects, 1)
+	require.Len(t, tokens.Dialects[0].Acceptabilities, 1)
+
+	// It must agree with the equivalent SCTID form.
+	byToken := evalFixture(t, "<< 138875005 {{ D dialectId = 900000000000509007 (prefer) }}")
+	bySCTID := evalFixture(t, "<< 138875005 {{ D dialectId = 900000000000509007 (900000000000548007) }}")
+	require.ElementsMatch(t, bySCTID.Slice(), byToken.Slice())
+	require.ElementsMatch(t, []string{"73211009"}, byToken.Slice())
+
+	// And it must discriminate: 22298006 is only acceptable in en-us.
+	accept := evalFixture(t, "<< 138875005 {{ D dialectId = 900000000000509007 (accept) }}")
+	require.ElementsMatch(t, []string{"22298006"}, accept.Slice())
+}
+
+// TestParse_TrailingInputMessageIsValidUTF8 covers the trailing-input message.
+// ANTLR's GetStart is a RUNE index, so slicing the input string by it cut
+// multi-byte characters in half and produced mojibake.
+func TestParse_TrailingInputMessageIsValidUTF8(t *testing.T) {
+	_, err := ecl.Parse("404684003 |ááá| GARBAGE")
+	require.Error(t, err)
+	require.True(t, utf8.ValidString(err.Error()), "error message is not valid UTF-8: %q", err.Error())
+	require.Contains(t, err.Error(), "GARBAGE")
 }

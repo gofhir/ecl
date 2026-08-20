@@ -105,3 +105,22 @@ cases:
   - name: group cardinality with a reverse attribute is reported as unsupported
     expression: "* : [2..*] { R 363698007 = 22298006 }"
     expectError: true
+
+  # RelationshipTargets returns a Set, so it loses how many inbound relationships
+  # a concept has and of which types. A cardinality needs the count and "!=" needs
+  # the per-type total; both used to be answered anyway, and wrongly.
+  - name: cardinality on a reverse attribute is reported as unsupported
+    expression: "* : [0..0] R 363698007 = 22298006"
+    expectError: true
+
+  - name: not-equals on a reverse attribute is reported as unsupported
+    expression: "* : R 363698007 != 22298006"
+    expectError: true
+
+  - name: not-equals on a reverse attribute inside a group is reported as unsupported
+    expression: "* : { R 363698007 != 22298006 }"
+    expectError: true
+
+  - name: disjunction inside a group with a reverse attribute is reported as unsupported
+    expression: "* : { R 363698007 = 22298006 OR R 116676008 = 22298006 }"
+    expectError: true
