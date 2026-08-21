@@ -111,6 +111,10 @@ func Validate(ctx context.Context, expr *scg.Expression, model *Model, provider 
 		provider: provider,
 		// memo caches ECL expression -> evaluated set, scoped to this run.
 		memo: make(map[string]ecl.Set),
+		// domains is the model's rules grouped by attribute, built once: the
+		// cardinality check needs it per focus concept and per nested
+		// expression, and rebuilding the map each time is pure allocation.
+		domains: model.AllDomains(),
 	}
 
 	if err := v.validateExpression(expr, ""); err != nil {
@@ -130,6 +134,7 @@ type validator struct {
 	provider ecl.DataProvider
 	issues   []Issue
 	memo     map[string]ecl.Set
+	domains  map[string][]AttributeDomain
 }
 
 // validateExpression walks every focus concept and refinement attribute of
@@ -184,7 +189,7 @@ func (v *validator) validateExpression(expr *scg.Expression, pathPrefix string) 
 // minimum exists to catch. A rule with Min:1 and the attribute absent reported
 // Valid=true with no issues.
 func (v *validator) validateCardinality(focusID string, counts map[string]int, pathPrefix string) error {
-	for attrID, domains := range v.model.AllDomains() {
+	for attrID, domains := range v.domains {
 		// Only rules that could constrain THIS expression. Without the guard an
 		// unevaluatable rule for an attribute the expression never mentions
 		// emitted invalid_rule and flipped Valid=false — an accusation about a

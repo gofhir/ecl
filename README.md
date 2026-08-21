@@ -108,13 +108,27 @@ type myProvider struct {
 }
 ```
 
-**`ecl/providertest`** — run the bundled conformance suite against your implementation. This is how you check the rules the godoc cannot fully state:
+**`ecl/providertest`** — check your implementation against the rules the godoc cannot fully state:
 
 ```go
 func TestMyProvider(t *testing.T) {
-    providertest.Verify(t, func() ecl.DataProvider { return newMyProvider(t) })
+    providertest.VerifyContract(t, func() ecl.DataProvider { return newMyProvider(t) })
 }
 ```
+
+`VerifyContract` probes **your** data — it asks the provider for concepts, refsets
+and relationships it actually has, then asserts the invariants that must hold
+whatever those are: never return a nil `Set`, an empty input yields the empty
+`Set`, `nil` sourceIDs means wildcard, the hierarchy is transitive, only
+`FilterConcepts` may filter by `active`, refset membership is invertible, the
+history profiles nest. A check your data cannot exercise is **skipped with a
+reason**, not failed, so read the output: a provider that skips most of the suite
+has not been verified.
+
+`providertest.VerifyFixture(t)` is the other half. It runs the 116 bundled cases,
+whose expectations are concrete concept IDs, so it verifies the **evaluator** and
+only passes against the bundled fixture — a correct provider carrying different
+data fails 89 of them.
 
 The reference in-memory provider is [`ecl/providertest/fixture.go`](ecl/providertest/fixture.go) — read it to see the expected semantics.
 

@@ -7,8 +7,14 @@
 // the only honest way to check an implementation is to run the suite against it:
 //
 //	func TestMyProvider(t *testing.T) {
-//	    providertest.Verify(t, func() ecl.DataProvider { return newMyProvider(t) })
+//	    providertest.VerifyContract(t, func() ecl.DataProvider { return newMyProvider(t) })
 //	}
+//
+// VerifyContract checks the invariants against YOUR data: it probes the provider
+// for concepts, refsets and relationships it actually has and asserts the rules
+// that must hold whatever those are. VerifyFixture is the other half — it runs
+// the bundled cases, whose expectations are concrete concept IDs, and so verifies
+// the evaluator rather than a provider.
 //
 // This code used to live under internal/, which Go forbids third parties from
 // importing, while the README offered it as the reference implementors should
@@ -101,13 +107,13 @@ func RunBundled(ctx context.Context, filter *regexp.Regexp) (*Report, error) {
 	return RunSuites(ctx, suites, RunOptions{Filter: filter, LoadFixture: BundledFixture})
 }
 
-// Verify runs the bundled conformance suite against the provider that
-// newProvider returns, reporting one subtest per case.
+// VerifyFixture runs the bundled conformance suite against the bundled fixture,
+// reporting one subtest per case.
 //
-// A fresh provider is requested per case so state cannot leak between them.
-// Cases whose expectations depend on data the provider does not have will fail —
-// that is the point: the suite is the executable statement of the contract.
-func Verify(t *testing.T, newProvider func() ecl.DataProvider) {
+// This verifies the EVALUATOR, not a provider: the cases assert concrete concept
+// IDs that only exist in the bundled fixture. To check your own implementation,
+// use VerifyContract.
+func VerifyFixture(t *testing.T) {
 	t.Helper()
 
 	suites, err := LoadBundledSuites()
@@ -118,7 +124,11 @@ func Verify(t *testing.T, newProvider func() ecl.DataProvider) {
 	for _, suite := range suites {
 		for _, c := range suite.Cases {
 			t.Run(suite.Name+"/"+c.Name, func(t *testing.T) {
-				res := runCase(context.Background(), suite.Name, c, newProvider())
+				provider, err := BundledFixture(suite.Fixture)
+				if err != nil {
+					t.Fatalf("loading fixture %q: %v", suite.Fixture, err)
+				}
+				res := runCase(context.Background(), suite.Name, c, provider)
 				switch {
 				case res.Skipped:
 					t.Skip(res.Reason)
