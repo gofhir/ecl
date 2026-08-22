@@ -106,17 +106,11 @@ cases:
     expression: "* : [2..*] { R 363698007 = 22298006 }"
     expectError: true
 
-  # RelationshipTargets returns a Set, so it loses how many inbound relationships
-  # a concept has and of which types. A cardinality needs the count and "!=" needs
-  # the per-type total; both used to be answered anyway, and wrongly.
-  - name: cardinality on a reverse attribute is reported as unsupported
-    expression: "* : [0..0] R 363698007 = 22298006"
-    expectError: true
-
-  - name: not-equals on a reverse attribute is reported as unsupported
-    expression: "* : R 363698007 != 22298006"
-    expectError: true
-
+  # The GROUP forms of a reverse attribute stay unsupported even with
+  # InboundRelationshipsProvider: conceptMatchesGroupWithReverse walks the groups
+  # of the SOURCE concepts, so the missing count is not the only problem.
+  # The ungrouped forms moved to 04-refinement.yaml once the fixture gained the
+  # capability.
   - name: not-equals on a reverse attribute inside a group is reported as unsupported
     expression: "* : { R 363698007 != 22298006 }"
     expectError: true

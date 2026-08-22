@@ -694,3 +694,76 @@ func contains(haystack []string, needle string) bool {
 	}
 	return false
 }
+
+// ---------------------------------------------------------------------------
+// Optional capabilities
+// ---------------------------------------------------------------------------.
+//
+// The reference provider implements all three so the bundled suite exercises the
+// paths they unlock, and so an implementor can read a working example. Each is
+// optional: a provider that omits them still conforms, and the evaluator falls
+// back or reports the forms it cannot answer.
+
+// PropertiesByGroupBatch answers PropertiesByGroup for many concepts at once,
+// collapsing the evaluator's per-concept loop into one call.
+func (p *inMemoryProvider) PropertiesByGroupBatch(ctx context.Context, conceptIDs []string) (map[string]map[int][]ecl.Relationship, error) {
+	out := make(map[string]map[int][]ecl.Relationship, len(conceptIDs))
+	for _, id := range conceptIDs {
+		groups, err := p.PropertiesByGroup(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if len(groups) > 0 {
+			out[id] = groups
+		}
+	}
+	return out, nil
+}
+
+// ConcreteValuesBatch answers ConcreteValues for many (concept, type) pairs at
+// once.
+func (p *inMemoryProvider) ConcreteValuesBatch(ctx context.Context, conceptIDs, typeIDs []string) (map[string]map[string][]ecl.ConcreteValue, error) {
+	out := make(map[string]map[string][]ecl.ConcreteValue, len(conceptIDs))
+	for _, id := range conceptIDs {
+		for _, typeID := range typeIDs {
+			values, err := p.ConcreteValues(ctx, id, typeID)
+			if err != nil {
+				return nil, err
+			}
+			if len(values) == 0 {
+				continue
+			}
+			if out[id] == nil {
+				out[id] = make(map[string][]ecl.ConcreteValue)
+			}
+			out[id][typeID] = values
+		}
+	}
+	return out, nil
+}
+
+// InboundRelationships returns the relationships pointing AT each target,
+// preserving multiplicity — which is what a cardinality or "!=" on a reverse
+// attribute needs and what RelationshipTargets cannot supply.
+func (p *inMemoryProvider) InboundRelationships(_ context.Context, targetIDs, typeIDs ecl.Set) (map[string][]ecl.InboundRelationship, error) {
+	out := map[string][]ecl.InboundRelationship{}
+	for srcID, rels := range p.relsBySource {
+		for _, r := range rels {
+			if r.TargetID == "" {
+				continue // concrete value, not a concept-valued relationship
+			}
+			if targetIDs != nil && !targetIDs.Contains(r.TargetID) {
+				continue
+			}
+			if typeIDs != nil && typeIDs.Len() > 0 && !typeIDs.Contains(r.TypeID) {
+				continue
+			}
+			out[r.TargetID] = append(out[r.TargetID], ecl.InboundRelationship{
+				SourceID: srcID,
+				TypeID:   r.TypeID,
+				GroupNum: r.GroupNum,
+			})
+		}
+	}
+	return out, nil
+}

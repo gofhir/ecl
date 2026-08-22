@@ -499,13 +499,20 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 	// "does not have it at all" reading that the forward path abandoned. Report
 	// them instead, as the group-level analog already does.
 	if attr.Reverse {
-		if attr.Cardinality != nil {
-			return nil, fmt.Errorf("%w: cardinality [%d..%s] on a reverse attribute needs a provider method that preserves inbound multiplicity",
-				ErrUnsupportedFeature, attr.Cardinality.Min, cardinalityMaxText(attr.Cardinality))
-		}
-		if attr.Op == "!=" {
-			return nil, fmt.Errorf("%w: %q on a reverse attribute needs the per-type inbound total, which RelationshipTargets does not return",
-				ErrUnsupportedFeature, attr.Op)
+		// A provider that supplies the inbound relationships can answer the forms
+		// RelationshipTargets cannot, because it preserves the multiplicity and
+		// the types that a cardinality and "!=" need.
+		if attr.Cardinality != nil || attr.Op == "!=" {
+			inboundProvider, ok := provider.(InboundRelationshipsProvider)
+			if !ok {
+				if attr.Cardinality != nil {
+					return nil, fmt.Errorf("%w: cardinality [%d..%s] on a reverse attribute requires a provider implementing ecl.InboundRelationshipsProvider; RelationshipTargets returns a Set and so loses the inbound count",
+						ErrUnsupportedFeature, attr.Cardinality.Min, cardinalityMaxText(attr.Cardinality))
+				}
+				return nil, fmt.Errorf("%w: %q on a reverse attribute requires a provider implementing ecl.InboundRelationshipsProvider; the per-type inbound total is needed and RelationshipTargets does not return it",
+					ErrUnsupportedFeature, attr.Op)
+			}
+			return filterByReverseCounted(ctx, focus, attr, typeIDs, valueSet, valueIsAny, inboundProvider)
 		}
 
 		var inbound Set
@@ -534,22 +541,19 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 		valueIsAny:  valueIsAny,
 		cardinality: attr.Cardinality,
 	}
+	properties, err := propertiesFor(ctx, provider, focus)
+	if err != nil {
+		return nil, err
+	}
+
 	out := newMapSet()
 	var iterErr error
 	focus.Iter(func(id string) bool {
-		// One provider call per concept, so this is where a canceled request has
-		// to stop. Checking only on entry to Evaluate let a canceled context run
-		// the whole loop.
 		if err := ctx.Err(); err != nil {
 			iterErr = err
 			return false
 		}
-		rels, err := conceptRelationships(ctx, id, provider)
-		if err != nil {
-			iterErr = err
-			return false
-		}
-		if clauseSatisfied(rels, clause) {
+		if clauseSatisfied(flattenGroups(properties[id]), clause) {
 			out.m[id] = struct{}{}
 		}
 		return true
@@ -560,19 +564,110 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 	return out, nil
 }
 
-// conceptRelationships returns every relationship of a concept, with the group
-// structure flattened. Ungrouped attribute clauses match a relationship in any
-// group, so they are evaluated against this flat view.
-func conceptRelationships(ctx context.Context, conceptID string, provider DataProvider) ([]Relationship, error) {
-	groups, err := provider.PropertiesByGroup(ctx, conceptID)
+// filterByReverseCounted evaluates a reverse attribute clause that needs the
+// inbound COUNT — a cardinality, or "!=" — using InboundRelationshipsProvider.
+//
+// The counting rules mirror the forward path exactly, which is the point: the two
+// directions of the same clause must agree.
+//
+//	matching    inbound relationships of the type whose source is in the value set
+//	totalOfType inbound relationships of the type, whatever the source
+//
+// and "!=" counts `totalOfType - matching`, so it selects concepts pointed at from
+// somewhere OTHER than the value set — not concepts nothing points at.
+func filterByReverseCounted(
+	ctx context.Context,
+	focus Set,
+	attr *ast.Attribute,
+	typeIDs, valueSet Set,
+	valueIsAny bool,
+	provider InboundRelationshipsProvider,
+) (Set, error) {
+	inbound, err := provider.InboundRelationships(ctx, focus, typeIDs)
 	if err != nil {
-		return nil, fmt.Errorf("%w: PropertiesByGroup(%s): %w", ErrProvider, conceptID, err)
+		return nil, fmt.Errorf("%w: InboundRelationships: %w", ErrProvider, err)
 	}
+
+	out := newMapSet()
+	var iterErr error
+	focus.Iter(func(id string) bool {
+		if err := ctx.Err(); err != nil {
+			iterErr = err
+			return false
+		}
+		matching, totalOfType := 0, 0
+		for _, rel := range inbound[id] {
+			if !typeIDs.Contains(rel.TypeID) {
+				continue
+			}
+			totalOfType++
+			if valueIsAny || valueSet.Contains(rel.SourceID) {
+				matching++
+			}
+		}
+		count := matching
+		if attr.Op == "!=" {
+			count = totalOfType - matching
+		}
+		if cardinalitySatisfied(attr.Cardinality, count) {
+			out.m[id] = struct{}{}
+		}
+		return true
+	})
+	if iterErr != nil {
+		return nil, iterErr
+	}
+	return out, nil
+}
+
+// propertiesFor fetches the relationships of every concept in the focus set.
+//
+// A provider that implements BatchPropertiesProvider answers in one call. Without
+// it this falls back to PropertiesByGroup once per concept — the N+1 the interface
+// forces, which against SNOMED International means ~110,000 round trips for
+// `< 404684003 : 363698007 = *`. The optional capability is how that is fixed
+// without widening DataProvider and breaking every implementation.
+func propertiesFor(ctx context.Context, provider DataProvider, focus Set) (map[string]map[int][]Relationship, error) {
+	ids := toIDSlice(focus)
+	if len(ids) == 0 {
+		return map[string]map[int][]Relationship{}, nil
+	}
+
+	if batch, ok := provider.(BatchPropertiesProvider); ok {
+		out, err := batch.PropertiesByGroupBatch(ctx, ids)
+		if err != nil {
+			return nil, fmt.Errorf("%w: PropertiesByGroupBatch: %w", ErrProvider, err)
+		}
+		if out == nil {
+			out = map[string]map[int][]Relationship{}
+		}
+		return out, nil
+	}
+
+	out := make(map[string]map[int][]Relationship, len(ids))
+	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		groups, err := provider.PropertiesByGroup(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("%w: PropertiesByGroup(%s): %w", ErrProvider, id, err)
+		}
+		out[id] = groups
+	}
+	return out, nil
+}
+
+// flattenGroups collapses a concept's relationship groups into one slice.
+//
+// Ungrouped attribute clauses match a relationship in ANY group, so they are
+// evaluated against this flat view.
+func flattenGroups(groups map[int][]Relationship) []Relationship {
 	var out []Relationship
 	for _, rels := range groups {
 		out = append(out, rels...)
 	}
-	return out, nil
+	return out
 }
 
 // cardinalitySatisfied reports whether count satisfies the given cardinality.
@@ -636,12 +731,20 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 		return nil, err
 	}
 
+	// Fetched once for the whole focus set rather than once per concept; see
+	// propertiesFor. The reverse path does not use it: it walks the groups of the
+	// SOURCE concepts instead.
+	properties := map[string]map[int][]Relationship{}
+	if !hasReverse {
+		var err error
+		if properties, err = propertiesFor(ctx, provider, focus); err != nil {
+			return nil, err
+		}
+	}
+
 	out := newMapSet()
 	var iterErr error
 	focus.Iter(func(id string) bool {
-		// One provider call per concept, so this is where a canceled request has
-		// to stop. Checking only on entry to Evaluate let a canceled context run
-		// the whole loop.
 		if err := ctx.Err(); err != nil {
 			iterErr = err
 			return false
@@ -654,12 +757,7 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 		matchingGroups := 0
 		if !hasReverse {
 			// Fast path: all forward clauses — check groups directly.
-			groups, err := provider.PropertiesByGroup(ctx, id)
-			if err != nil {
-				iterErr = fmt.Errorf("%w: PropertiesByGroup(%s): %w", ErrProvider, id, err)
-				return false
-			}
-			for gnum, rels := range groups {
+			for gnum, rels := range properties[id] {
 				// Group 0 is "ungrouped" per the PropertiesByGroup contract, so
 				// it is not a relationship group and must not be counted as one.
 				// Ungrouped attributes are matched by filterByAttribute instead.

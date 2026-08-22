@@ -131,3 +131,23 @@ cases:
   - name: parenthesised refinement followed by a disjunct
     expression: "* : ({ 363698007 = 74281007 }) OR 1142139005 = #5"
     expectedIds: ["22298006", "73211009"]
+
+  # Reverse attribute counting, enabled by the fixture implementing
+  # ecl.InboundRelationshipsProvider. RelationshipTargets returns a Set and so
+  # loses the inbound multiplicity a cardinality needs and the per-type total "!="
+  # needs; both used to be answered from the Set anyway, and wrongly.
+  #
+  # Inbound 363698007: 74281007 <- 22298006; 113331007 <- 22298006 and <- 73211009.
+  - name: reverse attribute with exact cardinality
+    expression: "* : [1..1] R 363698007 = 22298006"
+    expectedIds: ["74281007", "113331007"]
+
+  - name: reverse attribute with a cardinality nothing meets
+    expression: "* : [2..*] R 363698007 = 22298006"
+    expectedIds: []
+
+  # "!=" selects concepts pointed at from somewhere OTHER than the value set, not
+  # concepts nothing points at: 74281007's only inbound is from 22298006.
+  - name: reverse attribute not-equals counts within the type
+    expression: "* : R 363698007 != 22298006"
+    expectedIds: ["113331007"]

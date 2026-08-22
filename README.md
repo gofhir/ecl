@@ -37,13 +37,14 @@ bad data:
 
 | Construct | Why |
 |---|---|
-| `{{ D term != … }}`, `{{ D language != … }}`, `{{ D type != … }}` | Negating a description filter is a per-row operation. Expressing it needs negation fields on `DescriptionFilterOpts`, which changes the provider contract. Negated **concept** filters (`{{ C … != … }}`) do work. |
+| `{{ D term != … }}`, `{{ D language != … }}`, `{{ D type != … }}`, **unless** the provider implements `NegatingDescriptionProvider` | Negating a description filter is a per-ROW operation: a concept with both an FSN and a Spanish synonym satisfies `language != es` through its FSN, so set subtraction is wrong. Negated **concept** filters (`{{ C … != … }}`) always work. |
 | `{{ D dialect = en-gb }}` (alias form) | Mapping a dialect alias to a language reference set's SCTID is terminology data; only the international English aliases are universal. Use `{{ D dialectId = 900000000000508004 }}`. |
 | `^[field]` projection | `Set` carries concept IDs only. Use a `{{ M … }}` member filter. |
 | `{{ D id = … }}` | The parser models it, but `DescriptionFilterOpts` has no field to carry the ids to the provider. |
 | A term filter with a SET of terms — `{{ D term = ("a" "b") }}` | Any-of semantics, which `DescriptionFilterOpts.Term` cannot express. A single term, including a multi-word one, works. |
 | An `effectiveTime` filter with a set of values | Same reason: `ConceptFilterOpts` carries one value and one operator. |
-| Anything on a reverse (`R`) attribute beyond `R attr = value`: a cardinality, `!=`, or an `OR` in the same group | `RelationshipTargets` returns a `Set`, so it loses how many inbound relationships a concept has and of which types. A cardinality needs the count, `!=` needs the per-type total, and the group path works on a flattened clause list. |
+| A cardinality or `!=` on a reverse (`R`) attribute, **unless** the provider implements `InboundRelationshipsProvider` | `RelationshipTargets` returns a `Set`, so it loses the inbound count and the per-type total. With the capability these work. |
+| A cardinality, `!=` or an `OR` on a reverse attribute **inside a group** | The group path walks the groups of the source concepts on a flattened clause list, so the missing count is not the only obstacle. |
 | `AttributeDomain.InGroupCardinality` (MRCM) | Loaded and exposed, not yet enforced. |
 
 ## Install
@@ -84,7 +85,7 @@ for _, id := range set.Slice() {
 
 You implement [`ecl.DataProvider`](ecl/provider.go) against your storage (PostgreSQL closure tables, in-memory maps, Elasticsearch, an HTTP terminology server, …). Read the contract in the interface's godoc before you start — it states the rules the evaluator relies on (never return a nil `Set`, empty input yields empty output, only `FilterConcepts` may filter by the `active` flag, and the direction of `HistoricalAssociations`, which is the opposite of the intuitive reading).
 
-Most methods take sets or slices so they can be answered with one batch query. **Two are per-concept by signature** — `PropertiesByGroup` and `ConcreteValues` — and are called once per focus concept, so a broad refinement issues one query per concept; batching them is a planned breaking change. The 18 methods split into:
+Most methods take sets or slices so they can be answered with one batch query. Two are per-concept by signature — `PropertiesByGroup` and `ConcreteValues` — so on their own a broad refinement issues one query per focus concept. **Implement the optional `ecl.BatchPropertiesProvider` to collapse that into a single call**; see [Optional capabilities](#optional-capabilities). The 18 required methods split into:
 
 | Group | Methods |
 |---|---|
@@ -107,6 +108,24 @@ type myProvider struct {
     db *sql.DB
 }
 ```
+
+### Optional capabilities
+
+Three things cannot be expressed through `DataProvider` as it stands, and widening
+that interface would break every implementation. They are offered as **optional
+interfaces** the evaluator type-asserts for instead — the shape the standard
+library uses for `io.ReaderFrom` or `http.Flusher`. Implement what your storage
+answers well; the evaluator falls back or reports the forms it cannot handle.
+
+| Interface | What it unlocks |
+|---|---|
+| `BatchPropertiesProvider` | One query per refinement instead of one per focus concept. Measured against the bundled fixture: 27 calls → 1. |
+| `BatchConcreteValuesProvider` | The same for concrete-value comparisons, which otherwise cost N×T calls. |
+| `InboundRelationshipsProvider` | `[m..n] R attr = value` and `R attr != value`, which need the inbound count and the per-type total that `RelationshipTargets` cannot return. |
+| `NegatingDescriptionProvider` | `{{ D term != … }}`, `{{ D language != … }}`, `{{ D type != … }}`, whose negation is per description ROW and cannot be emulated with set arithmetic. |
+
+The reference provider in [`ecl/providertest/fixture.go`](ecl/providertest/fixture.go)
+implements the first three; read it for a worked example.
 
 **`ecl/providertest`** — check your implementation against the rules the godoc cannot fully state:
 

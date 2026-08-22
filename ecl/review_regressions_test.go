@@ -236,36 +236,81 @@ func dialectFilterOf(t *testing.T, expr string) *ast.DialectFilter {
 	return nil
 }
 
-// TestEvaluate_ReversePathIsConsistent covers the reverse (R) attribute. Every
-// form that RelationshipTargets cannot answer is now reported instead of being
-// answered wrongly.
+// TestEvaluate_ReversePathIsConsistent covers the reverse (R) attribute.
 //
 // RelationshipTargets returns a Set, so it loses how many inbound relationships
-// each concept has and of which types. A cardinality needs the count, and "!="
-// needs the per-type total. Both used to be answered anyway:
+// each concept has and of which types. A cardinality needs the count and "!="
+// needs the per-type total, and both used to be answered from the Set anyway:
 // `[0..0] R a = x` returned exactly the concepts that DO have the relationship,
-// and `R a != x` kept the "does not have it at all" reading that the forward path
+// and `R a != x` kept the "does not have it at all" reading the forward path
 // abandoned.
+//
+// A provider implementing ecl.InboundRelationshipsProvider — as the reference
+// fixture does — supplies what is missing, and the counting then mirrors the
+// forward path exactly. Without that capability the same forms report
+// ErrUnsupportedFeature; see TestEvaluate_ReverseCountingNeedsTheCapability.
 func TestEvaluate_ReversePathIsConsistent(t *testing.T) {
-	// The form that IS expressible keeps working.
-	set := evalFixture(t, "* : R 363698007 = 22298006")
-	require.ElementsMatch(t, []string{"74281007", "113331007"}, set.Slice())
+	// Inbound 363698007: 74281007 <- 22298006, 113331007 <- 22298006 and <- 73211009.
+	require.ElementsMatch(t, []string{"74281007", "113331007"},
+		evalFixture(t, "* : R 363698007 = 22298006").Slice())
 
+	// Each of those has exactly one inbound relationship from 22298006.
+	require.ElementsMatch(t, []string{"74281007", "113331007"},
+		evalFixture(t, "* : [1..1] R 363698007 = 22298006").Slice())
+	require.Empty(t, evalFixture(t, "* : [2..*] R 363698007 = 22298006").Slice())
+
+	// [0..0] is the complement, and must not coincide with the positive form.
+	zero := evalFixture(t, "* : [0..0] R 363698007 = 22298006")
+	require.NotContains(t, zero.Slice(), "74281007")
+	require.NotContains(t, zero.Slice(), "113331007")
+	require.Contains(t, zero.Slice(), "22298006")
+
+	// "!=" selects concepts pointed at from somewhere OTHER than the value set,
+	// not concepts nothing points at: 113331007 is also a finding site of
+	// 73211009, while 74281007's only inbound is from 22298006.
+	require.ElementsMatch(t, []string{"113331007"},
+		evalFixture(t, "* : R 363698007 != 22298006").Slice())
+
+	// The group forms stay unsupported: conceptMatchesGroupWithReverse walks the
+	// groups of the SOURCE concepts, so the counting problem is not the only one.
 	for _, expr := range []string{
-		"* : [0..0] R 363698007 = 22298006",
-		"* : [2..*] R 363698007 = 22298006",
-		"* : R 363698007 != 22298006",
 		"* : { R 363698007 != 22298006 }",
 		"* : { R 363698007 = 22298006 OR R 116676008 = 22298006 }",
 		"* : [2..*] { R 363698007 = 22298006 }",
 	} {
 		t.Run(expr, func(t *testing.T) {
 			_, err := evalFixtureErr(t, expr)
-			require.ErrorIs(t, err, ecl.ErrUnsupportedFeature,
-				"this form cannot be answered from a Set and must be reported")
+			require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
 		})
 	}
 }
+
+// TestEvaluate_ReverseCountingNeedsTheCapability covers the fallback: a provider
+// without InboundRelationshipsProvider must be told, not given a wrong count.
+func TestEvaluate_ReverseCountingNeedsTheCapability(t *testing.T) {
+	plain := withoutInboundCapability{standardProvider(t)}
+
+	// The expressible form still works without the capability.
+	set, err := ecl.Evaluate(context.Background(), mustParse(t, "* : R 363698007 = 22298006"), plain)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{"74281007", "113331007"}, set.Slice())
+
+	for _, expr := range []string{
+		"* : [0..0] R 363698007 = 22298006",
+		"* : R 363698007 != 22298006",
+	} {
+		t.Run(expr, func(t *testing.T) {
+			_, err := ecl.Evaluate(context.Background(), mustParse(t, expr), plain)
+			require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
+			require.Contains(t, err.Error(), "InboundRelationshipsProvider")
+		})
+	}
+}
+
+// withoutInboundCapability hides the optional capabilities of the provider it
+// wraps, so the fallback path can be exercised. Embedding the interface rather
+// than the concrete type is what drops the extra methods.
+type withoutInboundCapability struct{ ecl.DataProvider }
 
 // TestEvaluate_HandBuiltDisjunctionOnlyRefinement covers a refinement carrying
 // only a Disjunction, which the parser cannot produce but a consumer can build:
