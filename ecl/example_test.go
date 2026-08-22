@@ -84,10 +84,14 @@ func ExampleEvaluate_refinement() {
 // ExampleErrUnsupportedFeature shows classifying a construct this build cannot
 // evaluate. The evaluator returns an error rather than a silently wrong set, so a
 // server can answer 501 instead of serving bad data.
+//
+// The dialect ALIAS form is used here because it needs terminology data the parser
+// cannot invent. Several other constructs report the same sentinel only until the
+// provider implements the matching optional capability — see ecl/capabilities.go.
 func ExampleErrUnsupportedFeature() {
 	provider := exampleProvider()
 
-	expr, err := ecl.Parse("<< 404684003 {{ D type != fsn }}")
+	expr, err := ecl.Parse("<< 404684003 {{ D dialect = en-gb }}")
 	if err != nil {
 		fmt.Println(err)
 		return

@@ -370,3 +370,28 @@ func TestParse_TrailingInputMessageIsValidUTF8(t *testing.T) {
 	require.True(t, utf8.ValidString(err.Error()), "error message is not valid UTF-8: %q", err.Error())
 	require.Contains(t, err.Error(), "GARBAGE")
 }
+
+// TestEvaluate_DescriptionFilter_Negated_WithCapability covers the row-level
+// negation the optional ecl.NegatingDescriptionProvider enables. The bundled
+// fixture implements it.
+//
+// Row-level is the whole point: 22298006 has an FSN in `en` and a synonym in `es`,
+// so it satisfies `language != es` THROUGH THE FSN. The set-level Minus this
+// replaced subtracted the concepts having a Spanish description and so excluded
+// it — the defect this pins down.
+func TestEvaluate_DescriptionFilter_Negated_WithCapability(t *testing.T) {
+	spanish := evalFixture(t, "<< 404684003 {{ D language = es }}")
+	require.ElementsMatch(t, []string{"22298006"}, spanish.Slice())
+
+	notSpanish := evalFixture(t, "<< 404684003 {{ D language != es }}")
+	require.Contains(t, notSpanish.Slice(), "22298006",
+		"22298006 has an English FSN, so it HAS a description whose language is not es")
+
+	// The two are not complements, which is exactly what set subtraction assumed.
+	require.NotEqual(t, len(spanish.Slice())+len(notSpanish.Slice()),
+		len(evalFixture(t, "<< 404684003").Slice()),
+		"a row-level negation does not partition the base set")
+
+	byType := evalFixture(t, "<< 404684003 {{ D type != fsn }}")
+	require.ElementsMatch(t, []string{"11687002", "22298006"}, byType.Slice())
+}

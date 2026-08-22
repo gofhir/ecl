@@ -279,9 +279,11 @@ func TestEvaluate_CombinedFilters(t *testing.T) {
 // FSN and a Spanish synonym satisfies `language != es` through its FSN, yet
 // Minus removes it because it also has a Spanish row.
 //
-// Expressing it correctly needs negation fields on DescriptionFilterOpts, i.e. a
-// provider contract change. Until then the evaluator returns a classifiable
-// error instead of a silently wrong set.
+// Getting it right needs the provider to negate at the row level, which the
+// optional ecl.NegatingDescriptionProvider allows. Note newFilterFixture does NOT
+// implement it, so these exercise the fallback: a classifiable error instead of a
+// silently wrong set. The capability path is covered by
+// TestEvaluate_DescriptionFilter_Negated_WithCapability.
 func TestEvaluate_DescriptionFilter_Negated_IsRejected(t *testing.T) {
 	p := newFilterFixture()
 	for _, expr := range []string{
@@ -295,6 +297,7 @@ func TestEvaluate_DescriptionFilter_Negated_IsRejected(t *testing.T) {
 			_, err = Evaluate(context.Background(), tree, p)
 			require.Error(t, err)
 			require.ErrorIs(t, err, ErrUnsupportedFeature)
+			require.Contains(t, err.Error(), "NegatingDescriptionProvider")
 		})
 	}
 }

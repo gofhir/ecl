@@ -176,3 +176,28 @@ cases:
   - name: dialect filter with the acceptable token
     expression: "<< 138875005 {{ D dialectId = 900000000000509007 (accept) }}"
     expectedIds: ["22298006"]
+
+  # Negated description filters, enabled by the fixture implementing
+  # ecl.NegatingDescriptionProvider. The negation is per description ROW: a concept
+  # matches when it HAS a description failing the comparison.
+  #
+  # 22298006 has an FSN in `en` and a synonym in `es`, so it satisfies
+  # `language != es` through the FSN. The set-level Minus this replaced EXCLUDED
+  # it, because it also has a Spanish row — the defect these cases pin down.
+  - name: negated language filter is per description row
+    expression: "<< 404684003 {{ D language != es }}"
+    expectedIds: ["11687002", "22298006", "404684003", "64572001", "73211009", "95566004"]
+
+  - name: positive language filter for contrast
+    expression: "<< 404684003 {{ D language = es }}"
+    expectedIds: ["22298006"]
+
+  # 73211009's FSN is "Diabetes mellitus", and 11687002 also has a synonym that
+  # does not match, so both have a description failing the comparison.
+  - name: negated term filter is per description row
+    expression: '<< 73211009 {{ D term != "Type 1 diabetes mellitus" }}'
+    expectedIds: ["11687002", "73211009"]
+
+  - name: negated description type filter
+    expression: "<< 404684003 {{ D type != fsn }}"
+    expectedIds: ["11687002", "22298006"]

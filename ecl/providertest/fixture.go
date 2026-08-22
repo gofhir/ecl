@@ -767,3 +767,58 @@ func (p *inMemoryProvider) InboundRelationships(_ context.Context, targetIDs, ty
 	}
 	return out, nil
 }
+
+// MatchDescriptionNegated evaluates a description filter in which each dimension
+// carries its own polarity, negating at the DESCRIPTION ROW level.
+//
+// Row-level is the whole point. A concept matches when it has at least one
+// description satisfying every dimension as written, so a concept holding both an
+// FSN and a Spanish synonym satisfies `language != es` through its FSN — whereas
+// subtracting the concepts that have a Spanish description would remove it. That
+// difference is why the evaluator refuses to compose this from sets.
+func (p *inMemoryProvider) MatchDescriptionNegated(_ context.Context, filter ecl.NegatedDescriptionFilterOpts) (ecl.Set, error) {
+	opts := filter.Opts
+	needle := strings.ToLower(opts.Term)
+
+	out := ecl.NewSet()
+	for conceptID, descs := range p.descByConcept {
+		for _, d := range descs {
+			if !descriptionMatchesNegated(d, filter, needle) {
+				continue
+			}
+			out = out.Union(ecl.NewSetFromSlice([]string{conceptID}))
+			break
+		}
+	}
+	return out, nil
+}
+
+// descriptionMatchesNegated reports whether ONE description satisfies every
+// dimension of the filter, reading each through its Negate flag.
+func descriptionMatchesNegated(d FixtureDescription, filter ecl.NegatedDescriptionFilterOpts, needle string) bool {
+	opts := filter.Opts
+
+	if opts.Term != "" {
+		if termMatches(d.Value, opts.Term, opts.MatchType, needle) == filter.TermNegated {
+			return false
+		}
+	}
+	if len(opts.TypeIDs) > 0 {
+		if contains(opts.TypeIDs, d.TypeID) == filter.TypeIDsNegated {
+			return false
+		}
+	}
+	if len(opts.Languages) > 0 {
+		if contains(opts.Languages, d.Language) == filter.LanguagesNegated {
+			return false
+		}
+	}
+	// The dimensions with no polarity of their own keep the positive reading.
+	if opts.Active != nil && isActive(d.Active) != *opts.Active {
+		return false
+	}
+	if len(opts.ModuleIDs) > 0 && !contains(opts.ModuleIDs, d.ModuleID) {
+		return false
+	}
+	return true
+}

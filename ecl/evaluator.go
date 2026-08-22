@@ -1274,33 +1274,9 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 	}
 
 	if hasDescriptionClause {
-		// A negated description filter cannot be expressed as a set operation.
-		// `{{ D type != fsn }}` means "has a description whose type is not FSN",
-		// which is a per-DESCRIPTION-ROW negation. Subtracting the concepts that
-		// have an FSN also removes concepts that have both an FSN and a synonym,
-		// so the set-level Minus used here before produced wrong results
-		// silently. Expressing it properly needs negation fields on
-		// DescriptionFilterOpts, i.e. a provider contract change.
-		//
-		// Until then, fail loudly: a classifiable error beats a wrong set. The
-		// same choice is already made for ^[field] projections above.
-		if kind, negated := negatedDescriptionFilter(descFilters); negated {
-			return nil, fmt.Errorf("%w: negated description filter (%s) requires row-level negation in the DataProvider", ErrUnsupportedFeature, kind)
-		}
-		if err := unsupportedDescriptionFilter(descFilters); err != nil {
-			return nil, err
-		}
-		opts, matchesNothing, err := buildDescriptionFilterOpts(ctx, descFilters, provider)
+		matches, err := matchDescriptionFilters(ctx, descFilters, provider)
 		if err != nil {
 			return nil, err
-		}
-		matches := NewSet()
-		if !matchesNothing {
-			matches, err = provider.MatchDescription(ctx, opts)
-			if err != nil {
-				return nil, fmt.Errorf("%w: MatchDescription: %w", ErrProvider, err)
-			}
-			matches = nonNil(matches)
 		}
 		if result == nil {
 			result = matches
@@ -1502,6 +1478,67 @@ func resolveFilterIDs(ctx context.Context, e ast.Expression, provider DataProvid
 	}
 	// The operand is present but names nothing, so the clause matches nothing.
 	return nil, false, nil
+}
+
+// matchDescriptionFilters resolves the description family to the set of concepts
+// having a description that satisfies it.
+//
+// A negated clause is routed to NegatingDescriptionProvider when the provider
+// offers it, because the negation is per description ROW and cannot be composed
+// from sets: `{{ D type != fsn }}` means "has a description whose type is not
+// FSN", so subtracting the concepts that have an FSN also removes concepts holding
+// both an FSN and a synonym. Without the capability the form is reported rather
+// than answered wrongly.
+func matchDescriptionFilters(ctx context.Context, descFilters []ast.Filter, provider DataProvider) (Set, error) {
+	kind, negated := negatedDescriptionFilter(descFilters)
+	negatingProvider, canNegate := provider.(NegatingDescriptionProvider)
+	if negated && !canNegate {
+		return nil, fmt.Errorf("%w: negated description filter (%s) requires a provider implementing ecl.NegatingDescriptionProvider; its negation is per description row and cannot be composed from sets",
+			ErrUnsupportedFeature, kind)
+	}
+	if err := unsupportedDescriptionFilter(descFilters); err != nil {
+		return nil, err
+	}
+
+	opts, matchesNothing, err := buildDescriptionFilterOpts(ctx, descFilters, provider)
+	if err != nil {
+		return nil, err
+	}
+	if matchesNothing {
+		// A clause named no concept, so nothing can match.
+		return NewSet(), nil
+	}
+
+	if negated {
+		matches, err := negatingProvider.MatchDescriptionNegated(ctx, negatedOptsFor(descFilters, opts))
+		if err != nil {
+			return nil, fmt.Errorf("%w: MatchDescriptionNegated: %w", ErrProvider, err)
+		}
+		return nonNil(matches), nil
+	}
+
+	matches, err := provider.MatchDescription(ctx, opts)
+	if err != nil {
+		return nil, fmt.Errorf("%w: MatchDescription: %w", ErrProvider, err)
+	}
+	return nonNil(matches), nil
+}
+
+// negatedOptsFor carries each clause's polarity alongside the values, so the
+// provider can negate the dimensions that were written with "!=" and only those.
+func negatedOptsFor(descFilters []ast.Filter, opts DescriptionFilterOpts) NegatedDescriptionFilterOpts {
+	out := NegatedDescriptionFilterOpts{Opts: opts}
+	for _, f := range descFilters {
+		switch x := f.(type) {
+		case *ast.TermFilter:
+			out.TermNegated = x.Op == "!="
+		case *ast.TypeFilter:
+			out.TypeIDsNegated = x.Op == "!="
+		case *ast.LanguageFilter:
+			out.LanguagesNegated = x.Op == "!="
+		}
+	}
+	return out
 }
 
 // categorizeFilters splits a flat list of filters into description, concept,
