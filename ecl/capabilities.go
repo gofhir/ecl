@@ -22,7 +22,12 @@ import "context"
 //     this", so a negated description filter returns ErrUnsupportedFeature.
 //
 // Implement the ones your storage can answer efficiently and leave the rest.
-// The bundled providertest.VerifyContract exercises whichever ones it finds.
+//
+// The bundled providertest.VerifyContract has a check per capability: when it
+// finds one, it asserts the capability AGREES with the required method it
+// accelerates. That is the failure mode worth guarding — the evaluator prefers the
+// capability, so a batch that disagrees with its per-concept equivalent silently
+// decides every answer, and nothing else would notice.
 
 // BatchPropertiesProvider answers PropertiesByGroup for many concepts at once.
 //

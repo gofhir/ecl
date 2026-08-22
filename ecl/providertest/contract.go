@@ -51,6 +51,17 @@ func VerifyContract(t *testing.T, newProvider func() ecl.DataProvider) {
 		{"RefsetMembershipIsInvertible", checkRefsetMembershipIsInvertible},
 		{"HistoryProfilesAreNested", checkHistoryProfilesAreNested},
 		{"ResultsAreDeterministic", checkResultsAreDeterministic},
+
+		// Optional capabilities. Each check skips when the provider does not
+		// implement the interface; when it does, the check asserts that the
+		// capability AGREES with the required method it accelerates. A batch that
+		// disagrees with its per-concept equivalent is the worst possible bug
+		// here: the evaluator prefers the batch, so the disagreement decides the
+		// answer and nothing else would notice.
+		{"BatchPropertiesAgreesWithPerConcept", checkBatchPropertiesAgrees},
+		{"BatchConcreteValuesAgreesWithPerPair", checkBatchConcreteValuesAgrees},
+		{"InboundRelationshipsAgreesWithTargets", checkInboundAgreesWithTargets},
+		{"NegatedDescriptionIsNotSetSubtraction", checkNegatedDescriptionIsRowLevel},
 	}
 
 	for _, c := range checks {
@@ -400,6 +411,188 @@ func checkResultsAreDeterministic(ctx context.Context, t *testing.T, p ecl.DataP
 			t.Fatalf("Descendants returned different results for the same input: %v vs %v", a, b)
 		}
 	}
+}
+
+// checkBatchPropertiesAgrees covers BatchPropertiesProvider returning the same
+// relationships as PropertiesByGroup.
+//
+// The evaluator prefers the batch when it is present, so a disagreement decides
+// every refinement's answer and nothing else in the suite would catch it.
+func checkBatchPropertiesAgrees(ctx context.Context, t *testing.T, p ecl.DataProvider) {
+	batch, ok := p.(ecl.BatchPropertiesProvider)
+	if !ok {
+		t.Skip("the provider does not implement ecl.BatchPropertiesProvider; the evaluator will call PropertiesByGroup once per focus concept")
+	}
+
+	all := mustAllConcepts(ctx, t, p)
+	ids := sample(all, 20)
+
+	batched, err := batch.PropertiesByGroupBatch(ctx, ids)
+	if err != nil {
+		t.Fatalf("PropertiesByGroupBatch: %v", err)
+	}
+
+	for _, id := range ids {
+		single, err := p.PropertiesByGroup(ctx, id)
+		if err != nil {
+			continue
+		}
+		for group, rels := range single {
+			if len(rels) != len(batched[id][group]) {
+				t.Errorf("concept %s group %d: PropertiesByGroup returned %d relationships, PropertiesByGroupBatch %d",
+					id, group, len(rels), len(batched[id][group]))
+			}
+		}
+		// The batch must not invent groups either.
+		for group := range batched[id] {
+			if _, ok := single[group]; !ok {
+				t.Errorf("concept %s: PropertiesByGroupBatch reported group %d, which PropertiesByGroup does not", id, group)
+			}
+		}
+	}
+}
+
+// checkBatchConcreteValuesAgrees covers BatchConcreteValuesProvider returning the
+// same values as ConcreteValues, for the same reason.
+func checkBatchConcreteValuesAgrees(ctx context.Context, t *testing.T, p ecl.DataProvider) {
+	batch, ok := p.(ecl.BatchConcreteValuesProvider)
+	if !ok {
+		t.Skip("the provider does not implement ecl.BatchConcreteValuesProvider; the evaluator will call ConcreteValues once per concept and type")
+	}
+
+	all := mustAllConcepts(ctx, t, p)
+	ids := sample(all, 20)
+	types := sample(all, 10) // any concept may be an attribute type
+
+	batched, err := batch.ConcreteValuesBatch(ctx, ids, types)
+	if err != nil {
+		t.Fatalf("ConcreteValuesBatch: %v", err)
+	}
+
+	found := false
+	for _, id := range ids {
+		for _, typeID := range types {
+			single, err := p.ConcreteValues(ctx, id, typeID)
+			if err != nil {
+				continue
+			}
+			if len(single) > 0 {
+				found = true
+			}
+			if len(single) != len(batched[id][typeID]) {
+				t.Errorf("concept %s type %s: ConcreteValues returned %d values, ConcreteValuesBatch %d",
+					id, typeID, len(single), len(batched[id][typeID]))
+			}
+		}
+	}
+	if !found {
+		t.Skip("no concrete value found among the sampled pairs, so agreement could only be checked on empty results")
+	}
+}
+
+// checkInboundAgreesWithTargets covers InboundRelationshipsProvider agreeing with
+// RelationshipTargets about WHICH concepts are pointed at.
+//
+// The capability adds the multiplicity a Set cannot carry, but the membership must
+// still match: the evaluator uses RelationshipTargets for `R attr = value` and the
+// capability for the counted forms, so a disagreement makes two spellings of one
+// question give different answers.
+func checkInboundAgreesWithTargets(ctx context.Context, t *testing.T, p ecl.DataProvider) {
+	inbound, ok := p.(ecl.InboundRelationshipsProvider)
+	if !ok {
+		t.Skip("the provider does not implement ecl.InboundRelationshipsProvider; a cardinality or \"!=\" on a reverse attribute will report ErrUnsupportedFeature")
+	}
+
+	all := mustAllConcepts(ctx, t, p)
+	types := ecl.NewSetFromSlice(sample(all, 10))
+
+	byTarget, err := inbound.InboundRelationships(ctx, all, types)
+	if err != nil {
+		t.Fatalf("InboundRelationships: %v", err)
+	}
+	if len(byTarget) == 0 {
+		t.Skip("no inbound relationship found for the sampled types, so agreement cannot be checked")
+	}
+
+	// Every target the capability reports must also be a target according to
+	// RelationshipTargets, asked with the sources the capability named.
+	for target, rels := range byTarget {
+		sources := make([]string, 0, len(rels))
+		for _, r := range rels {
+			sources = append(sources, r.SourceID)
+		}
+		targets, err := p.RelationshipTargets(ctx, ecl.NewSetFromSlice(sources), types)
+		if err != nil {
+			t.Skipf("RelationshipTargets reported: %v", err)
+		}
+		if !nonNilSet(targets).Contains(target) {
+			t.Errorf("InboundRelationships says %v point at %s, but RelationshipTargets does not report %s as a target",
+				sources, target, target)
+		}
+	}
+}
+
+// checkNegatedDescriptionIsRowLevel covers NegatingDescriptionProvider negating
+// per description ROW rather than by subtracting sets.
+//
+// The distinction is the entire reason the capability exists: a concept holding
+// both an FSN and a Spanish synonym satisfies `language != es` through the FSN, so
+// the negated result is NOT the complement of the positive one. A provider that
+// implements the interface by subtracting has changed nothing.
+func checkNegatedDescriptionIsRowLevel(ctx context.Context, t *testing.T, p ecl.DataProvider) {
+	negating, ok := p.(ecl.NegatingDescriptionProvider)
+	if !ok {
+		t.Skip("the provider does not implement ecl.NegatingDescriptionProvider; negated description filters will report ErrUnsupportedFeature")
+	}
+
+	// Find a concept with descriptions in TWO languages: it is the only shape that
+	// tells row-level negation apart from set subtraction, because it must appear
+	// in both the positive and the negated result.
+	byLanguage := map[string]ecl.Set{}
+	for _, code := range []string{"en", "es", "fr", "de", "nl", "sv", "da", "no", "fi", "et"} {
+		set, err := p.MatchDescription(ctx, ecl.DescriptionFilterOpts{Languages: []string{code}})
+		if err != nil {
+			t.Skipf("MatchDescription reported: %v", err)
+		}
+		if s := nonNilSet(set); s.Len() > 0 {
+			byLanguage[code] = s
+		}
+	}
+	if len(byLanguage) < 2 {
+		t.Skip("fewer than two description languages found among the common codes, so row-level negation cannot be told apart from set subtraction here")
+	}
+
+	for language, positive := range byLanguage {
+		// Concepts in this language that are also in some other language.
+		multilingual := ecl.NewSet()
+		for other, set := range byLanguage {
+			if other != language {
+				multilingual = multilingual.Union(positive.Intersect(set))
+			}
+		}
+		if multilingual.Len() == 0 {
+			continue
+		}
+
+		negated, err := negating.MatchDescriptionNegated(ctx, ecl.NegatedDescriptionFilterOpts{
+			Opts:             ecl.DescriptionFilterOpts{Languages: []string{language}},
+			LanguagesNegated: true,
+		})
+		if err != nil {
+			t.Fatalf("MatchDescriptionNegated: %v", err)
+		}
+
+		missing := multilingual.Minus(nonNilSet(negated))
+		if missing.Len() > 0 {
+			t.Errorf("%v have a description in %q AND in another language, so they satisfy `language != %s` "+
+				"through that other description, but MatchDescriptionNegated omits them. "+
+				"The negation has to be applied per description ROW; subtracting the concepts that have a %q "+
+				"description is what this capability exists to replace.",
+				missing.Slice(), language, language, language)
+		}
+		return
+	}
+	t.Skip("no concept found with descriptions in two languages, so row-level negation cannot be told apart from set subtraction here")
 }
 
 // ---------------------------------------------------------------------------

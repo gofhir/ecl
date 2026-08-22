@@ -620,6 +620,51 @@ func filterByReverseCounted(
 	return out, nil
 }
 
+// concreteValuesFor fetches the concrete values of every (concept, type) pair the
+// clause needs.
+//
+// A provider implementing BatchConcreteValuesProvider answers in one call. Without
+// it this falls back to ConcreteValues once per pair, which the signature forces:
+// a wildcard attribute type over N concepts and T types costs N×T round trips.
+func concreteValuesFor(ctx context.Context, provider DataProvider, focus Set, typeIDs []string) (map[string]map[string][]ConcreteValue, error) {
+	ids := toIDSlice(focus)
+	if len(ids) == 0 || len(typeIDs) == 0 {
+		return map[string]map[string][]ConcreteValue{}, nil
+	}
+
+	if batch, ok := provider.(BatchConcreteValuesProvider); ok {
+		out, err := batch.ConcreteValuesBatch(ctx, ids, typeIDs)
+		if err != nil {
+			return nil, fmt.Errorf("%w: ConcreteValuesBatch: %w", ErrProvider, err)
+		}
+		if out == nil {
+			out = map[string]map[string][]ConcreteValue{}
+		}
+		return out, nil
+	}
+
+	out := make(map[string]map[string][]ConcreteValue, len(ids))
+	for _, id := range ids {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		for _, typeID := range typeIDs {
+			values, err := provider.ConcreteValues(ctx, id, typeID)
+			if err != nil {
+				return nil, fmt.Errorf("%w: ConcreteValues(%s, %s): %w", ErrProvider, id, typeID, err)
+			}
+			if len(values) == 0 {
+				continue
+			}
+			if out[id] == nil {
+				out[id] = make(map[string][]ConcreteValue)
+			}
+			out[id][typeID] = values
+		}
+	}
+	return out, nil
+}
+
 // propertiesFor fetches the relationships of every concept in the focus set.
 //
 // A provider that implements BatchPropertiesProvider answers in one call. Without
@@ -1773,12 +1818,14 @@ func filterByConcreteValue(ctx context.Context, focus Set, attr *ast.Attribute, 
 
 	typeIDList := typeIDs.Slice()
 
+	valuesByConcept, err := concreteValuesFor(ctx, provider, focus, typeIDList)
+	if err != nil {
+		return nil, err
+	}
+
 	out := newMapSet()
 	var iterErr error
 	focus.Iter(func(id string) bool {
-		// One provider call per concept, so this is where a canceled request has
-		// to stop. Checking only on entry to Evaluate let a canceled context run
-		// the whole loop.
 		if err := ctx.Err(); err != nil {
 			iterErr = err
 			return false
@@ -1789,12 +1836,7 @@ func filterByConcreteValue(ctx context.Context, focus Set, attr *ast.Attribute, 
 		// one".
 		matches := 0
 		for _, typeID := range typeIDList {
-			values, err := provider.ConcreteValues(ctx, id, typeID)
-			if err != nil {
-				iterErr = fmt.Errorf("%w: ConcreteValues(%s, %s): %w", ErrProvider, id, typeID, err)
-				return false
-			}
-			for _, cv := range values {
+			for _, cv := range valuesByConcept[id][typeID] {
 				switch {
 				case haveNumeric && (cv.Kind == "integer" || cv.Kind == "decimal"):
 					f, parseErr := strconv.ParseFloat(cv.Value, 64)
