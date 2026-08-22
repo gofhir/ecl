@@ -11,7 +11,14 @@
 **Restricción central — la librería está publicada en v1.1.0.** `DataProvider`, `ecl.Set` y `ecl/ast` están bajo la promesa de compatibilidad de Go. El plan se divide en dos fases por eso:
 
 - **Fase A → v1.2.0.** Todo lo que se puede arreglar sin cambiar una firma exportada. Incluye los 5 defectos de semántica y los 2 de parser. Cambios aditivos a structs (nuevos campos) están permitidos; añadir un método a `DataProvider` no.
-- **Fase B → v2.0.0** con ruta de módulo `/v2`. Un único release que agrupa todas las rupturas: firmas batch, el método que falta para la cardinalidad reverse, negación a nivel de fila, y la retirada de los campos que la Fase A deja deprecados.
+- **Fase B → ~~v2.0.0~~ interfaces de capacidad opcionales, sin major.** Decisión del 2026-08-22:
+  el proyecto no quiere versiones mayores. Eso resultó ser mejor diseño, no una limitación. Todo lo que
+  esta fase iba a romper —firmas batch, el método que falta para la cardinalidad reverse, negación a
+  nivel de fila— se ofrece como interfaces que el evaluador detecta con type assertion, el patrón que
+  la librería estándar usa para `io.ReaderFrom` y `http.Flusher`. Implementar una **nunca es
+  obligatorio y nunca rompe nada**, y el evaluador cae al camino anterior o reporta lo que no puede.
+  Los campos deprecados se quedan poblados para siempre; y el doble segmento del import path
+  (`github.com/gofhir/ecl/ecl`) es permanente, que conviene que sea una decisión consciente.
 
 **Tech Stack:** Go 1.24, ANTLR4 runtime v4.13.x, testify (assert/require)
 
@@ -57,10 +64,40 @@ respaldado por el godoc que la librería ya publica (`provider.go:47-48`), no po
 | 5 · Cardinalidad | ✅ **hecha** | Grupos contados sin `break`, grupo 0 excluido, valores concretos contados. **C2 respetada**: no se invierte `!=` en la ruta concreta, con test anti-regresión. 6 casos nuevos. |
 | 6 · Top/Bottom | ✅ **hecha** | `Ancestors`/`Descendants`. El test del plan era vacuo; el par discriminante es abuelo/nieto con el intermedio ausente. `bottomOfSet` no tenía ningún test. |
 | 7 · Negación de filtros | ✅ **hecha** | Filtros de concepto por cláusula con `Intersect`/`Minus`; filtros de descripción con `ErrUnsupportedFeature`. Los 3 artefactos verdes que la revisión listó, convertidos en el mismo commit. Resuelto el doble dueño de la negación del dialecto. |
-| 8 · Ramas del parser | 🟡 **parcial** | `dialectId` poblado (con sets y acceptability) y `memberField` con literales, ambos funcionando. La forma **alias** (`dialect = en-gb`) queda con error explícito: mapear alias→refset es dato terminológico, no algo que el parser pueda inventar. Pendientes: `descriptionIdFilter`, escapes y operandos de conjunto. |
+| 8 · Ramas del parser | ✅ **hecha** | `dialectId` con sets y acceptability, `memberField` con literales, `descriptionIdFilter` modelado, escapes decodificados (dejando `\*` en patrones wild), y los operandos de conjunto recogidos completos. Donde el contrato del provider puede llevar la forma nueva (`ModuleIDs`, `DefinitionStatusIDs`) se arregló de punta a punta; donde no (`D id`, conjunto de términos, conjunto de `effectiveTime`), `ErrUnsupportedFeature`. La forma alias `dialect = en-gb` queda con error explícito: mapear alias→refset es dato terminológico. |
 | 9 · Contrato del provider | ✅ **hecha** | Preámbulo de contrato en el interface, `nonNil`, `ctx.Err()`, eje `active` redefinido. `nilProvider` con los 18 métodos sobre 8 expresiones que antes panicaban. |
 | 10 · Historia | ✅ **hecha** | Dirección invertida, godoc corregido, suite reescrita desde el lado activo. Tres asociaciones en tiers distintos para que MIN/MOD/MAX discriminen — antes los tres devolvían lo mismo. |
-| 11-17a | ⬜ pendientes | Task 11 (termMatches y cobertura), 12 (MRCM), 13 (SCG/SCTID), 14 (CLI), 15 (README), 16 (CI), 17a (providertest). |
+| 11 · termMatches y cobertura | ✅ **hecha** | `match` como prefijo de palabra; rama `regex` inalcanzable eliminada. |
+| 12 · MRCM | ✅ **hecha** | Dominios en disyunción, `Min` sobre las reglas del modelo (`Model.AllDomains`), regla inválida como `IssueKindInvalidRule`, loader valida el ECL, issues duplicados eliminados. |
+| 13 · SCG + SCTID | ✅ **hecha** | Grupos yuxtapuestos (el ejemplo canónico ya parsea), default `===`, particiones SCTID. |
+| 14 · CLI | ✅ **hecha** | Diagnósticos a stderr, `-h` con código 0, códigos de salida tipados (3 sintaxis / 4 no soportado). Cobertura 0 % → 55.2 %. |
+| 15 · README | ✅ **hecha** | 7 `Example` compilables como fuente de verdad; corregidas las afirmaciones falsas (N+1, `internal/` reutilizable, salida de `explain`); sección de limitaciones conocidas. |
+| 16 · Proceso | ✅ **hecha** | Matriz 3×2, gate de `tidy` (fallaba), gate de regeneración del parser **verificado byte a byte**, umbrales de complejidad que muerden, `dependabot.yml`, `release.yml` alineado, `make check`. |
+| 17a · providertest | ✅ **hecha** | Paquete público con la suite **embebida**: el binario instalado ya corre las 95 desde cualquier directorio. `Verify` + `UnimplementedDataProvider`. |
+
+**Fase A completa, y la Fase B resuelta sin major.** Las cuatro capacidades opcionales viven en
+`ecl/capabilities.go`, las cuatro están conectadas al evaluador, y `providertest.VerifyContract` tiene
+un check por capacidad que verifica que **coincida con el método obligatorio que acelera** — el fallo
+que importa, porque el evaluador prefiere la capacidad y una discrepancia decidiría cada respuesta en
+silencio.
+
+| Capacidad | Qué desbloquea | Medido |
+|---|---|---|
+| `BatchPropertiesProvider` | El N+1 real de las refinaciones | 27 llamadas → 1 |
+| `BatchConcreteValuesProvider` | Los valores concretos, que costaban N×T | — |
+| `InboundRelationshipsProvider` | `[m..n] R attr = value` y `R attr != value` | — |
+| `NegatingDescriptionProvider` | Los filtros de descripción negados | — |
+
+Lo que sigue pendiente y **no** lo resuelve una capacidad:
+
+- **Las formas reverse de grupo** (`{ R a != x }`, `{ R a = x OR R b = y }`, `[m..n] { R a = x }`).
+  `conceptMatchesGroupWithReverse` recorre los grupos de los conceptos *origen*, así que hay que
+  replantear la función, no solo darle datos. Es la única tarea de diseño que queda.
+- **El dialecto por alias**, que necesita un mapeo alias→refset. Cabría otra capacidad
+  (`DialectAliasResolver`) en vez de una tabla parcial inventada.
+- **Conjuntos de términos y de `effectiveTime`**, cuya semántica any-of las `Opts` no expresan.
+- **Opciones funcionales en `Evaluate`** (`WithMaxDepth`, `WithCache`), que son aditivas y quedan
+  disponibles cuando se necesiten.
 
 **Tabla de aceptación: 12 de 13 filas pasan.** La única que queda es el dialecto por alias, y es una
 decisión deliberada: devuelve `ErrUnsupportedFeature` en lugar de un conjunto silenciosamente vacío.
