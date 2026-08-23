@@ -84,15 +84,3 @@ cases:
     expression: "* : [2..*] { R 363698007 = 22298006 }"
     expectError: true
 
-  # The GROUP forms of a reverse attribute stay unsupported even with
-  # InboundRelationshipsProvider: conceptMatchesGroupWithReverse walks the groups
-  # of the SOURCE concepts, so the missing count is not the only problem.
-  # The ungrouped forms moved to 04-refinement.yaml once the fixture gained the
-  # capability.
-  - name: not-equals on a reverse attribute inside a group is reported as unsupported
-    expression: "* : { R 363698007 != 22298006 }"
-    expectError: true
-
-  - name: disjunction inside a group with a reverse attribute is reported as unsupported
-    expression: "* : { R 363698007 = 22298006 OR R 116676008 = 22298006 }"
-    expectError: true

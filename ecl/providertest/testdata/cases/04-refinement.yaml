@@ -151,3 +151,23 @@ cases:
   - name: reverse attribute not-equals counts within the type
     expression: "* : R 363698007 != 22298006"
     expectedIds: ["113331007"]
+
+  # Reverse attributes INSIDE a group. The group belongs to the source concept, so
+  # `{ R attr = value, other = x }` reads "some source has a group holding both
+  # (attr -> focus) and (other -> x)".
+  - name: reverse attribute in a group with a sibling clause
+    expression: "* : { R 363698007 = 22298006, 116676008 = 55641003 }"
+    expectedIds: ["74281007"]
+
+  # "!=" negates the VALUE — which source counts — not the existence of the
+  # relationship, so it agrees with the ungrouped form. It used to behave exactly
+  # like "=".
+  - name: not-equals on a reverse attribute inside a group
+    expression: "* : { R 363698007 != 22298006 }"
+    expectedIds: ["113331007"]
+
+  # A disjunction is evaluated per source group rather than on a flattened clause
+  # list, which could only conjoin and so returned the empty set.
+  - name: disjunction of reverse attributes inside a group
+    expression: "* : { R 363698007 = 22298006 OR R 116676008 = 22298006 }"
+    expectedIds: ["74281007", "113331007", "55641003"]

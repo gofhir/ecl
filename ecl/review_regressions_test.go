@@ -271,18 +271,27 @@ func TestEvaluate_ReversePathIsConsistent(t *testing.T) {
 	require.ElementsMatch(t, []string{"113331007"},
 		evalFixture(t, "* : R 363698007 != 22298006").Slice())
 
-	// The group forms stay unsupported: conceptMatchesGroupWithReverse walks the
-	// groups of the SOURCE concepts, so the counting problem is not the only one.
-	for _, expr := range []string{
-		"* : { R 363698007 != 22298006 }",
-		"* : { R 363698007 = 22298006 OR R 116676008 = 22298006 }",
-		"* : [2..*] { R 363698007 = 22298006 }",
-	} {
-		t.Run(expr, func(t *testing.T) {
-			_, err := evalFixtureErr(t, expr)
-			require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
-		})
-	}
+	// Inside a group the same clause must give the same answer: the group lives on
+	// the SOURCE concept, but "!=" still negates the VALUE — which source is
+	// considered — not the existence of the relationship.
+	require.ElementsMatch(t,
+		evalFixture(t, "* : R 363698007 != 22298006").Slice(),
+		evalFixture(t, "* : { R 363698007 != 22298006 }").Slice())
+
+	// A disjunction inside the group is the union of its operands, evaluated per
+	// source group rather than on a flattened clause list.
+	left := evalFixture(t, "* : { R 363698007 = 22298006 }")
+	right := evalFixture(t, "* : { R 116676008 = 22298006 }")
+	both := evalFixture(t, "* : { R 363698007 = 22298006 OR R 116676008 = 22298006 }")
+	require.ElementsMatch(t, left.Union(right).Slice(), both.Slice())
+	require.NotEmpty(t, right.Slice(), "the second operand must contribute something")
+
+	// A group cardinality combined with a reverse clause stays unsupported, and
+	// for a different reason: the group belongs to the source concept, so what
+	// `[2..*]` counts is undefined rather than merely unimplemented.
+	_, err := evalFixtureErr(t, "* : [2..*] { R 363698007 = 22298006 }")
+	require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
+	require.Contains(t, err.Error(), "no defined meaning")
 }
 
 // TestEvaluate_ReverseCountingNeedsTheCapability covers the fallback: a provider

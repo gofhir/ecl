@@ -774,7 +774,7 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 		}
 	}
 
-	if err := checkReverseGroupSupport(clauses, tree, grp.Cardinality); err != nil {
+	if err := checkReverseGroupSupport(clauses, grp.Cardinality); err != nil {
 		return nil, err
 	}
 
@@ -822,7 +822,7 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 			// SOURCE concepts, so any count derived from it would be counting
 			// someone else's groups. Group cardinality combined with a reverse
 			// clause is therefore not supported; see the known limitations.
-			matched, err := conceptMatchesGroupWithReverse(ctx, id, clauses, provider)
+			matched, err := conceptMatchesGroupWithReverse(ctx, id, tree, provider)
 			if err != nil {
 				iterErr = err
 				return false
@@ -882,46 +882,27 @@ const (
 //   - a group cardinality: the path can only report 1 or 0, and it counts the
 //     source concepts' groups rather than the focus concept's, so `[2..*]`
 //     returned the empty set and `[0..0]` returned everything.
-func checkReverseGroupSupport(clauses []attrClause, tree *clauseSet, cardinality *ast.Cardinality) error {
+func checkReverseGroupSupport(clauses []attrClause, cardinality *ast.Cardinality) error {
 	hasReverse := false
 	for _, c := range clauses {
-		if !c.reverse {
-			continue
-		}
-		hasReverse = true
-		if c.op == "!=" {
-			return fmt.Errorf("%w: %q on a reverse attribute inside a group needs the per-type inbound total",
-				ErrUnsupportedFeature, c.op)
+		if c.reverse {
+			hasReverse = true
+			break
 		}
 	}
-	if !hasReverse {
+	if !hasReverse || cardinality == nil {
 		return nil
 	}
-	if containsDisjunction(tree) {
-		return fmt.Errorf("%w: a disjunction inside an attribute group containing a reverse attribute is evaluated on the flattened clause list, which cannot express OR",
-			ErrUnsupportedFeature)
-	}
-	if cardinality != nil {
-		return fmt.Errorf("%w: group cardinality [%d..%s] combined with a reverse attribute needs a provider method that preserves inbound multiplicity",
-			ErrUnsupportedFeature, cardinality.Min, cardinalityMaxText(cardinality))
-	}
-	return nil
-}
 
-// containsDisjunction reports whether a resolved clause tree has an OR anywhere.
-func containsDisjunction(cs *clauseSet) bool {
-	if cs == nil || cs.leaf != nil {
-		return false
-	}
-	if cs.op == ast.AttrSetOr && len(cs.items) > 1 {
-		return true
-	}
-	for _, item := range cs.items {
-		if containsDisjunction(item) {
-			return true
-		}
-	}
-	return false
+	// A group cardinality counts the FOCUS concept's matching relationship
+	// groups, but with a reverse clause the group belongs to the SOURCE concept.
+	// So `[2..*]` could mean two matching groups on one source, two distinct
+	// sources, or two groups summed across all of them — three different answers,
+	// and the specification does not say which. Reporting beats inventing one;
+	// the previous code applied the cardinality to a 1/0 pseudo-count, which
+	// answered `[2..*]` with the empty set and `[0..0]` with everything.
+	return fmt.Errorf("%w: group cardinality [%d..%s] combined with a reverse attribute has no defined meaning — the group belongs to the source concept, not the focus",
+		ErrUnsupportedFeature, cardinality.Min, cardinalityMaxText(cardinality))
 }
 
 // cardinalityMaxText renders a cardinality's upper bound, with "*" for unbounded.
@@ -1111,11 +1092,8 @@ func clauseSatisfied(rels []Relationship, c attrClause) bool {
 // reverse clauses. For each reverse clause, it finds sources that point to
 // this concept with the given type, then checks if any source has a group
 // where all clauses (forward and reverse) are satisfied.
-func conceptMatchesGroupWithReverse(ctx context.Context, conceptID string, clauses []attrClause, provider DataProvider) (bool, error) {
-	for _, c := range clauses {
-		if !c.reverse {
-			continue
-		}
+func conceptMatchesGroupWithReverse(ctx context.Context, conceptID string, tree *clauseSet, provider DataProvider) (bool, error) {
+	for _, c := range reverseLeaves(tree) {
 		focusSet := NewSetFromSlice([]string{conceptID})
 		sources, err := provider.RelationshipSources(ctx, focusSet, c.typeIDs)
 		if err != nil {
@@ -1125,19 +1103,30 @@ func conceptMatchesGroupWithReverse(ctx context.Context, conceptID string, claus
 		// evaluator: this path was missed by the normalization at the top level,
 		// because the Set never travels through Evaluate.
 		sources = nonNil(sources)
-		// Filter sources to those in the value set (unless wildcard).
+
+		// The value set selects WHICH sources count, and that is where "!="
+		// belongs: `R attr != x` means "pointed at by a relationship of this type
+		// whose SOURCE is not x", mirroring the forward reading of "!=" as a
+		// negation of the value rather than of the attribute's existence.
+		// Negating inside the group instead made `{ R a != x }` behave exactly
+		// like `{ R a = x }`.
 		if !c.valueIsAny && c.valueSet != nil {
-			sources = sources.Intersect(c.valueSet)
+			if c.op == "!=" {
+				sources = sources.Minus(c.valueSet)
+			} else {
+				sources = sources.Intersect(c.valueSet)
+			}
 		}
 		if sources.Len() == 0 {
-			return false, nil
+			continue
 		}
+
 		found := false
 		var iterErr error
 		sources.Iter(func(srcID string) bool {
 			srcGroups, err := provider.PropertiesByGroup(ctx, srcID)
 			if err != nil {
-				iterErr = err
+				iterErr = fmt.Errorf("%w: PropertiesByGroup(%s): %w", ErrProvider, srcID, err)
 				return false
 			}
 			for gnum, rels := range srcGroups {
@@ -1149,7 +1138,7 @@ func conceptMatchesGroupWithReverse(ctx context.Context, conceptID string, claus
 				if gnum == 0 {
 					continue
 				}
-				if groupSatisfiesClausesWithReverse(rels, clauses, conceptID) {
+				if groupSatisfiesSetWithReverse(rels, tree, conceptID) {
 					found = true
 					return false
 				}
@@ -1166,46 +1155,71 @@ func conceptMatchesGroupWithReverse(ctx context.Context, conceptID string, claus
 	return false, nil
 }
 
-// groupSatisfiesClausesWithReverse is like groupSatisfiesClauses but handles
-// reverse clauses by checking that the relationship targets the given conceptID.
-func groupSatisfiesClausesWithReverse(rels []Relationship, clauses []attrClause, reverseTargetID string) bool {
-	for _, c := range clauses {
-		count := 0
-		for _, r := range rels {
-			if !c.typeIDs.Contains(r.TypeID) {
-				continue
-			}
-			switch {
-			case c.reverse:
-				// Reverse: the relationship must target our focus concept.
-				if r.TargetID == reverseTargetID {
-					count++
-				}
-			case c.isConcrete:
-				if r.ConcreteValue != nil && matchConcreteValue(r.ConcreteValue, c) {
-					count++
-				}
-			default:
-				hit := c.valueIsAny || c.valueSet.Contains(r.TargetID)
-				if hit {
-					count++
-				}
+// reverseLeaves collects the reverse clauses of a tree. Each is a possible entry
+// point: the sources it names are the concepts whose groups might satisfy the
+// whole tree.
+func reverseLeaves(cs *clauseSet) []attrClause {
+	if cs == nil {
+		return nil
+	}
+	if cs.leaf != nil {
+		if cs.leaf.reverse {
+			return []attrClause{*cs.leaf}
+		}
+		return nil
+	}
+	var out []attrClause
+	for _, item := range cs.items {
+		out = append(out, reverseLeaves(item)...)
+	}
+	return out
+}
+
+// groupSatisfiesSetWithReverse is groupSatisfiesSet for a group that contains a
+// reverse clause, honoring AND/OR at each level.
+//
+// It used to take the FLATTENED clause list, so it could only conjoin:
+// `{ R a = x OR R b = y }` was answered with the empty set instead of the union.
+func groupSatisfiesSetWithReverse(rels []Relationship, cs *clauseSet, reverseTargetID string) bool {
+	if cs == nil {
+		return true
+	}
+	if cs.leaf != nil {
+		return clauseSatisfiedWithReverse(rels, *cs.leaf, reverseTargetID)
+	}
+	if cs.op == ast.AttrSetOr {
+		for _, item := range cs.items {
+			if groupSatisfiesSetWithReverse(rels, item, reverseTargetID) {
+				return true
 			}
 		}
-		if c.op == "!=" && !c.isConcrete && !c.reverse {
-			totalOfType := 0
-			for _, r := range rels {
-				if c.typeIDs.Contains(r.TypeID) {
-					totalOfType++
-				}
-			}
-			count = totalOfType - count
-		}
-		if !cardinalitySatisfied(c.cardinality, count) {
+		return false
+	}
+	for _, item := range cs.items {
+		if !groupSatisfiesSetWithReverse(rels, item, reverseTargetID) {
 			return false
 		}
 	}
 	return true
+}
+
+// clauseSatisfiedWithReverse reports whether one group of the SOURCE concept
+// satisfies one clause.
+//
+// A reverse clause is satisfied when the group holds a relationship of the type
+// pointing at the focus concept. Which sources are considered at all — and so
+// where "!=" applies — was already decided by conceptMatchesGroupWithReverse.
+func clauseSatisfiedWithReverse(rels []Relationship, c attrClause, reverseTargetID string) bool {
+	if !c.reverse {
+		return clauseSatisfied(rels, c)
+	}
+	count := 0
+	for _, r := range rels {
+		if c.typeIDs.Contains(r.TypeID) && r.TargetID == reverseTargetID {
+			count++
+		}
+	}
+	return cardinalitySatisfied(c.cardinality, count)
 }
 
 // matchConcreteValue checks if a stored concrete value satisfies the clause comparison.
