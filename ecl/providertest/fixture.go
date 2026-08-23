@@ -631,23 +631,25 @@ func (p *inMemoryProvider) ResolveIdentifier(_ context.Context, scheme, code str
 	return ecl.NewSet(), nil
 }
 
+// MatchDialect returns the concepts whose descriptions satisfy the dialect
+// filter.
+//
+// Note that opts.Negate inverts the match at the DESCRIPTION ROW level, which is
+// why the evaluator hands the flag over rather than subtracting sets: a concept
+// with a preferred term in en-gb and another in en-us satisfies
+// `dialectId != <en-gb refset>` through the en-us row. Ignoring the flag made the
+// negated form return exactly the same set as the positive one.
 func (p *inMemoryProvider) MatchDialect(_ context.Context, concepts ecl.Set, opts ecl.DialectFilterOpts) (ecl.Set, error) {
 	out := ecl.NewSet()
 	if concepts == nil {
 		return out, nil
 	}
 	concepts.Iter(func(id string) bool {
-		for _, entry := range opts.Dialects {
-			for _, d := range p.spec.Dialects {
-				if d.ConceptID != id {
-					continue
-				}
-				if !contains(entry.DialectIDs, d.DialectID) {
-					continue
-				}
-				if len(entry.AcceptabilityIDs) > 0 && !contains(entry.AcceptabilityIDs, d.AcceptabilityID) {
-					continue
-				}
+		for _, d := range p.spec.Dialects {
+			if d.ConceptID != id {
+				continue
+			}
+			if dialectRowMatches(d, opts.Dialects) != opts.Negate {
 				out = out.Union(ecl.NewSetFromSlice([]string{id}))
 				return true
 			}
@@ -655,6 +657,21 @@ func (p *inMemoryProvider) MatchDialect(_ context.Context, concepts ecl.Set, opt
 		return true
 	})
 	return out, nil
+}
+
+// dialectRowMatches reports whether one dialect membership row satisfies any entry
+// of the filter, which is the any-of semantics DialectEntryOpts documents.
+func dialectRowMatches(d FixtureDialectMember, entries []ecl.DialectEntryOpts) bool {
+	for _, entry := range entries {
+		if !contains(entry.DialectIDs, d.DialectID) {
+			continue
+		}
+		if len(entry.AcceptabilityIDs) > 0 && !contains(entry.AcceptabilityIDs, d.AcceptabilityID) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func (p *inMemoryProvider) RefsetMembersFiltered(_ context.Context, refsetIDs []string, opts ecl.MemberFilterOpts) (ecl.Set, error) {

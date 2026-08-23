@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/gofhir/ecl/ecl/ast"
 )
@@ -199,7 +200,8 @@ func evaluateNode(ctx context.Context, expr ast.Expression, provider DataProvide
 		// the projection. Use a MemberFieldFilter inside a {{ M ... }}
 		// constraint when you need per-field filtering.
 		if len(e.Fields) > 0 {
-			return nil, fmt.Errorf("MemberOf field projection ^[%v] is not supported by Evaluate; use a member filter constraint instead", e.Fields)
+			return nil, fmt.Errorf("%w: MemberOf field projection ^[%s]; Set carries concept IDs only, so use a {{ M ... }} member filter instead",
+				ErrUnsupportedFeature, strings.Join(e.Fields, ","))
 		}
 		refsetIDs, err := Evaluate(ctx, e.Operand, provider)
 		if err != nil {
@@ -1333,11 +1335,10 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 	// Dialect filters — separate from description filters because they use a
 	// dedicated provider method.
 	//
-	// Negated dialect filters are rejected above with the rest of the
-	// description family, so only the positive form reaches here. That also
-	// resolves a double-negation hazard: DialectFilterOpts.Negate already asks
-	// the provider to negate, and this loop used to apply Minus on top of it.
-	// The provider is the single owner of the negation.
+	// The provider is the single owner of the negation: buildDialectFilterOpts
+	// puts the operator in DialectFilterOpts.Negate and MatchDialect answers
+	// accordingly. This loop must therefore intersect whatever comes back and
+	// never subtract, or the negation would be applied twice.
 	for _, f := range descFilters {
 		df, ok := f.(*ast.DialectFilter)
 		if !ok {
@@ -1626,10 +1627,11 @@ func negatedDescriptionFilter(filters []ast.Filter) (string, bool) {
 			if x.Op == "!=" {
 				return "language", true
 			}
-		case *ast.DialectFilter:
-			if x.Op == "!=" {
-				return "dialect", true
-			}
+			// A DialectFilter is deliberately absent here. Its negation travels
+			// to the provider through DialectFilterOpts.Negate, so it needs no
+			// NegatingDescriptionProvider — and counting it here demanded that
+			// capability for an expression the provider can already answer,
+			// while the dialect loop applied the clause a second time.
 		}
 	}
 	return "", false

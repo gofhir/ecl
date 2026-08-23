@@ -7,8 +7,10 @@ import "context"
 // in-memory maps, Elasticsearch, etc.).
 //
 // Most methods take slices/sets so they can be answered with a batch query.
-// Two are per-concept by signature (ConcreteValues and PropertiesByGroup) and
-// are called once per focus concept; batching them is a planned breaking change.
+// Two are per-concept by signature (ConcreteValues and PropertiesByGroup) and are
+// called once per focus concept. Implement the optional BatchPropertiesProvider
+// and BatchConcreteValuesProvider to collapse those loops into one call each; see
+// capabilities.go, which also lists what else an optional interface unlocks.
 //
 // # Contract
 //
@@ -161,7 +163,10 @@ type DescriptionFilterOpts struct {
 	// Term is a substring or phrase to match (case-insensitive).
 	Term string
 
-	// MatchType is "match", "wild" (glob), or "regex". Default "match".
+	// MatchType is "match" (word-prefix, the default) or "wild" (glob).
+	//
+	// A "match" search succeeds when every word of Term is a prefix of some word
+	// of the description, in any order — not a substring test.
 	MatchType string
 
 	// TypeIDs filters by description type SCTIDs (any-of). Empty = no filter.

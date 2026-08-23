@@ -3,6 +3,7 @@ package providertest
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 
 	"github.com/gofhir/ecl/ecl"
@@ -562,7 +563,17 @@ func checkNegatedDescriptionIsRowLevel(ctx context.Context, t *testing.T, p ecl.
 		t.Skip("fewer than two description languages found among the common codes, so row-level negation cannot be told apart from set subtraction here")
 	}
 
-	for language, positive := range byLanguage {
+	// Sorted, so the check exercises the same language every run: iterating the
+	// map picked one at random and returned after the first usable candidate, which
+	// made coverage vary between runs.
+	languages := make([]string, 0, len(byLanguage))
+	for code := range byLanguage {
+		languages = append(languages, code)
+	}
+	sort.Strings(languages)
+
+	for _, language := range languages {
+		positive := byLanguage[language]
 		// Concepts in this language that are also in some other language.
 		multilingual := ecl.NewSet()
 		for other, set := range byLanguage {

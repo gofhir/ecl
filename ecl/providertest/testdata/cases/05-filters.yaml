@@ -201,3 +201,18 @@ cases:
   - name: negated description type filter
     expression: "<< 404684003 {{ D type != fsn }}"
     expectedIds: ["11687002", "22298006"]
+
+  # A negated dialect filter is owned by the provider: DialectFilterOpts.Negate
+  # carries the operator and MatchDialect answers accordingly, so the negation is
+  # applied exactly once and at the description ROW level.
+  #
+  # 22298006 is preferred in en-gb and acceptable in en-us, so it satisfies
+  # `!= en-gb` through its en-us row: the negated form is NOT the complement of
+  # the positive one.
+  - name: negated dialect filter is per description row
+    expression: "* {{ D dialectId != 900000000000508004 }}"
+    expectedIds: ["22298006", "73211009"]
+
+  - name: negated dialect combined with a term clause
+    expression: '<< 404684003 {{ D term = "Diabetes", dialectId != 900000000000508004 }}'
+    expectedIds: ["73211009"]

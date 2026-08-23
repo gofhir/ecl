@@ -422,17 +422,56 @@ func TestValidate_MinimumCardinalityOnAbsentAttribute(t *testing.T) {
 				Cardinality:    Cardinality{Min: 1, Max: -1}, // mandatory
 				RuleStrengthID: RuleStrengthMandatory,
 			},
+			{
+				AttributeID:    "246075003",
+				DomainECL:      "<< 404684003",
+				Grouped:        false,
+				Cardinality:    Cardinality{Min: 0, Max: -1},
+				RuleStrengthID: RuleStrengthMandatory,
+			},
+		},
+		Ranges: []AttributeRange{
+			{AttributeID: "246075003", RangeECL: "<< 442083009", RuleStrengthID: RuleStrengthMandatory},
 		},
 	}
+	provider := newTestProvider()
+	provider.exists["246075003"] = true
 
-	// The focus concept is in the domain but carries no attributes at all.
-	expr := mustParseSCG(t, "22298006")
-	res, err := Validate(context.Background(), expr, model, newTestProvider())
+	// A POSTCOORDINATED definition that omits the mandatory attribute: it states
+	// what the concept is refined by, so an absent mandatory attribute is missing.
+	expr := mustParseSCG(t, "22298006:246075003=425391005")
+	res, err := Validate(context.Background(), expr, model, provider)
 	require.NoError(t, err)
 	assert.False(t, res.Valid, "a missing mandatory attribute must be reported")
-	require.Len(t, res.Issues, 1)
-	assert.Equal(t, IssueKindCardinalityViolation, res.Issues[0].Kind)
-	assert.Equal(t, "363698007", res.Issues[0].AttributeID)
+
+	var cardinality []Issue
+	for _, issue := range res.Issues {
+		if issue.Kind == IssueKindCardinalityViolation {
+			cardinality = append(cardinality, issue)
+		}
+	}
+	require.Len(t, cardinality, 1)
+	assert.Equal(t, "363698007", cardinality[0].AttributeID)
+}
+
+// TestValidate_BareConceptHasNothingToCount covers the other side: a bare concept
+// reference asserts nothing about its own attributes.
+//
+// Under the SCG default it means "equivalent to this concept", whose definition is
+// whatever the terminology says, so no mandatory attribute is missing. Checking
+// cardinality anyway reported a violation for every precoordinated code.
+func TestValidate_BareConceptHasNothingToCount(t *testing.T) {
+	model := &Model{Domains: []AttributeDomain{{
+		AttributeID:    "363698007",
+		DomainECL:      "<< 404684003",
+		Grouped:        true,
+		Cardinality:    Cardinality{Min: 1, Max: -1},
+		RuleStrengthID: RuleStrengthMandatory,
+	}}}
+
+	res, err := Validate(context.Background(), mustParseSCG(t, "22298006"), model, newTestProvider())
+	require.NoError(t, err)
+	assert.True(t, res.Valid, "a bare concept has no refinement to validate; issues: %+v", res.Issues)
 }
 
 // TestValidate_MinimumCardinalityIgnoresInapplicableDomain checks the other half:

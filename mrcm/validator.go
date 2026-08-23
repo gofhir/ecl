@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/gofhir/ecl/ecl"
@@ -158,8 +159,16 @@ func (v *validator) validateExpression(expr *scg.Expression, pathPrefix string) 
 				}
 			}
 		}
-		if err := v.validateCardinality(focus.SCTID, counts, pathPrefix); err != nil {
-			return err
+		// Cardinality constrains a POSTCOORDINATED definition. A bare concept
+		// reference asserts nothing about its own attributes — under the SCG
+		// default it means "equivalent to this concept", whose definition is
+		// whatever the terminology says — so there is nothing missing and nothing
+		// to count. Checking it anyway reported a mandatory attribute as absent
+		// for every precoordinated code.
+		if len(expr.Refinements) > 0 {
+			if err := v.validateCardinality(focus.SCTID, counts, pathPrefix); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -189,7 +198,16 @@ func (v *validator) validateExpression(expr *scg.Expression, pathPrefix string) 
 // minimum exists to catch. A rule with Min:1 and the attribute absent reported
 // Valid=true with no issues.
 func (v *validator) validateCardinality(focusID string, counts map[string]int, pathPrefix string) error {
-	for attrID, domains := range v.domains {
+	// Sorted, so Result.Issues is stable across runs: iterating the map directly
+	// made the order vary, which no caller can diff or snapshot.
+	attrIDs := make([]string, 0, len(v.domains))
+	for attrID := range v.domains {
+		attrIDs = append(attrIDs, attrID)
+	}
+	sort.Strings(attrIDs)
+
+	for _, attrID := range attrIDs {
+		domains := v.domains[attrID]
 		// Only rules that could constrain THIS expression. Without the guard an
 		// unevaluatable rule for an attribute the expression never mentions
 		// emitted invalid_rule and flipped Valid=false — an accusation about a

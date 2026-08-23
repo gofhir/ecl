@@ -395,3 +395,34 @@ func TestEvaluate_DescriptionFilter_Negated_WithCapability(t *testing.T) {
 	byType := evalFixture(t, "<< 404684003 {{ D type != fsn }}")
 	require.ElementsMatch(t, []string{"11687002", "22298006"}, byType.Slice())
 }
+
+// TestEvaluate_NegatedDialectIsOwnedByTheProvider covers `{{ D dialectId != … }}`.
+//
+// The negation travels to the provider through DialectFilterOpts.Negate, so it
+// needs no NegatingDescriptionProvider — and it must be applied exactly once.
+// Counting the dialect clause among the row-level-negation family demanded a
+// capability for an expression the provider can already answer, and the dialect
+// loop then applied the clause a second time.
+func TestEvaluate_NegatedDialectIsOwnedByTheProvider(t *testing.T) {
+	// 22298006 is preferred in en-gb AND acceptable in en-us; 73211009 exists only
+	// in en-us. So the negated form keeps 22298006 through its en-us row — it is
+	// not the complement of the positive form.
+	positive := evalFixture(t, "* {{ D dialectId = 900000000000508004 }}")
+	require.ElementsMatch(t, []string{"22298006"}, positive.Slice())
+
+	negated := evalFixture(t, "* {{ D dialectId != 900000000000508004 }}")
+	require.ElementsMatch(t, []string{"22298006", "73211009"}, negated.Slice())
+
+	// Combined with a real description clause, both must apply.
+	both := evalFixture(t, `<< 404684003 {{ D term = "Diabetes", dialectId != 900000000000508004 }}`)
+	require.ElementsMatch(t, []string{"73211009"}, both.Slice())
+}
+
+// TestEvaluate_MemberOfProjectionIsClassifiable covers the field-projection
+// rejection carrying the sentinel, so the CLI maps it to the documented exit code
+// rather than to a generic failure.
+func TestEvaluate_MemberOfProjectionIsClassifiable(t *testing.T) {
+	_, err := evalFixtureErr(t, "^ [mapTarget] 900000000000497000")
+	require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
+	require.Contains(t, err.Error(), "^[mapTarget]", "the field list must not be rendered as a Go slice")
+}
