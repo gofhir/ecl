@@ -27,6 +27,7 @@ ECL is the standard query language for SNOMED CT. Until now, evaluating it from 
 - ✅ **MRCM** loader + validator (uses ECL evaluator internally)
 - ✅ **SCTID** Verhoeff checksum + partition validation
 - ✅ **123/123** bundled conformance cases pass, all executed by CI
+- ✅ **121/121** of SNOMED International's [official ECL examples](ecl/testdata/official-examples/) parse — the one test suite this project did not write
 - 📦 Latest release: see [GitHub Releases](https://github.com/gofhir/ecl/releases)
 
 ### Known limitations
@@ -274,6 +275,30 @@ PASS  ECL v2.2 features (Top, Bottom, AltIdentifier, ^R, MemberOf) :: memberOf r
 ```
 
 Useful in CI to prove your `DataProvider` implementation matches the spec.
+
+## Testing against the specification
+
+Three different things get called "spec compliance", and they are worth keeping
+apart:
+
+| | What it proves | Who wrote the expectations |
+|---|---|---|
+| [`ecl/grammar/ECL.g4`](ecl/grammar/ECL.g4) | The syntax accepted is the published grammar. It is SNOMED International's file, carrying one local fix for an upstream typo that stops the grammar generating (documented in its header). CI regenerates the parser from it and diffs byte for byte. | SNOMED International |
+| [`ecl/testdata/official-examples/`](ecl/testdata/official-examples/) | The 121 expressions upstream publishes as **valid ECL** all parse. `TestParse_OfficialExamples` walks the tree; a failure is this project's defect by construction, since upstream declares them valid. | SNOMED International |
+| [`ecl/providertest/testdata/`](ecl/providertest/testdata/) | 123 expressions **evaluate** to specific concept sets against a bundled fixture. | This project |
+
+The third row is the honest weak spot. No official corpus states what an
+expression should *return* — the specification gives prose and examples without
+expected results — so the semantic expectations are this project's reading of it,
+and a misreading yields a green test. Several bugs fixed in v1.2.0 had a passing
+test asserting the wrong behaviour. Where a semantic question could not be settled
+from the text, it was checked against a public terminology server and the finding
+recorded in the code; the reverse-attributes-in-a-group note above is one such
+case.
+
+`make check-upstream` diffs both vendored artefacts against upstream, and a
+scheduled workflow runs it weekly — otherwise a new grammar version could land
+without anyone noticing.
 
 ## Conformance suite
 

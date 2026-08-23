@@ -1,4 +1,4 @@
-.PHONY: test test-race lint tidy generate conformance check
+.PHONY: test test-race lint tidy generate conformance check check-upstream
 
 # ANTLR_VERSION must match the version the committed parser was generated with,
 # which the header of ecl/grammar/ecl_parser.go records. Pin it: generating with
@@ -32,6 +32,13 @@ conformance:
 check: lint test-race conformance
 	go mod tidy -diff
 	go vet $$(go list ./... | grep -v '/ecl/grammar$$')
+
+# Reports drift between the vendored SNOMED International artefacts (the grammar
+# and the official example corpus) and upstream. Needs network. Deliberately NOT
+# part of `check`: upstream moving is news, not a local defect, so it runs on a
+# schedule in CI instead of blocking a commit.
+check-upstream:
+	./scripts/check-upstream.sh
 
 $(ANTLR_JAR):
 	@mkdir -p $(dir $(ANTLR_JAR))
