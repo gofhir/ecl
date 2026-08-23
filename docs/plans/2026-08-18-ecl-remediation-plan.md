@@ -90,9 +90,14 @@ silencio.
 
 Lo que sigue pendiente y **no** lo resuelve una capacidad:
 
-- **Las formas reverse de grupo** (`{ R a != x }`, `{ R a = x OR R b = y }`, `[m..n] { R a = x }`).
-  `conceptMatchesGroupWithReverse` recorre los grupos de los conceptos *origen*, así que hay que
-  replantear la función, no solo darle datos. Es la única tarea de diseño que queda.
+- ~~**Las formas reverse de grupo**~~ — **cerrada (2026-08-23), rechazándolas.** No era falta de datos:
+  las llaves afirman que las cláusulas comparten un grupo de relaciones *del concepto foco*, y una
+  relación inversa pertenece al origen, así que el foco no tiene nada que agrupar. Lo que quedaba era
+  redundante (`{ R a = x }` a solas mide idéntico a la forma sin agrupar) o engañoso (en
+  `{ R a = x, b = y }` la cláusula hermana restringía el **origen**). Ontoserver también lo rechaza.
+  Ahora devuelve `ErrUnsupportedFeature` remitiendo a la forma sin agrupar, y se borraron las cuatro
+  funciones que la implementaban. Con esto **la limitación abierta de la Task 3 también queda cerrada**:
+  ya no hay ruta reverse dentro de grupos que aplane cláusulas.
 - **El dialecto por alias**, que necesita un mapeo alias→refset. Cabría otra capacidad
   (`DialectAliasResolver`) en vez de una tabla parcial inventada.
 - **Conjuntos de términos y de `effectiveTime`**, cuya semántica any-of las `Opts` no expresan.
@@ -102,8 +107,8 @@ Lo que sigue pendiente y **no** lo resuelve una capacidad:
 **Tabla de aceptación: 12 de 13 filas pasan.** La única que queda es el dialecto por alias, y es una
 decisión deliberada: devuelve `ErrUnsupportedFeature` en lugar de un conjunto silenciosamente vacío.
 
-**Métricas:** 44 → **91** casos de conformidad, todos ejecutados por CI (antes 8). Cobertura de `ecl`
-61.8 % → 65.3 %; `internal/conformance` 41.8 % → 73.9 %. `golangci-lint` en 0 issues y `-race` limpio
+**Métricas:** 44 → **123** casos de conformidad, todos ejecutados por CI (antes 8). Cobertura de `ecl`
+61.8 % → 76.9 %; `providertest` (antes `internal/conformance`) 41.8 % → 81.7 %. `golangci-lint` en 0 issues y `-race` limpio
 en todos los commits. Ningún cambio rompe la API: los campos viejos siguen poblados y deprecados.
 
 **Cambios de comportamiento a agrupar en las notas del v1.2.0** (cuatro): errores del lexer y anclaje
@@ -116,9 +121,9 @@ operador vive dentro de `matchConcreteValue`). Es exactamente la corrección que
 aviso de la C2: la Task 4 consiste ahora en hacer que la ruta forward sin agrupar
 (`filterByAttribute`) use esa misma fórmula en lugar de invertir el booleano de cardinalidad.
 
-**Limitación abierta que introduce la Task 3.** La ruta reverse dentro de grupos sigue trabajando
-sobre las hojas aplanadas, así que `{ R a = x OR b = y }` se evalúa como `AND`. Está documentado en
-el código y pendiente de la Task 19 (v2), que es la que aporta la firma capaz de contar.
+**Limitación abierta que introducía la Task 3 — cerrada.** La ruta reverse dentro de grupos aplanaba
+las hojas, así que `{ R a = x OR b = y }` se evaluaba como `AND`. No se arregló: se eliminó la ruta,
+porque el constructo no tiene significado (ver arriba).
 
 **Decisión C4, por escrito (la exigía el Step 6 de la Task 2).** Se eligió **no normalizar** la entrada:
 ni NFKC ni colapso de espacios Unicode. Motivo: cualquier normalización transforma en silencio el
