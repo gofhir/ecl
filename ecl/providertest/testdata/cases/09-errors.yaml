@@ -77,9 +77,27 @@ cases:
     expression: '<< 404684003 {{ C effectiveTime = ("20240131" "20230731") }}'
     expectError: true
 
-  # The reverse path walks the groups of the SOURCE concepts, so it cannot count
-  # the focus concept's groups. Applying a cardinality to that 1/0 pseudo-count
-  # answered [2..*] with the empty set and [0..0] with everything.
+  # Braces assert that the clauses share ONE relationship group of the FOCUS
+  # concept. A reverse relationship belongs to the source, so there is nothing of
+  # the focus's to group and the construct is either redundant (a lone clause,
+  # measured identical to the ungrouped form) or misleading (a mixed group silently
+  # constrains the SOURCE). Ontoserver rejects it too; write it outside the braces.
+  - name: reverse attribute inside a group is reported as unsupported
+    expression: "* : { R 363698007 = 22298006 }"
+    expectError: true
+
+  - name: reverse attribute in a group with a sibling clause is reported as unsupported
+    expression: "* : { R 363698007 = 22298006, 116676008 = 55641003 }"
+    expectError: true
+
+  - name: not-equals on a reverse attribute inside a group is reported as unsupported
+    expression: "* : { R 363698007 != 22298006 }"
+    expectError: true
+
+  - name: disjunction of reverse attributes inside a group is reported as unsupported
+    expression: "* : { R 363698007 = 22298006 OR R 116676008 = 22298006 }"
+    expectError: true
+
   - name: group cardinality with a reverse attribute is reported as unsupported
     expression: "* : [2..*] { R 363698007 = 22298006 }"
     expectError: true

@@ -778,7 +778,6 @@ func (p *inMemoryProvider) InboundRelationships(_ context.Context, targetIDs, ty
 			out[r.TargetID] = append(out[r.TargetID], ecl.InboundRelationship{
 				SourceID: srcID,
 				TypeID:   r.TypeID,
-				GroupNum: r.GroupNum,
 			})
 		}
 	}

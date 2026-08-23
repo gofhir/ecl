@@ -26,7 +26,7 @@ ECL is the standard query language for SNOMED CT. Until now, evaluating it from 
 - ✅ **SCG** parser + validator
 - ✅ **MRCM** loader + validator (uses ECL evaluator internally)
 - ✅ **SCTID** Verhoeff checksum + partition validation
-- ✅ **116/116** bundled conformance cases pass, all executed by CI
+- ✅ **123/123** bundled conformance cases pass, all executed by CI
 - 📦 Latest release: see [GitHub Releases](https://github.com/gofhir/ecl/releases)
 
 ### Known limitations
@@ -44,7 +44,7 @@ bad data:
 | A term filter with a SET of terms — `{{ D term = ("a" "b") }}` | Any-of semantics, which `DescriptionFilterOpts.Term` cannot express. A single term, including a multi-word one, works. |
 | An `effectiveTime` filter with a set of values | Same reason: `ConceptFilterOpts` carries one value and one operator. |
 | A cardinality or `!=` on a reverse (`R`) attribute, **unless** the provider implements `InboundRelationshipsProvider` | `RelationshipTargets` returns a `Set`, so it loses the inbound count and the per-type total. With the capability these work. |
-| A cardinality on a reverse attribute **inside a group** | The group belongs to the source concept, so what `[2..*]` counts is undefined. ECL 6.3 defines reverse cardinality only for an ungrouped refinement, the official example set never places `R` inside braces, and Ontoserver rejects the construct outright. See the note below. |
+| A reverse (`R`) attribute **inside an attribute group** — `{ R attr = value }` | Braces assert that the clauses share one relationship group *of the focus concept*, and a reverse relationship belongs to the source, so the focus has no group to constrain. Write it outside the braces. See the note below. |
 | `AttributeDomain.InGroupCardinality` (MRCM) | Loaded and exposed, not yet enforced. |
 
 ## Install
@@ -129,20 +129,29 @@ implements the first three; read it for a worked example.
 
 #### A note on reverse attributes inside a group
 
-This library evaluates `{ R attr = value }` — reading it as "some source concept
-has a relationship group holding (attr → focus)". Be aware that **Ontoserver
-rejects the construct entirely** with *"Cannot reverse an attribute inside a
-group"*, and that the specification neither permits nor forbids it: §6.2 describes
-reverse attributes and attribute groups separately, §6.3 defines reverse
-cardinality only for an ungrouped refinement, and the
-[official example set](https://github.com/IHTSDO/snomed-expression-constraint-language)
-never places `R` inside braces.
+`{ R attr = value }` returns `ErrUnsupportedFeature`. Write `R attr = value`
+without the braces instead.
 
-One consequence is worth stating plainly: in a MIXED group such as
-`{ R 363698007 = X, 116676008 = Y }`, the second clause constrains the SOURCE
-concept, not the focus — because that is whose group it is. If you expected it to
-constrain the focus, write it outside the braces. Portable ECL keeps `R` out of
-groups.
+The reason is that grouping only ever says one thing: *these clauses hold in the
+same relationship group of the focus concept*. That is what distinguishes a heart
+infarct from a concept carrying heart-site in one group and infarct-morphology in
+another. A reverse clause's relationship is not the focus concept's — it belongs to
+the source — so the focus has nothing to group, and only two readings remain:
+
+- `{ R attr = value }` on its own: the braces add nothing. Measured on real SNOMED
+  before this release, the result was identical to the ungrouped form.
+- `{ R attr = value, other = x }`: the group has to belong to *someone*, and it can
+  only be the source, so `other = x` silently constrains the **source** rather than
+  the focus. `* : { R 363698007 = 22298006, 116676008 = 55641003 }` returned
+  74281007, which has no relationships of its own — what was checked was
+  22298006's morphology.
+
+Redundant or misleading, never useful. The specification neither permits nor
+forbids it — §6.2 describes reverse attributes and attribute groups separately,
+§6.3 defines reverse cardinality only for an ungrouped refinement, and the
+[official example set](https://github.com/IHTSDO/snomed-expression-constraint-language)
+never places `R` inside braces — and Ontoserver rejects it with *"Cannot reverse an
+attribute inside a group"*. This library now agrees.
 
 **`ecl/providertest`** — check your implementation against the rules the godoc cannot fully state:
 
@@ -268,19 +277,19 @@ Useful in CI to prove your `DataProvider` implementation matches the spec.
 
 ## Conformance suite
 
-The bundled suite lives in [`ecl/providertest/testdata/`](ecl/providertest/testdata/) and is **embedded in the binary**, so `gofhir-ecl conformance` works from any directory, including after `go install`. It currently covers 116 cases across 9 areas of the spec, including a suite of expressions that must be REJECTED.
+The bundled suite lives in [`ecl/providertest/testdata/`](ecl/providertest/testdata/) and is **embedded in the binary**, so `gofhir-ecl conformance` works from any directory, including after `go install`. It currently covers 123 cases across 9 areas of the spec, including a suite of expressions that must be REJECTED.
 
 | Area | Cases | Spec section |
 |---|---|---|
 | Hierarchy operators (incl. Top/Bottom on non-closed sets) | 10 | 5.1 |
 | Compound expressions | 4 | 5.2 |
 | Primitives | 4 | 5.0 |
-| Refinements (disjunction, groups, cardinality, `!=`, dot, reverse) | 25 | 5.3 |
-| Filters (term, type, language, dialectId, module, definitionStatus, active, memberField) | 21 | 5.4 |
+| Refinements (disjunction, groups, cardinality, `!=`, dot, reverse) | 31 | 5.3 |
+| Filters (term, type, language, dialectId, module, definitionStatus, active, memberField) | 39 | 5.4 |
 | History supplements (MIN/MOD/MAX) | 6 | 5.5 |
 | Concrete values | 4 | 5.3.4 |
 | v2.2 (Top, Bottom, AltIdentifier, `^R`) | 7 | v2.2 |
-| **Errors** — input that must be rejected, not truncated | 14 | grammar |
+| **Errors** — input that must be rejected, not truncated | 18 | grammar |
 
 Each suite is a YAML file with cases of the form:
 

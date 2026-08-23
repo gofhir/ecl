@@ -772,32 +772,15 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 	if err != nil {
 		return nil, err
 	}
-	// The reverse path below works on the flattened leaves, so it still treats a
-	// group's clauses as a conjunction: `{ R a = x OR b = y }` is evaluated as
-	// AND. Known limitation, tracked with the rest of the reverse-path work.
-	clauses := tree.leaves()
-
-	hasReverse := false
-	for _, c := range clauses {
-		if c.reverse {
-			hasReverse = true
-			break
-		}
-	}
-
-	if err := checkReverseGroupSupport(clauses, grp.Cardinality); err != nil {
+	if err := rejectReverseInGroup(tree.leaves()); err != nil {
 		return nil, err
 	}
 
 	// Fetched once for the whole focus set rather than once per concept; see
-	// propertiesFor. The reverse path does not use it: it walks the groups of the
-	// SOURCE concepts instead.
-	properties := map[string]map[int][]Relationship{}
-	if !hasReverse {
-		var err error
-		if properties, err = propertiesFor(ctx, provider, focus); err != nil {
-			return nil, err
-		}
+	// propertiesFor.
+	properties, err := propertiesFor(ctx, provider, focus)
+	if err != nil {
+		return nil, err
 	}
 
 	out := newMapSet()
@@ -813,33 +796,15 @@ func filterByAttributeGroup(ctx context.Context, focus Set, grp *ast.AttributeGr
 		// indistinguishable from "at least one" and [0..0] returned exactly the
 		// inverse of the requested set.
 		matchingGroups := 0
-		if !hasReverse {
-			// Fast path: all forward clauses — check groups directly.
-			for gnum, rels := range properties[id] {
-				// Group 0 is "ungrouped" per the PropertiesByGroup contract, so
-				// it is not a relationship group and must not be counted as one.
-				// Ungrouped attributes are matched by filterByAttribute instead.
-				if gnum == 0 {
-					continue
-				}
-				if groupSatisfiesSet(rels, tree) {
-					matchingGroups++
-				}
+		for gnum, rels := range properties[id] {
+			// Group 0 is "ungrouped" per the PropertiesByGroup contract, so it is
+			// not a relationship group and must not be counted as one. Ungrouped
+			// attributes are matched by filterByAttribute instead.
+			if gnum == 0 {
+				continue
 			}
-		} else {
-			// Slow path: reverse clauses require checking source concepts.
-			//
-			// This returns 1 or 0, not a real count: it walks the groups of the
-			// SOURCE concepts, so any count derived from it would be counting
-			// someone else's groups. Group cardinality combined with a reverse
-			// clause is therefore not supported; see the known limitations.
-			matched, err := conceptMatchesGroupWithReverse(ctx, id, tree, provider)
-			if err != nil {
-				iterErr = err
-				return false
-			}
-			if matched {
-				matchingGroups = 1
+			if groupSatisfiesSet(rels, tree) {
+				matchingGroups++
 			}
 		}
 		// A nil cardinality is the default [1..*], same as everywhere else.
@@ -879,47 +844,39 @@ const (
 	concreteKindBoolean = "boolean"
 )
 
-// checkReverseGroupSupport reports the group forms the reverse path cannot answer.
+// rejectReverseInGroup refuses a reverse attribute inside an attribute group.
 //
-// The reverse path walks the groups of the SOURCE concepts using the FLATTENED
-// clause list, which costs it three things. Each used to be answered anyway, with
-// a wrong result rather than an error:
+// Braces assert that the clauses co-occur in ONE relationship group OF THE FOCUS
+// CONCEPT — that is the only thing grouping adds, and it is what distinguishes a
+// heart infarct from a concept carrying heart-site in one group and
+// infarct-morphology in another. A reverse clause's relationship does not belong
+// to the focus at all: it belongs to the source. So there is nothing of the
+// focus's to group, and only two readings remain, both bad:
 //
-//   - "!=": groupSatisfiesClausesWithReverse skips the complement-within-type
-//     step for reverse clauses, so `{ R a != x }` behaved exactly like
-//     `{ R a = x }`.
-//   - a disjunction: the flattened list can only be conjoined, so
-//     `{ R a = x OR R b = y }` returned the empty set instead of the union.
-//   - a group cardinality: the path can only report 1 or 0, and it counts the
-//     source concepts' groups rather than the focus concept's, so `[2..*]`
-//     returned the empty set and `[0..0]` returned everything.
-func checkReverseGroupSupport(clauses []attrClause, cardinality *ast.Cardinality) error {
-	hasReverse := false
+//   - `{ R a = x }` alone: the braces add nothing. Measured before this check,
+//     the result was identical to the ungrouped `R a = x`.
+//   - `{ R a = x, b = y }`: the group has to belong to someone, and it can only be
+//     the source — so `b = y` silently constrained the SOURCE rather than the
+//     focus. Measured: `* : { R 363698007 = 22298006, 116676008 = 55641003 }`
+//     returned 74281007, which has no relationships of its own and therefore
+//     cannot satisfy the second clause. What was checked was 22298006's morphology.
+//
+// So the construct is either redundant or misleading, never useful. The
+// specification neither permits nor forbids it — §6.2 describes reverse attributes
+// and attribute groups separately, §6.3 defines reverse cardinality only for an
+// ungrouped refinement, and the official example set
+// (IHTSDO/snomed-expression-constraint-language) never places R inside braces —
+// and Ontoserver rejects it outright with "Cannot reverse an attribute inside a
+// group". This library now agrees.
+func rejectReverseInGroup(clauses []attrClause) error {
 	for _, c := range clauses {
-		if c.reverse {
-			hasReverse = true
-			break
+		if !c.reverse {
+			continue
 		}
+		return fmt.Errorf("%w: a reverse attribute cannot appear inside an attribute group — grouping asserts that the clauses share a relationship group of the FOCUS concept, and a reverse relationship belongs to the source; write it outside the braces",
+			ErrUnsupportedFeature)
 	}
-	if !hasReverse || cardinality == nil {
-		return nil
-	}
-
-	// A group cardinality counts the FOCUS concept's matching relationship
-	// groups, but with a reverse clause the group belongs to the SOURCE concept,
-	// so what `[2..*]` counts is undefined rather than merely unimplemented.
-	//
-	// Checked against the specification: 6.3 Cardinality defines reverse
-	// cardinality only for an ungrouped refinement ("the number of source
-	// concepts ... for which each destination concept may be relevant attribute
-	// value") and says nothing about a group containing one; 6.2 Refinements
-	// describes reverse attributes and attribute groups separately and never
-	// combines them; and the official example set
-	// (IHTSDO/snomed-expression-constraint-language) has no example placing R
-	// inside braces. Ontoserver rejects the whole construct outright with
-	// "Cannot reverse an attribute inside a group".
-	return fmt.Errorf("%w: group cardinality [%d..%s] combined with a reverse attribute has no defined meaning — the group belongs to the source concept, not the focus",
-		ErrUnsupportedFeature, cardinality.Min, cardinalityMaxText(cardinality))
+	return nil
 }
 
 // cardinalityMaxText renders a cardinality's upper bound, with "*" for unbounded.
@@ -1102,140 +1059,6 @@ func clauseSatisfied(rels []Relationship, c attrClause) bool {
 		count = totalOfType - count
 	}
 
-	return cardinalitySatisfied(c.cardinality, count)
-}
-
-// conceptMatchesGroupWithReverse checks if a concept satisfies a group with
-// reverse clauses. For each reverse clause, it finds sources that point to
-// this concept with the given type, then checks if any source has a group
-// where all clauses (forward and reverse) are satisfied.
-func conceptMatchesGroupWithReverse(ctx context.Context, conceptID string, tree *clauseSet, provider DataProvider) (bool, error) {
-	for _, c := range reverseLeaves(tree) {
-		focusSet := NewSetFromSlice([]string{conceptID})
-		sources, err := provider.RelationshipSources(ctx, focusSet, c.typeIDs)
-		if err != nil {
-			return false, fmt.Errorf("%w: reverse group lookup: %w", ErrProvider, err)
-		}
-		// A provider that breaks the non-nil contract must not panic the
-		// evaluator: this path was missed by the normalization at the top level,
-		// because the Set never travels through Evaluate.
-		sources = nonNil(sources)
-
-		// The value set selects WHICH sources count, and that is where "!="
-		// belongs: `R attr != x` means "pointed at by a relationship of this type
-		// whose SOURCE is not x", mirroring the forward reading of "!=" as a
-		// negation of the value rather than of the attribute's existence.
-		// Negating inside the group instead made `{ R a != x }` behave exactly
-		// like `{ R a = x }`.
-		if !c.valueIsAny && c.valueSet != nil {
-			if c.op == "!=" {
-				sources = sources.Minus(c.valueSet)
-			} else {
-				sources = sources.Intersect(c.valueSet)
-			}
-		}
-		if sources.Len() == 0 {
-			continue
-		}
-
-		found := false
-		var iterErr error
-		sources.Iter(func(srcID string) bool {
-			srcGroups, err := provider.PropertiesByGroup(ctx, srcID)
-			if err != nil {
-				iterErr = fmt.Errorf("%w: PropertiesByGroup(%s): %w", ErrProvider, srcID, err)
-				return false
-			}
-			for gnum, rels := range srcGroups {
-				// Group 0 is "ungrouped" per the PropertiesByGroup contract, so it
-				// is not a relationship group. The forward path skips it, and this
-				// one has to agree: otherwise the same ungrouped data made
-				// `{ 363698007 = X }` return nothing while
-				// `{ R 363698007 = Y }` matched.
-				if gnum == 0 {
-					continue
-				}
-				if groupSatisfiesSetWithReverse(rels, tree, conceptID) {
-					found = true
-					return false
-				}
-			}
-			return true
-		})
-		if iterErr != nil {
-			return false, iterErr
-		}
-		if found {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// reverseLeaves collects the reverse clauses of a tree. Each is a possible entry
-// point: the sources it names are the concepts whose groups might satisfy the
-// whole tree.
-func reverseLeaves(cs *clauseSet) []attrClause {
-	if cs == nil {
-		return nil
-	}
-	if cs.leaf != nil {
-		if cs.leaf.reverse {
-			return []attrClause{*cs.leaf}
-		}
-		return nil
-	}
-	var out []attrClause
-	for _, item := range cs.items {
-		out = append(out, reverseLeaves(item)...)
-	}
-	return out
-}
-
-// groupSatisfiesSetWithReverse is groupSatisfiesSet for a group that contains a
-// reverse clause, honoring AND/OR at each level.
-//
-// It used to take the FLATTENED clause list, so it could only conjoin:
-// `{ R a = x OR R b = y }` was answered with the empty set instead of the union.
-func groupSatisfiesSetWithReverse(rels []Relationship, cs *clauseSet, reverseTargetID string) bool {
-	if cs == nil {
-		return true
-	}
-	if cs.leaf != nil {
-		return clauseSatisfiedWithReverse(rels, *cs.leaf, reverseTargetID)
-	}
-	if cs.op == ast.AttrSetOr {
-		for _, item := range cs.items {
-			if groupSatisfiesSetWithReverse(rels, item, reverseTargetID) {
-				return true
-			}
-		}
-		return false
-	}
-	for _, item := range cs.items {
-		if !groupSatisfiesSetWithReverse(rels, item, reverseTargetID) {
-			return false
-		}
-	}
-	return true
-}
-
-// clauseSatisfiedWithReverse reports whether one group of the SOURCE concept
-// satisfies one clause.
-//
-// A reverse clause is satisfied when the group holds a relationship of the type
-// pointing at the focus concept. Which sources are considered at all — and so
-// where "!=" applies — was already decided by conceptMatchesGroupWithReverse.
-func clauseSatisfiedWithReverse(rels []Relationship, c attrClause, reverseTargetID string) bool {
-	if !c.reverse {
-		return clauseSatisfied(rels, c)
-	}
-	count := 0
-	for _, r := range rels {
-		if c.typeIDs.Contains(r.TypeID) && r.TargetID == reverseTargetID {
-			count++
-		}
-	}
 	return cardinalitySatisfied(c.cardinality, count)
 }
 

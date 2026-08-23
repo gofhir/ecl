@@ -166,16 +166,20 @@ func TestEvaluate_DialectOnlyFilterSkipsMatchDescription(t *testing.T) {
 	require.ElementsMatch(t, []string{"22298006"}, both.Slice())
 }
 
-// TestEvaluate_GroupCardinalityWithReverseIsRejected covers group cardinality
-// combined with a reverse clause.
+// TestEvaluate_ReverseInGroupIsRejected covers a reverse clause inside an
+// attribute group, in every form.
 //
-// The reverse path walks the groups of the SOURCE concepts, so it can only report
-// 1 or 0 — not a count of the focus concept's groups. Applying a cardinality to
-// that pseudo-count answered `[2..*]` with the empty set and `[0..0]` with
-// everything: silently wrong, where the rest of the package reports what it
-// cannot do.
-func TestEvaluate_GroupCardinalityWithReverseIsRejected(t *testing.T) {
+// Braces exist to assert that the clauses share ONE relationship group of the
+// FOCUS concept. A reverse relationship belongs to the source, so the focus has no
+// group to constrain and only two readings survive, both useless: a lone clause is
+// redundant (measured identical to the ungrouped form) and a mixed group silently
+// constrains the SOURCE. Ontoserver refuses it as well.
+func TestEvaluate_ReverseInGroupIsRejected(t *testing.T) {
 	for _, expr := range []string{
+		"* : { R 363698007 = 22298006 }",
+		"* : { R 363698007 != 22298006 }",
+		"* : { R 363698007 = 22298006, 116676008 = 55641003 }",
+		"* : { R 363698007 = 22298006 OR R 116676008 = 22298006 }",
 		"* : [2..*] { R 363698007 = 22298006 }",
 		"* : [0..0] { R 363698007 = 22298006 }",
 		"* : [1..1] { R 363698007 = 22298006 }",
@@ -183,12 +187,13 @@ func TestEvaluate_GroupCardinalityWithReverseIsRejected(t *testing.T) {
 		t.Run(expr, func(t *testing.T) {
 			_, err := evalFixtureErr(t, expr)
 			require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
+			require.Contains(t, err.Error(), "outside the braces")
 		})
 	}
 
-	// Without a cardinality the reverse group still works.
-	set := evalFixture(t, "* : { R 363698007 = 22298006 }")
-	require.ElementsMatch(t, []string{"74281007", "113331007"}, set.Slice())
+	// The ungrouped form is supported and is what the error points at.
+	require.ElementsMatch(t, []string{"74281007", "113331007"},
+		evalFixture(t, "* : R 363698007 = 22298006").Slice())
 }
 
 // TestParse_DialectAcceptabilityIsPairedInOrder covers pairing each dialect with
@@ -271,27 +276,8 @@ func TestEvaluate_ReversePathIsConsistent(t *testing.T) {
 	require.ElementsMatch(t, []string{"113331007"},
 		evalFixture(t, "* : R 363698007 != 22298006").Slice())
 
-	// Inside a group the same clause must give the same answer: the group lives on
-	// the SOURCE concept, but "!=" still negates the VALUE — which source is
-	// considered — not the existence of the relationship.
-	require.ElementsMatch(t,
-		evalFixture(t, "* : R 363698007 != 22298006").Slice(),
-		evalFixture(t, "* : { R 363698007 != 22298006 }").Slice())
-
-	// A disjunction inside the group is the union of its operands, evaluated per
-	// source group rather than on a flattened clause list.
-	left := evalFixture(t, "* : { R 363698007 = 22298006 }")
-	right := evalFixture(t, "* : { R 116676008 = 22298006 }")
-	both := evalFixture(t, "* : { R 363698007 = 22298006 OR R 116676008 = 22298006 }")
-	require.ElementsMatch(t, left.Union(right).Slice(), both.Slice())
-	require.NotEmpty(t, right.Slice(), "the second operand must contribute something")
-
-	// A group cardinality combined with a reverse clause stays unsupported, and
-	// for a different reason: the group belongs to the source concept, so what
-	// `[2..*]` counts is undefined rather than merely unimplemented.
-	_, err := evalFixtureErr(t, "* : [2..*] { R 363698007 = 22298006 }")
-	require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
-	require.Contains(t, err.Error(), "no defined meaning")
+	// Only the ungrouped form is supported; braces are rejected outright. See
+	// TestEvaluate_ReverseInGroupIsRejected.
 }
 
 // TestEvaluate_ReverseCountingNeedsTheCapability covers the fallback: a provider

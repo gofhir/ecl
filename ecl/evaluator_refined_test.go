@@ -240,14 +240,17 @@ func TestEvaluate_Cardinality_OneToUnbounded(t *testing.T) {
 	assert.False(t, got.Contains("111111001"), "111111001 has 0")
 }
 
-func TestEvaluate_GroupedRefinement_Reverse(t *testing.T) {
+func TestEvaluate_GroupedRefinement_ReverseIsRejected(t *testing.T) {
 	p := newFixture()
-	// { R 363698007 = << 404684003 } means: in the focus, keep concepts that
-	// are the TARGET of a 363698007 relationship from a source in << 404684003,
-	// within a single relationship group.
-	// 74281007 is targeted by 22298006 (group 1) and 404684004 (group 1).
-	// Both sources are in << 404684003.
-	got := evalECL(t, `* : { R 363698007 = << 404684003 }`, p)
+	// Braces assert that the clauses share a relationship group OF THE FOCUS
+	// concept, and a reverse relationship belongs to the source, so there is
+	// nothing of the focus's to group. The ungrouped form is the one to write.
+	tree, err := Parse(`* : { R 363698007 = << 404684003 }`)
+	require.NoError(t, err)
+	_, err = Evaluate(context.Background(), tree, p)
+	require.ErrorIs(t, err, ErrUnsupportedFeature)
+
+	got := evalECL(t, `* : R 363698007 = << 404684003`, p)
 	assert.True(t, got.Contains("74281007"))
 }
 

@@ -62,7 +62,9 @@ type BatchConcreteValuesProvider interface {
 //
 //	[m..n] R attr = value      needs the inbound count
 //	R attr != value            needs the per-type inbound total
-//	[m..n] { R attr = value }  needs both
+//
+// It does not unlock a reverse attribute inside an attribute group: that form is
+// rejected because grouping has no meaning there, not for want of data.
 //
 // The key is the TARGET concept — the one being pointed at — and the value every
 // relationship whose target it is and whose type is in typeIDs. A concept with no
@@ -81,10 +83,6 @@ type InboundRelationship struct {
 
 	// TypeID is the attribute type.
 	TypeID string
-
-	// GroupNum is the relationship group on the SOURCE concept. 0 means
-	// ungrouped.
-	GroupNum int
 }
 
 // NegatingDescriptionProvider evaluates a description filter whose clauses may be
