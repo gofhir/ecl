@@ -44,7 +44,7 @@ bad data:
 | A term filter with a SET of terms — `{{ D term = ("a" "b") }}` | Any-of semantics, which `DescriptionFilterOpts.Term` cannot express. A single term, including a multi-word one, works. |
 | An `effectiveTime` filter with a set of values | Same reason: `ConceptFilterOpts` carries one value and one operator. |
 | A cardinality or `!=` on a reverse (`R`) attribute, **unless** the provider implements `InboundRelationshipsProvider` | `RelationshipTargets` returns a `Set`, so it loses the inbound count and the per-type total. With the capability these work. |
-| A cardinality, `!=` or an `OR` on a reverse attribute **inside a group** | The group path walks the groups of the source concepts on a flattened clause list, so the missing count is not the only obstacle. |
+| A cardinality on a reverse attribute **inside a group** | The group belongs to the source concept, so what `[2..*]` counts is undefined. ECL 6.3 defines reverse cardinality only for an ungrouped refinement, the official example set never places `R` inside braces, and Ontoserver rejects the construct outright. See the note below. |
 | `AttributeDomain.InGroupCardinality` (MRCM) | Loaded and exposed, not yet enforced. |
 
 ## Install
@@ -126,6 +126,23 @@ answers well; the evaluator falls back or reports the forms it cannot handle.
 
 The reference provider in [`ecl/providertest/fixture.go`](ecl/providertest/fixture.go)
 implements the first three; read it for a worked example.
+
+#### A note on reverse attributes inside a group
+
+This library evaluates `{ R attr = value }` — reading it as "some source concept
+has a relationship group holding (attr → focus)". Be aware that **Ontoserver
+rejects the construct entirely** with *"Cannot reverse an attribute inside a
+group"*, and that the specification neither permits nor forbids it: §6.2 describes
+reverse attributes and attribute groups separately, §6.3 defines reverse
+cardinality only for an ungrouped refinement, and the
+[official example set](https://github.com/IHTSDO/snomed-expression-constraint-language)
+never places `R` inside braces.
+
+One consequence is worth stating plainly: in a MIXED group such as
+`{ R 363698007 = X, 116676008 = Y }`, the second clause constrains the SOURCE
+concept, not the focus — because that is whose group it is. If you expected it to
+constrain the focus, write it outside the braces. Portable ECL keeps `R` out of
+groups.
 
 **`ecl/providertest`** — check your implementation against the rules the godoc cannot fully state:
 

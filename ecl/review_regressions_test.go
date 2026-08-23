@@ -435,3 +435,26 @@ func TestEvaluate_MemberOfProjectionIsClassifiable(t *testing.T) {
 	require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
 	require.Contains(t, err.Error(), "^[mapTarget]", "the field list must not be rendered as a Go slice")
 }
+
+// TestEvaluate_ReverseCardinalityCountsSourceConcepts pins the counting rule to
+// the specification.
+//
+// ECL 6.3 Cardinality: a cardinality on a reversed refinement "constrains the
+// number of SOURCE CONCEPTS (matching the given criteria) for which each
+// destination concept may be relevant attribute value", illustrated by
+// `[3..3] R 127489000 |Has active ingredient|` meaning "an active ingredient of
+// exactly three products".
+//
+// Counting inbound RELATIONSHIPS instead — which is what the first implementation
+// did — diverges whenever one source points at the same target more than once
+// with the same attribute type. The fixture has exactly that: 55641003 receives
+// 116676008 from 22298006 once and from 73211009 twice, in two groups. Two source
+// concepts, three relationships.
+func TestEvaluate_ReverseCardinalityCountsSourceConcepts(t *testing.T) {
+	require.ElementsMatch(t, []string{"55641003"},
+		evalFixture(t, "* : [2..2] R 116676008 = *").Slice(),
+		"two distinct source concepts")
+
+	require.Empty(t, evalFixture(t, "* : [3..3] R 116676008 = *").Slice(),
+		"three inbound relationships, but only two sources: counting relationships would match here")
+}

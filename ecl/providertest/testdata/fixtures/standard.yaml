@@ -86,6 +86,11 @@ relationships:
   # from "two". With this, `[1..1] { 363698007 = * }` and `[2..*] { 363698007 = * }`
   # select different sets.
   - {source: "22298006", typeId: "363698007", target: "113331007", group: 2}
+  # A SECOND relationship from the same source to the same target, in another
+  # group. Reverse cardinality counts SOURCE CONCEPTS per the specification, so
+  # 74281007 still has exactly one: counting inbound relationships would say two.
+  - {source: "73211009", typeId: "116676008", target: "55641003", group: 1}
+  - {source: "73211009", typeId: "116676008", target: "55641003", group: 2}
   # Diabetes mellitus: site = endocrine system structure
   - {source: "73211009", typeId: "363698007", target: "113331007", group: 1}
   # Diabetes carries a count concrete value (used by concrete-value tests)

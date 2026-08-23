@@ -78,9 +78,11 @@ cases:
     expression: "<< 22298006 : 116676008 != 55641003"
     expectedIds: []
 
+  # Re-baselined when the fixture gained a second source for 116676008=55641003:
+  # 73211009 now has that morphology, so [0..0] correctly excludes it.
   - name: zero cardinality is the form that means "does not have it"
     expression: "<< 404684003 : [0..0] 116676008 = 55641003"
-    expectedIds: ["11687002", "404684003", "64572001", "73211009", "95566004"]
+    expectedIds: ["11687002", "404684003", "64572001", "95566004"]
 
   # Disjunction. The parser used to flatten AND and OR into one list, so these
   # were evaluated as intersections and returned the empty set.
@@ -171,3 +173,18 @@ cases:
   - name: disjunction of reverse attributes inside a group
     expression: "* : { R 363698007 = 22298006 OR R 116676008 = 22298006 }"
     expectedIds: ["74281007", "113331007", "55641003"]
+
+  # Reverse cardinality counts SOURCE CONCEPTS, not inbound relationships. The
+  # specification says it "constrains the number of source concepts ... for which
+  # each destination concept may be relevant attribute value", illustrated by
+  # `[3..3] R 127489000` meaning "an active ingredient of exactly three products".
+  #
+  # 55641003 receives 116676008 from 22298006 once and from 73211009 TWICE, in
+  # two different groups: two source concepts, three relationships.
+  - name: reverse cardinality counts source concepts not relationships
+    expression: "* : [2..2] R 116676008 = *"
+    expectedIds: ["55641003"]
+
+  - name: counting relationships instead would have matched three
+    expression: "* : [3..3] R 116676008 = *"
+    expectedIds: []

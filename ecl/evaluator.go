@@ -597,19 +597,30 @@ func filterByReverseCounted(
 			iterErr = err
 			return false
 		}
-		matching, totalOfType := 0, 0
+
+		// Count SOURCE CONCEPTS, not inbound relationships. The specification
+		// says a cardinality on a reversed refinement "constrains the number of
+		// source concepts (matching the given criteria) for which each
+		// destination concept may be relevant attribute value", and illustrates
+		// it with `[3..3] R 127489000` meaning "an active ingredient of exactly
+		// three products". Counting relationships instead diverges whenever one
+		// source points at the same target twice with the same attribute type —
+		// two relationships, still one product.
+		matching, totalOfType := map[string]struct{}{}, map[string]struct{}{}
 		for _, rel := range inbound[id] {
 			if !typeIDs.Contains(rel.TypeID) {
 				continue
 			}
-			totalOfType++
+			totalOfType[rel.SourceID] = struct{}{}
 			if valueIsAny || valueSet.Contains(rel.SourceID) {
-				matching++
+				matching[rel.SourceID] = struct{}{}
 			}
 		}
-		count := matching
+
+		count := len(matching)
 		if attr.Op == "!=" {
-			count = totalOfType - matching
+			// Sources of this type that are NOT in the value set.
+			count = len(totalOfType) - len(matching)
 		}
 		if cardinalitySatisfied(attr.Cardinality, count) {
 			out.m[id] = struct{}{}
@@ -895,12 +906,18 @@ func checkReverseGroupSupport(clauses []attrClause, cardinality *ast.Cardinality
 	}
 
 	// A group cardinality counts the FOCUS concept's matching relationship
-	// groups, but with a reverse clause the group belongs to the SOURCE concept.
-	// So `[2..*]` could mean two matching groups on one source, two distinct
-	// sources, or two groups summed across all of them — three different answers,
-	// and the specification does not say which. Reporting beats inventing one;
-	// the previous code applied the cardinality to a 1/0 pseudo-count, which
-	// answered `[2..*]` with the empty set and `[0..0]` with everything.
+	// groups, but with a reverse clause the group belongs to the SOURCE concept,
+	// so what `[2..*]` counts is undefined rather than merely unimplemented.
+	//
+	// Checked against the specification: 6.3 Cardinality defines reverse
+	// cardinality only for an ungrouped refinement ("the number of source
+	// concepts ... for which each destination concept may be relevant attribute
+	// value") and says nothing about a group containing one; 6.2 Refinements
+	// describes reverse attributes and attribute groups separately and never
+	// combines them; and the official example set
+	// (IHTSDO/snomed-expression-constraint-language) has no example placing R
+	// inside braces. Ontoserver rejects the whole construct outright with
+	// "Cannot reverse an attribute inside a group".
 	return fmt.Errorf("%w: group cardinality [%d..%s] combined with a reverse attribute has no defined meaning — the group belongs to the source concept, not the focus",
 		ErrUnsupportedFeature, cardinality.Min, cardinalityMaxText(cardinality))
 }
