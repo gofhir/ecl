@@ -128,3 +128,64 @@ jobs:
             echo "::error::ecl/grammar/ is out of date with ECL.g4 — run 'make generate' and commit the result"
             exit 1
           }
+
+  major-bump:
+    name: No unintended major bump
+    runs-on: ubuntu-latest
+    # Only meaningful on a pull request: by the time a commit reaches main,
+    # release-please has already read it.
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # The full history is needed to walk the commits this PR adds.
+          fetch-depth: 0
+
+      # release-please turns a conventional-commit breaking-change marker into a
+      # MAJOR bump. The two guards in release-please-config.json do not prevent
+      # it: bump-minor-pre-major and bump-patch-for-minor-pre-major only apply
+      # below 1.0.0, and this module is past that. So the sole thing standing
+      # between a stray "!" and v2.0.0 -- a new import path and a migration for
+      # every consumer -- is somebody noticing while writing the commit message.
+      #
+      # This noticed one in this very repository: a "fix(ecl)!:" written out of
+      # habit for a change that was not breaking.
+      #
+      # A major is a legitimate decision, just never an accidental one. Label the
+      # pull request "major-release" to say it is deliberate.
+      - name: Reject breaking-change markers unless the PR is labelled
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # A marked type ("feat!:", "fix(scope)!:") or a BREAKING CHANGE footer.
+          offenders=$(
+            git log --format='%H %s' "${BASE_SHA}..HEAD" \
+              | grep -E ' [a-z]+(\([^)]*\))?!:' || true
+          )
+          footers=$(
+            git log --format='%H%n%b' "${BASE_SHA}..HEAD" \
+              | grep -nE '^BREAKING[ -]CHANGE:' || true
+          )
+
+          if [ -z "$offenders" ] && [ -z "$footers" ]; then
+            echo "No breaking-change markers; release-please will bump the minor or patch."
+            exit 0
+          fi
+
+          if gh pr view "$PR" --json labels --jq '.labels[].name' | grep -qx 'major-release'; then
+            echo "Breaking-change markers found, and the PR is labelled major-release. Proceeding."
+            [ -n "$offenders" ] && echo "$offenders"
+            [ -n "$footers" ] && echo "$footers"
+            exit 0
+          fi
+
+          echo "::error::This PR carries a conventional-commit breaking-change marker, so release-please would publish a MAJOR version. If that is intended, label the PR 'major-release'. If not, reword the commits."
+          [ -n "$offenders" ] && echo "$offenders"
+          [ -n "$footers" ] && echo "$footers"
+          exit 1

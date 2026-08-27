@@ -366,18 +366,30 @@ cmd/gofhir-ecl/            CLI binary
 
 ## Versioning
 
-Semantic versioning. Releases are managed by [release-please](https://github.com/googleapis/release-please) from Conventional Commits. Breaking changes in the `DataProvider` interface bump the major.
+Semantic versioning, driven by [release-please](https://github.com/googleapis/release-please)
+from Conventional Commits — see [docs/RELEASING.md](docs/RELEASING.md).
+
+Widening `DataProvider` would be a breaking change, so it does not happen: new
+capabilities arrive as [optional interfaces](#optional-capabilities) the evaluator
+type-asserts for, which is why v1.2.0 delivered eight fixes and five new
+capabilities without a major. For a Go module a major means a new import path and a
+migration for every consumer, so it is a decision rather than a side effect, and CI
+fails a pull request that would trigger one unless it is labelled `major-release`.
 
 ## Contributing
 
 Issues and PRs welcome. Before submitting:
 
 ```bash
-make test    # go test -race ./...
-make lint    # golangci-lint run
+make check           # lint, -race with coverage, conformance, tidy, vet
+make check-upstream  # optional: the vendored SNOMED artefacts vs upstream
+make oracle          # optional: differential test against a real server
 ```
 
-The conformance suite is the source of truth for expected behavior — extending the suite is the cheapest way to lock in a fix or land a new ECL feature.
+The conformance suite is the source of truth for expected behavior — extending the
+suite is the cheapest way to lock in a fix or land a new ECL feature. If a change
+touches semantics, `make oracle` is worth the 30 seconds: it is the only check
+whose expectations this project did not write.
 
 ## License
 

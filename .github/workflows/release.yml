@@ -20,7 +20,45 @@ jobs:
       # never applied. That is how the jump to v1.0.0 happened without anyone
       # deciding on it.
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # release-please writes the Release body from the commit subjects it
+      # collected, and knows nothing about docs/releases/. Those files carry what
+      # a subject line cannot: what actually changed in behaviour, why, and what
+      # to check before upgrading. Without this step they exist in the repository
+      # and nobody reading the Release ever learns of them.
+      #
+      # The tag is the link target rather than a branch, so the notes stay pinned
+      # to the version they describe.
+      - name: Link the hand-written release notes
+        # Compared against the string, not just tested for truthiness: a
+        # GitHub expression treats the non-empty string 'false' as true, so
+        # `if: outputs.release_created` would fire on a run that created nothing.
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          notes="docs/releases/${TAG}.md"
+
+          # Read the file from the tag rather than checking out: this job has no
+          # working copy, and the tag is the only ref guaranteed to hold the
+          # released content.
+          if ! gh api "repos/${GITHUB_REPOSITORY}/contents/${notes}?ref=${TAG}" \
+                 --jq .name >/dev/null 2>&1; then
+            echo "No hand-written notes at ${notes} for this release; leaving the generated body as it is."
+            exit 0
+          fi
+
+          url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${TAG}/${notes}"
+          gh release view "$TAG" --json body --jq .body > generated-body.md
+          {
+            printf '📝 **[Full release notes](%s)** — every behaviour change, why it changed, and what to check before upgrading.\n\n' "$url"
+            printf -- '---\n\n'
+            cat generated-body.md
+          } > release-body.md
+          gh release edit "$TAG" --notes-file release-body.md
