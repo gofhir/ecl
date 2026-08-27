@@ -55,13 +55,13 @@ jobs:
           fi
 
           url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${TAG}/${notes}"
-          gh release view "$TAG" --json body --jq .body > generated-body.md
+          gh release view "$TAG" --repo "${GITHUB_REPOSITORY}" --json body --jq .body > generated-body.md
           {
             printf '📝 **[Full release notes](%s)** — every behaviour change, why it changed, and what to check before upgrading.\n\n' "$url"
             printf -- '---\n\n'
             cat generated-body.md
           } > release-body.md
-          gh release edit "$TAG" --notes-file release-body.md
+          gh release edit "$TAG" --repo "${GITHUB_REPOSITORY}" --notes-file release-body.md
 
       # The ci.yml major-bump job checks the COMMITS of a pull request. It cannot
       # see a major that comes from anywhere else, and one did: release-please
@@ -84,14 +84,17 @@ jobs:
               --jq .content | base64 -d | jq -r '."."'
           }
 
-          branch=$(gh pr list --state open --json headRefName \
+          # --repo on every call: this job deliberately has no checkout, and
+          # without it gh tries to infer the repository from git and dies with
+          # "fatal: not a git repository".
+          branch=$(gh pr list --repo "${GITHUB_REPOSITORY}" --state open --json headRefName \
             --jq '[.[] | select(.headRefName | startswith("release-please--"))][0].headRefName')
           if [ -z "$branch" ] || [ "$branch" = "null" ]; then
             echo "No open release PR, so there is no proposed version to check."
             exit 0
           fi
 
-          pr=$(gh pr list --state open --head "$branch" --json number --jq '.[0].number')
+          pr=$(gh pr list --repo "${GITHUB_REPOSITORY}" --state open --head "$branch" --json number --jq '.[0].number')
           current=$(manifest_at "${GITHUB_REF_NAME}")
           proposed=$(manifest_at "$branch")
           echo "Release PR #${pr} on ${branch}: ${current} -> ${proposed}"
@@ -101,7 +104,7 @@ jobs:
             exit 0
           fi
 
-          if gh pr view "$pr" --json labels --jq '.labels[].name' | grep -qx 'major-release'; then
+          if gh pr view "$pr" --repo "${GITHUB_REPOSITORY}" --json labels --jq '.labels[].name' | grep -qx 'major-release'; then
             echo "Major bump proposed, and PR #${pr} is labelled major-release. Deliberate."
             exit 0
           fi
