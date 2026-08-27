@@ -5,9 +5,12 @@
 [![Release](https://img.shields.io/github/v/release/gofhir/ecl)](https://github.com/gofhir/ecl/releases)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-Embeddable parser and evaluator for the SNOMED CT **Expression Constraint Language (ECL) v2.2** in pure Go. Comes with parsers for **SNOMED Compositional Grammar (SCG)** and a **Machine Readable Concept Model (MRCM)** validator, plus a `gofhir-ecl` CLI and a 116-case conformance suite.
+Embeddable parser and evaluator for the SNOMED CT **Expression Constraint Language (ECL) v2.2** in pure Go. Comes with parsers for **SNOMED Compositional Grammar (SCG)** and a **Machine Readable Concept Model (MRCM)** validator, plus a `gofhir-ecl` CLI and a 136-case conformance suite.
 
 ```go
+// The path repeats "ecl" because the module is github.com/gofhir/ecl and the
+// package lives in ecl/. Correcting it would mean a new module path, i.e. a
+// major version, so it stays.
 import "github.com/gofhir/ecl/ecl"
 
 ast, _   := ecl.Parse("<< 404684003 |Clinical finding| {{ D term = wild: \"Diabet*\" }}")
@@ -174,10 +177,10 @@ history profiles nest. A check your data cannot exercise is **skipped with a
 reason**, not failed, so read the output: a provider that skips most of the suite
 has not been verified.
 
-`providertest.VerifyFixture(t)` is the other half. It runs the 116 bundled cases,
-whose expectations are concrete concept IDs, so it verifies the **evaluator** and
-only passes against the bundled fixture — a correct provider carrying different
-data fails 89 of them.
+`providertest.VerifyFixture(t)` is the other half. It runs the 136 bundled cases
+against the bundled fixture, so it verifies the **evaluator** rather than your
+provider: 107 of them pin concrete concept IDs, which a correct provider carrying
+different data cannot satisfy. Use it to check this library, not your storage.
 
 The reference in-memory provider is [`ecl/providertest/fixture.go`](ecl/providertest/fixture.go) — read it to see the expected semantics.
 
@@ -269,7 +272,7 @@ The fixture is a YAML file describing concepts, parents, descriptions, relations
 
 ```bash
 $ gofhir-ecl conformance
-116 passed, 0 failed, 0 skipped, 116 total
+136 passed, 0 failed, 0 skipped, 136 total
 
 $ gofhir-ecl conformance -filter '^memberOf'
 PASS  ECL v2.2 features (Top, Bottom, AltIdentifier, ^R, MemberOf) :: memberOf refset
