@@ -287,14 +287,34 @@ apart:
 | [`ecl/testdata/official-examples/`](ecl/testdata/official-examples/) | The 121 expressions upstream publishes as **valid ECL** all parse. `TestParse_OfficialExamples` walks the tree; a failure is this project's defect by construction, since upstream declares them valid. | SNOMED International |
 | [`ecl/providertest/testdata/`](ecl/providertest/testdata/) | 123 expressions **evaluate** to specific concept sets against a bundled fixture. | This project |
 
-The third row is the honest weak spot. No official corpus states what an
+The third row was the honest weak spot: no official corpus states what an
 expression should *return* — the specification gives prose and examples without
-expected results — so the semantic expectations are this project's reading of it,
-and a misreading yields a green test. Several bugs fixed in v1.2.0 had a passing
-test asserting the wrong behaviour. Where a semantic question could not be settled
-from the text, it was checked against a public terminology server and the finding
-recorded in the code; the reverse-attributes-in-a-group note above is one such
-case.
+expected results — so those expectations are this project's reading of it, and a
+misreading yields a green test. Several bugs fixed in v1.2.0 had a passing test
+asserting the wrong behaviour.
+
+`make oracle` is the answer to that. It runs a **differential test** against a real
+FHIR terminology server ([`internal/oracle`](internal/oracle/)): the server
+supplies the facts — the descendants of X, the targets of attribute A on set S, the
+relationship groups of a concept — and also evaluates the whole expression itself,
+so the only thing under test is what this library composes out of those facts.
+That is where every semantic bug found so far actually lived.
+
+```
+$ make oracle
+28 agreed (0 of them vacuously, on the empty set), 1 skipped, of 29 cases;
+60 HTTP requests in 28s
+```
+
+The one skip is reverse cardinality, which needs `InboundRelationshipsProvider`;
+the harness does not implement it, so this library correctly reports the construct
+unsupported instead of guessing. Agreement on an empty set is counted separately
+and never as evidence — two implementations that both return nothing agree for any
+reason at all.
+
+It is not part of `make check`: it needs network, and a divergence needs triage
+rather than a red build. The server is another implementation, not the
+specification.
 
 `make check-upstream` diffs both vendored artefacts against upstream, and a
 scheduled workflow runs it weekly — otherwise a new grammar version could land

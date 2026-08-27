@@ -1,4 +1,4 @@
-.PHONY: test test-race lint tidy generate conformance check check-upstream
+.PHONY: test test-race lint tidy generate conformance check check-upstream oracle
 
 # ANTLR_VERSION must match the version the committed parser was generated with,
 # which the header of ecl/grammar/ecl_parser.go records. Pin it: generating with
@@ -39,6 +39,18 @@ check: lint test-race conformance
 # schedule in CI instead of blocking a commit.
 check-upstream:
 	./scripts/check-upstream.sh
+
+# ORACLE_URL is the terminology server the differential test compares against.
+# Any FHIR R4 endpoint serving SNOMED CT works; the CSIRO public server needs no
+# credentials, which is why it is the default.
+ORACLE_URL ?= https://r4.ontoserver.csiro.au/fhir
+
+# Runs the differential test: every corpus expression is evaluated here AND by the
+# server, and the concept sets compared. Needs network. Like check-upstream it is
+# NOT part of `check` — it depends on a third party being up, and a divergence
+# needs triage rather than a red build.
+oracle:
+	ECL_ORACLE_URL=$(ORACLE_URL) go test ./internal/oracle/ -run TestDifferential -v -timeout 40m
 
 $(ANTLR_JAR):
 	@mkdir -p $(dir $(ANTLR_JAR))
