@@ -237,8 +237,28 @@ type LanguageFilter struct {
 
 // DialectFilter represents a description dialect filter.
 type DialectFilter struct {
-	Op       string
+	Op string
+
+	// Dialects holds the entries of the dialectId form, which names language
+	// reference sets by SCTID.
 	Dialects []DialectEntry
+
+	// Aliases holds the entries of the alias form (`dialect = en-gb`). It is
+	// separate from Dialects because an alias is not a concept reference: mapping
+	// it to a language reference set's SCTID is terminology data, which the
+	// evaluator obtains from an optional provider capability.
+	Aliases []DialectAliasEntry
+}
+
+// DialectAliasEntry pairs a dialect alias with its optional acceptabilities.
+type DialectAliasEntry struct {
+	// Alias is the language-reference-set alias as written, e.g. "en-gb". Case is
+	// preserved; resolution is the provider's business.
+	Alias string
+
+	// Acceptabilities holds every acceptability the entry names, with any-of
+	// semantics, exactly as in DialectEntry.
+	Acceptabilities []Expression
 }
 
 // DialectEntry pairs a dialect (concept ref or alias) with its optional

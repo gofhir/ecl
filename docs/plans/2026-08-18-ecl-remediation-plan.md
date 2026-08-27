@@ -98,16 +98,24 @@ Lo que sigue pendiente y **no** lo resuelve una capacidad:
   Ahora devuelve `ErrUnsupportedFeature` remitiendo a la forma sin agrupar, y se borraron las cuatro
   funciones que la implementaban. Con esto **la limitación abierta de la Task 3 también queda cerrada**:
   ya no hay ruta reverse dentro de grupos que aplane cláusulas.
-- **El dialecto por alias**, que necesita un mapeo alias→refset. Cabría otra capacidad
-  (`DialectAliasResolver`) en vez de una tabla parcial inventada.
-- **Conjuntos de términos y de `effectiveTime`**, cuya semántica any-of las `Opts` no expresan.
+- ~~**El dialecto por alias**~~ — **cerrada (2026-08-27).** Se añadió la capacidad
+  `DialectAliasResolver`, tal como decía esta línea: el mapeo alias→refset lo aporta el
+  provider, no una tabla parcial inventada aquí. Un alias que el provider no resuelve se
+  reporta, porque tratarlo como "sin restricción de dialecto" ampliaría la consulta a todos.
+- ~~**Conjuntos de términos y de `effectiveTime`**~~ — **cerrada (2026-08-27), sin tocar el
+  contrato.** Son any-of, o sea la unión de los filtros de un solo valor, así que el
+  evaluador emite una llamada por valor. Añadir campos `Terms`/`EffectiveTimes` habría sido
+  peor: todo provider existente los ignoraría en silencio y el filtro se aplicaría sobre un
+  valor del conjunto. Bajo `!=` el conjunto de `effectiveTime` significa "ninguno de estos",
+  y se intersecta. Sigue sin soportarse la forma negada del conjunto de términos: una sola
+  fila de descripción tiene que fallar todos los valores, y eso no se descompone.
 - **Opciones funcionales en `Evaluate`** (`WithMaxDepth`, `WithCache`), que son aditivas y quedan
   disponibles cuando se necesiten.
 
-**Tabla de aceptación: 12 de 13 filas pasan.** La única que queda es el dialecto por alias, y es una
-decisión deliberada: devuelve `ErrUnsupportedFeature` en lugar de un conjunto silenciosamente vacío.
+**Tabla de aceptación: 13 de 13 filas pasan.** El dialecto por alias, que era la única pendiente, se
+cerró con `DialectAliasResolver`.
 
-**Métricas:** 44 → **123** casos de conformidad, todos ejecutados por CI (antes 8). Cobertura de `ecl`
+**Métricas:** 44 → **136** casos de conformidad, todos ejecutados por CI (antes 8). Cobertura de `ecl`
 61.8 % → 76.9 %; `providertest` (antes `internal/conformance`) 41.8 % → 81.7 %. `golangci-lint` en 0 issues y `-race` limpio
 en todos los commits. Ningún cambio rompe la API: los campos viejos siguen poblados y deprecados.
 

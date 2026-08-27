@@ -27,6 +27,13 @@ type FixtureSpec struct {
 	AltIdentifiers         map[string]map[string][]string `yaml:"altIdentifiers"` // scheme → code → conceptIDs
 	Dialects               []FixtureDialectMember         `yaml:"dialects"`       // (dialectID, acceptabilityID) → conceptIDs as flat list
 	MemberFields           []FixtureMemberField           `yaml:"memberFields"`
+
+	// DialectAliases maps a dialect alias to the SCTIDs of its language
+	// reference sets, for `{{ D dialect = en-gb }}`. Declaring it is what makes
+	// the fixture satisfy ecl.DialectAliasResolver; an alias that is absent stays
+	// unresolvable, which is the case the evaluator has to report rather than
+	// widen.
+	DialectAliases map[string][]string `yaml:"dialectAliases"`
 }
 
 // FixtureConcept is one concept declaration in the fixture.
@@ -544,7 +551,9 @@ func (p *inMemoryProvider) FilterConcepts(_ context.Context, concepts ecl.Set, o
 		if len(opts.ModuleIDs) > 0 && !contains(opts.ModuleIDs, c.ModuleID) {
 			return true
 		}
-		// EffectiveTime intentionally not enforced in fixtures yet.
+		if !effectiveTimeMatches(c.EffectiveTime, opts.EffectiveTime, opts.EffectiveTimeOp) {
+			return true
+		}
 		out = out.Union(ecl.NewSetFromSlice([]string{id}))
 		return true
 	})
@@ -837,4 +846,58 @@ func descriptionMatchesNegated(d FixtureDescription, filter ecl.NegatedDescripti
 		return false
 	}
 	return true
+}
+
+// effectiveTimeMatches compares a concept's effectiveTime against a filter.
+//
+// YYYYMMDD sorts chronologically as text, so the comparison is a plain string
+// comparison and needs no date parsing. A concept that declares no effectiveTime
+// cannot satisfy any effectiveTime comparison, including "!=": the filter asks
+// about a value the concept does not have, and answering true would make
+// `effectiveTime != X` select concepts with no effectiveTime at all.
+func effectiveTimeMatches(have, want, op string) bool {
+	if want == "" {
+		return true // no filter on this dimension
+	}
+	if have == "" {
+		return false
+	}
+	switch op {
+	case "", "=":
+		return have == want
+	case "!=":
+		return have != want
+	case "<":
+		return have < want
+	case "<=":
+		return have <= want
+	case ">":
+		return have > want
+	case ">=":
+		return have >= want
+	default:
+		return false
+	}
+}
+
+// ResolveDialectAliases implements ecl.DialectAliasResolver from the fixture's
+// dialectAliases declarations.
+//
+// Lookup is case-insensitive on the alias, because "en-GB" and "en-gb" name the
+// same reference set in practice and the capability leaves the choice to the
+// implementation. An alias the fixture does not declare is left OUT of the result
+// rather than mapped to an empty slice: absent means "cannot resolve", which the
+// evaluator reports, while an empty slice would read as "no dialect constraint"
+// and widen the query to every dialect.
+func (p *inMemoryProvider) ResolveDialectAliases(_ context.Context, aliases []string) (map[string][]string, error) {
+	out := map[string][]string{}
+	for _, alias := range aliases {
+		for declared, ids := range p.spec.DialectAliases {
+			if strings.EqualFold(declared, alias) && len(ids) > 0 {
+				out[alias] = append([]string(nil), ids...)
+				break
+			}
+		}
+	}
+	return out, nil
 }

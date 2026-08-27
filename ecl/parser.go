@@ -798,13 +798,13 @@ func (v *astBuilder) buildLanguageFilter(ctx grammar.ILanguagefilterContext) *as
 //	dialectidfilter    : dialectId = <SCTID> | (set of SCTIDs)
 //	dialectaliasfilter : dialect   = en-gb   | (set of aliases)
 //
-// Only the SCTID form is populated here. An alias like "en-gb" has to be mapped
-// to the SCTID of a language reference set, and that mapping is terminology data:
-// only the two international English aliases are universal, while national
-// dialects use namespace-specific refset IDs. Inventing a partial table inside
-// the parser would resolve some expressions and silently mis-resolve others, so
-// the alias form is left with an empty Dialects slice and the evaluator reports
-// it through ErrUnsupportedFeature.
+// The two forms land in two different fields. An alias like "en-gb" is not a
+// concept reference: mapping it to the SCTID of a language reference set is
+// terminology data — only the international English aliases are universal, while
+// national dialects use namespace-specific refset IDs — so inventing a table
+// inside the parser would resolve some expressions and silently mis-resolve
+// others. The alias text is recorded verbatim in Aliases and the evaluator asks
+// the provider to resolve it, through the optional ecl.DialectAliasResolver.
 //
 // This node used to be emitted with Dialects always nil and Op forced to "=",
 // which made every dialect expression evaluate to the empty set without a word.
@@ -842,14 +842,55 @@ func (v *astBuilder) buildDialectFilter(ctx grammar.IDialectfilterContext) *ast.
 		return df
 	}
 
-	// Alias form: record the operator so the error message is accurate, but
-	// leave Dialects empty — see the comment above.
+	// Alias form.
 	if af, ok := concrete.Dialectaliasfilter().(*grammar.DialectaliasfilterContext); ok && af != nil {
 		if op := af.Booleancomparisonoperator(); op != nil {
 			df.Op = v.extractComparisonOp(op.GetText())
 		}
+		if alias := af.Dialectalias(); alias != nil {
+			entry := ast.DialectAliasEntry{Alias: alias.GetText(), Acceptabilities: acceptability}
+			df.Aliases = append(df.Aliases, entry)
+		}
+		if set, ok := af.Dialectaliasset().(*grammar.DialectaliassetContext); ok && set != nil {
+			df.Aliases = append(df.Aliases, v.dialectAliasEntriesOf(set, acceptability)...)
+		}
 	}
 	return df
+}
+
+// dialectAliasEntriesOf pairs each alias of a dialectaliasset with the
+// acceptability that follows it, walking the children IN ORDER for the same
+// reason dialectEntriesOf does: the grammar makes acceptability optional per
+// entry, so ANTLR's flat lists cannot be zipped by index.
+func (v *astBuilder) dialectAliasEntriesOf(set *grammar.DialectaliassetContext, fallback []ast.Expression) []ast.DialectAliasEntry {
+	var (
+		entries []ast.DialectAliasEntry
+		pending *ast.DialectAliasEntry
+	)
+	flush := func() {
+		if pending == nil {
+			return
+		}
+		if len(pending.Acceptabilities) == 0 {
+			pending.Acceptabilities = fallback
+		}
+		entries = append(entries, *pending)
+		pending = nil
+	}
+
+	for _, child := range set.GetChildren() {
+		switch c := child.(type) {
+		case *grammar.DialectaliasContext:
+			flush()
+			pending = &ast.DialectAliasEntry{Alias: c.GetText()}
+		case *grammar.AcceptabilitysetContext:
+			if pending != nil {
+				pending.Acceptabilities = v.buildAcceptabilities(c)
+			}
+		}
+	}
+	flush()
+	return entries
 }
 
 // dialectEntriesOf pairs each dialect of a dialectidset with the acceptability

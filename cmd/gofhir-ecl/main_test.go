@@ -112,9 +112,12 @@ func TestRunEval(t *testing.T) {
 	assert.ElementsMatch(t, []string{"11687002", "73211009"}, lines)
 
 	// A feature this build cannot evaluate must be classifiable, not silently
-	// answered with the empty set.
+	// answered with the empty set. A reverse attribute inside an attribute group
+	// is the example because its rejection is permanent by design — grouping has
+	// no meaning there — rather than pending a provider capability, so this
+	// assertion cannot be invalidated by a provider growing one.
 	out.Reset()
-	err = runEvalWithOutput([]string{"--fixture", standardFixture(t), "<< 404684003 {{ D dialect = en-gb }}"}, &out)
+	err = runEvalWithOutput([]string{"--fixture", standardFixture(t), "* : { R 363698007 = 22298006 }"}, &out)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
 	assert.Equal(t, exitUnsupported, exitCode(err))

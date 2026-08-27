@@ -9,7 +9,7 @@ import "context"
 // breaking change — the same shape the standard library uses for io.ReaderFrom or
 // http.Flusher.
 //
-// They exist because three things cannot be expressed through DataProvider as it
+// They exist because some things cannot be expressed through DataProvider as it
 // stands, and widening that interface would break every implementation:
 //
 //   - PropertiesByGroup and ConcreteValues are per-concept BY SIGNATURE, so a
@@ -20,6 +20,16 @@ import "context"
 //     needs. Those forms return ErrUnsupportedFeature without this.
 //   - DescriptionFilterOpts has no way to say "match rows that do NOT satisfy
 //     this", so a negated description filter returns ErrUnsupportedFeature.
+//   - A dialect ALIAS is not a concept reference, and resolving it to a language
+//     reference set is terminology data no parser can compute.
+//
+// Note what is NOT here. A filter value SET — `{{ D term = ("a" "b") }}`,
+// `{{ C effectiveTime = ("20240131" "20230731") }}` — has any-of semantics, so it
+// is the union of the single-value filters and the evaluator decomposes it into
+// one call per value. That needs no capability and works with every provider. A
+// Terms or EffectiveTimes field would have been worse than useless: every existing
+// implementation would ignore it in silence, and the filter would quietly match on
+// one value out of the set.
 //
 // Implement the ones your storage can answer efficiently and leave the rest.
 //
@@ -120,4 +130,32 @@ type NegatedDescriptionFilterOpts struct {
 
 	// LanguagesNegated inverts the Languages comparison.
 	LanguagesNegated bool
+}
+
+// DialectAliasResolver maps a dialect alias to the language reference sets it
+// names.
+//
+// Implement it to enable the alias form of the dialect filter:
+//
+//	{{ D dialect = en-gb }}
+//	{{ D dialect = (en-gb en-us) }}
+//
+// Without it that form returns ErrUnsupportedFeature, while the explicit
+// `dialectId = 900000000000508004` form always works.
+//
+// The mapping is terminology data, not something a parser can compute. Only the
+// international English aliases are universal — every national dialect uses a
+// language reference set in its own namespace, and the same alias can mean
+// different refsets in different editions — so a table built into this library
+// would resolve some expressions and silently mis-resolve others.
+//
+// Aliases are passed as written, so an implementation must decide its own case
+// handling; "en-GB" and "en-gb" name the same reference set in practice. The
+// result maps each alias to the SCTIDs of its language reference sets; an alias
+// may legitimately map to several. An alias the implementation does not know must
+// be ABSENT from the map rather than mapped to an empty slice: absent means "I
+// cannot resolve this", which the evaluator reports, whereas silently dropping it
+// would widen the query to every dialect.
+type DialectAliasResolver interface {
+	ResolveDialectAliases(ctx context.Context, aliases []string) (map[string][]string, error)
 }

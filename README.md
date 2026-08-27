@@ -26,7 +26,7 @@ ECL is the standard query language for SNOMED CT. Until now, evaluating it from 
 - ✅ **SCG** parser + validator
 - ✅ **MRCM** loader + validator (uses ECL evaluator internally)
 - ✅ **SCTID** Verhoeff checksum + partition validation
-- ✅ **123/123** bundled conformance cases pass, all executed by CI
+- ✅ **136/136** bundled conformance cases pass, all executed by CI
 - ✅ **121/121** of SNOMED International's [official ECL examples](ecl/testdata/official-examples/) parse — the one test suite this project did not write
 - 📦 Latest release: see [GitHub Releases](https://github.com/gofhir/ecl/releases)
 
@@ -39,11 +39,10 @@ bad data:
 | Construct | Why |
 |---|---|
 | `{{ D term != … }}`, `{{ D language != … }}`, `{{ D type != … }}`, **unless** the provider implements `NegatingDescriptionProvider` | Negating a description filter is a per-ROW operation: a concept with both an FSN and a Spanish synonym satisfies `language != es` through its FSN, so set subtraction is wrong. Negated **concept** filters (`{{ C … != … }}`) always work. |
-| `{{ D dialect = en-gb }}` (alias form) | Mapping a dialect alias to a language reference set's SCTID is terminology data; only the international English aliases are universal. Use `{{ D dialectId = 900000000000508004 }}`. |
+| `{{ D dialect = en-gb }}` (alias form), **unless** the provider implements `DialectAliasResolver` | Mapping a dialect alias to a language reference set's SCTID is terminology data — only the international English aliases are universal, and the same alias can name different refsets in different editions. With the capability this works; `{{ D dialectId = 900000000000508004 }}` always does. |
 | `^[field]` projection | `Set` carries concept IDs only. Use a `{{ M … }}` member filter. |
 | `{{ D id = … }}` | The parser models it, but `DescriptionFilterOpts` has no field to carry the ids to the provider. |
-| A term filter with a SET of terms — `{{ D term = ("a" "b") }}` | Any-of semantics, which `DescriptionFilterOpts.Term` cannot express. A single term, including a multi-word one, works. |
-| An `effectiveTime` filter with a set of values | Same reason: `ConceptFilterOpts` carries one value and one operator. |
+| A **negated** term filter with a set of terms — `{{ D term != ("a" "b") }}` | One description row has to fail every value, so it cannot be decomposed: intersecting per-term negations would accept a concept with one row failing the first term and a different row failing the second. The positive set form works. |
 | A cardinality or `!=` on a reverse (`R`) attribute, **unless** the provider implements `InboundRelationshipsProvider` | `RelationshipTargets` returns a `Set`, so it loses the inbound count and the per-type total. With the capability these work. |
 | A reverse (`R`) attribute **inside an attribute group** — `{ R attr = value }` | Braces assert that the clauses share one relationship group *of the focus concept*, and a reverse relationship belongs to the source, so the focus has no group to constrain. Write it outside the braces. See the note below. |
 | `AttributeDomain.InGroupCardinality` (MRCM) | Loaded and exposed, not yet enforced. |
@@ -112,7 +111,7 @@ type myProvider struct {
 
 ### Optional capabilities
 
-Three things cannot be expressed through `DataProvider` as it stands, and widening
+Some things cannot be expressed through `DataProvider` as it stands, and widening
 that interface would break every implementation. They are offered as **optional
 interfaces** the evaluator type-asserts for instead — the shape the standard
 library uses for `io.ReaderFrom` or `http.Flusher`. Implement what your storage
@@ -124,9 +123,13 @@ answers well; the evaluator falls back or reports the forms it cannot handle.
 | `BatchConcreteValuesProvider` | The same for concrete-value comparisons, which otherwise cost N×T calls. |
 | `InboundRelationshipsProvider` | `[m..n] R attr = value` and `R attr != value`, which need the inbound count and the per-type total that `RelationshipTargets` cannot return. |
 | `NegatingDescriptionProvider` | `{{ D term != … }}`, `{{ D language != … }}`, `{{ D type != … }}`, whose negation is per description ROW and cannot be emulated with set arithmetic. |
+| `DialectAliasResolver` | `{{ D dialect = en-gb }}`, the alias form, whose alias-to-reference-set mapping is terminology data rather than something a parser can compute. |
 
 The reference provider in [`ecl/providertest/fixture.go`](ecl/providertest/fixture.go)
-implements the first three; read it for a worked example.
+implements all five; read it for a worked example. `providertest.VerifyContract`
+has a check per capability, asserting that it agrees with the required method it
+replaces — a batch that disagrees with its per-concept equivalent would silently
+decide every answer.
 
 #### A note on reverse attributes inside a group
 
@@ -285,7 +288,7 @@ apart:
 |---|---|---|
 | [`ecl/grammar/ECL.g4`](ecl/grammar/ECL.g4) | The syntax accepted is the published grammar. It is SNOMED International's file, carrying one local fix for an upstream typo that stops the grammar generating (documented in its header). CI regenerates the parser from it and diffs byte for byte. | SNOMED International |
 | [`ecl/testdata/official-examples/`](ecl/testdata/official-examples/) | The 121 expressions upstream publishes as **valid ECL** all parse. `TestParse_OfficialExamples` walks the tree; a failure is this project's defect by construction, since upstream declares them valid. | SNOMED International |
-| [`ecl/providertest/testdata/`](ecl/providertest/testdata/) | 123 expressions **evaluate** to specific concept sets against a bundled fixture. | This project |
+| [`ecl/providertest/testdata/`](ecl/providertest/testdata/) | 136 expressions **evaluate** to specific concept sets against a bundled fixture. | This project |
 
 The third row was the honest weak spot: no official corpus states what an
 expression should *return* — the specification gives prose and examples without
@@ -322,7 +325,7 @@ without anyone noticing.
 
 ## Conformance suite
 
-The bundled suite lives in [`ecl/providertest/testdata/`](ecl/providertest/testdata/) and is **embedded in the binary**, so `gofhir-ecl conformance` works from any directory, including after `go install`. It currently covers 123 cases across 9 areas of the spec, including a suite of expressions that must be REJECTED.
+The bundled suite lives in [`ecl/providertest/testdata/`](ecl/providertest/testdata/) and is **embedded in the binary**, so `gofhir-ecl conformance` works from any directory, including after `go install`. It currently covers 136 cases across 9 areas of the spec, including a suite of expressions that must be REJECTED.
 
 | Area | Cases | Spec section |
 |---|---|---|
@@ -330,11 +333,11 @@ The bundled suite lives in [`ecl/providertest/testdata/`](ecl/providertest/testd
 | Compound expressions | 4 | 5.2 |
 | Primitives | 4 | 5.0 |
 | Refinements (disjunction, groups, cardinality, `!=`, dot, reverse) | 31 | 5.3 |
-| Filters (term, type, language, dialectId, module, definitionStatus, active, memberField) | 39 | 5.4 |
+| Filters (term, type, language, dialect and dialectId, module, definitionStatus, active, effectiveTime, memberField) | 53 | 5.4 |
 | History supplements (MIN/MOD/MAX) | 6 | 5.5 |
 | Concrete values | 4 | 5.3.4 |
 | v2.2 (Top, Bottom, AltIdentifier, `^R`) | 7 | v2.2 |
-| **Errors** — input that must be rejected, not truncated | 18 | grammar |
+| **Errors** — input that must be rejected, not truncated | 17 | grammar |
 
 Each suite is a YAML file with cases of the form:
 

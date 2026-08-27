@@ -107,6 +107,14 @@ dialects:
   - {dialectId: "900000000000509007", acceptabilityId: "900000000000549004", conceptId: "22298006", language: "en"}
   - {dialectId: "900000000000509007", acceptabilityId: "900000000000548007", conceptId: "73211009", language: "en"}
 
+# Alias → language reference set, for {{ D dialect = en-gb }}. Declaring this is
+# what makes the fixture satisfy ecl.DialectAliasResolver. en-nz is deliberately
+# ABSENT: an alias a provider cannot resolve must be reported, not silently
+# treated as "any dialect", and 09-errors.yaml pins that.
+dialectAliases:
+  en-gb: ["900000000000508004"]
+  en-us: ["900000000000509007"]
+
 # Per-member custom fields, for {{ M field = ... }}. The values are strings, the
 # shape that used to fail at runtime with "unsupported AST node type".
 memberFields:

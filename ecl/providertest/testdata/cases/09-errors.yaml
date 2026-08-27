@@ -55,10 +55,17 @@ cases:
 
 
   # The dialect ALIAS form needs an alias-to-refset mapping, which is terminology
-  # data rather than something the parser can invent: only the international
-  # English aliases are universal. Reported instead of silently returning empty.
-  - name: dialect alias filter is reported as unsupported
-    expression: "<< 404684003 {{ D dialect = en-gb }}"
+  # data rather than something a parser can invent: only the international English
+  # aliases are universal, and the same alias can name different reference sets in
+  # different editions. A provider supplies it through the optional
+  # ecl.DialectAliasResolver, which the reference fixture implements for en-gb and
+  # en-us -- so the supported cases live in 05-filters.yaml.
+  #
+  # en-nz is deliberately NOT declared there. An alias the provider cannot resolve
+  # has to be reported: treating it as "no dialect constraint" would widen the
+  # query to every dialect, and the caller would never know.
+  - name: an unresolvable dialect alias is reported as unsupported
+    expression: "<< 404684003 {{ D dialect = en-nz }}"
     expectError: true
 
   # The parser now models these, but DescriptionFilterOpts cannot carry them to
@@ -69,12 +76,13 @@ cases:
     expression: "< 404684003 {{ D id = 123456789012 }}"
     expectError: true
 
-  - name: term filter set is reported as unsupported
-    expression: '<< 404684003 {{ D term = ("heart" "attack") }}'
-    expectError: true
-
-  - name: effectiveTime set is reported as unsupported
-    expression: '<< 404684003 {{ C effectiveTime = ("20240131" "20230731") }}'
+  # A POSITIVE term set is supported — it decomposes into a union, see
+  # 05-filters.yaml. A NEGATED one does not: it selects concepts having a
+  # description whose term satisfies NEITHER value, which one description row has
+  # to decide. Intersecting per-term negations would wrongly accept a concept with
+  # one row failing the first term and a different row failing the second.
+  - name: negated term filter set is reported as unsupported
+    expression: '<< 404684003 {{ D term != ("infarction" "diabetes") }}'
     expectError: true
 
   # Braces assert that the clauses share ONE relationship group of the FOCUS

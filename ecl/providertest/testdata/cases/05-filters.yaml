@@ -216,3 +216,93 @@ cases:
   - name: negated dialect combined with a term clause
     expression: '<< 404684003 {{ D term = "Diabetes", dialectId != 900000000000508004 }}'
     expectedIds: ["73211009"]
+
+  # effectiveTime. The fixture declares it on four concepts only, and a concept
+  # without one cannot satisfy any comparison — answering otherwise would make
+  # `effectiveTime != X` select the concepts that have no effectiveTime at all.
+  - name: effectiveTime equals a single value
+    expression: '<< 138875005 {{ C effectiveTime = "20240131" }}'
+    expectedIds: ["22298006", "95566004"]
+
+  - name: effectiveTime before a value
+    expression: '<< 138875005 {{ C effectiveTime < "20230731" }}'
+    expectedIds: ["11687002"]
+
+  - name: effectiveTime at or after a value
+    expression: '<< 138875005 {{ C effectiveTime >= "20230731" }}'
+    expectedIds: ["22298006", "73211009", "95566004"]
+
+  # A SET of values is any-of, so it is the union of the single-value filters.
+  # ConceptFilterOpts carries one value and one operator, so the evaluator issues
+  # one provider call per value rather than widening the contract — a new Opts
+  # field would be silently ignored by every existing provider and the filter
+  # would quietly match on one value out of the set.
+  - name: effectiveTime set is the union of its values
+    expression: '<< 138875005 {{ C effectiveTime = ("20240131" "20230731") }}'
+    expectedIds: ["22298006", "73211009", "95566004"]
+
+  # Under "!=" the set reads "none of these", which is the INTERSECTION of the
+  # per-value negations. Unioning them would return every concept that differs
+  # from either value, i.e. all four.
+  - name: effectiveTime not-equals a set excludes every value
+    expression: '<< 138875005 {{ C effectiveTime != ("20240131" "20230731") }}'
+    expectedIds: ["11687002"]
+
+  # A term SET is any-of, so it is the union of the single-term filters. As with
+  # effectiveTime, the evaluator issues one provider call per term instead of
+  # widening DescriptionFilterOpts with a Terms slice: a new field would be
+  # silently ignored by every existing provider, and the filter would quietly
+  # match on one term out of the set.
+  - name: term set is the union of its terms
+    expression: '<< 404684003 {{ D term = ("infarction" "diabetes") }}'
+    expectedIds: ["22298006", "73211009", "11687002"]
+
+  # Each call carries the sibling clauses too, so the conjunction distributes over
+  # the set: (term = infarto OR term = diabetes) AND language = es. Only the
+  # Spanish description of myocardial infarction satisfies both, and it has to be
+  # the SAME description row.
+  - name: term set distributes over a sibling clause
+    expression: '<< 404684003 {{ D term = ("infarto" "diabetes"), language = es }}'
+    expectedIds: ["22298006"]
+
+  # Match type travels with its own term rather than being taken from the first.
+  # Taking the first would make "infarction" a wild pattern, which is anchored and
+  # would not match "Myocardial infarction"; and 11687002 is excluded because the
+  # anchored "Diabet*" does not match "Type 1 diabetes mellitus".
+  - name: each term in a set keeps its own match type
+    expression: '<< 404684003 {{ D term = (wild:"Diabet*" "infarction") }}'
+    expectedIds: ["22298006", "73211009"]
+
+  # ── Dialect ALIAS form ────────────────────────────────────────────────────
+  # Resolving "en-gb" to a language reference set is terminology data, so it comes
+  # from the optional ecl.DialectAliasResolver, which the reference fixture
+  # implements from its dialectAliases declarations. Without that capability the
+  # form reports ErrUnsupportedFeature; see capabilities.go.
+  - name: dialect alias resolves to the same set as its dialectId
+    expression: '<< 138875005 {{ D dialect = en-gb }}'
+    expectedIds: ["22298006"]
+
+  - name: dialect alias is case-insensitive
+    expression: '<< 138875005 {{ D dialect = EN-GB }}'
+    expectedIds: ["22298006"]
+
+  - name: dialect alias set is any-of
+    expression: '<< 138875005 {{ D dialect = (en-gb en-us) }}'
+    expectedIds: ["22298006", "73211009"]
+
+  # Acceptability discriminates within one alias: 22298006 is ACCEPTABLE in en-us
+  # while 73211009 is PREFERRED there.
+  - name: dialect alias with an acceptability
+    expression: '<< 138875005 {{ D dialect = en-us (900000000000549004) }}'
+    expectedIds: ["22298006"]
+
+  - name: dialect alias with the other acceptability
+    expression: '<< 138875005 {{ D dialect = en-us (900000000000548007) }}'
+    expectedIds: ["73211009"]
+
+  # The acceptability belongs to the alias it FOLLOWS, exactly as in the
+  # dialectId form: en-us restricted to acceptable, en-gb unrestricted. Zipping
+  # the two lists by index instead would attach it to whichever came first.
+  - name: acceptability in an alias set pairs with the alias it follows
+    expression: '<< 138875005 {{ D dialect = (en-us (900000000000549004) en-gb) }}'
+    expectedIds: ["22298006"]

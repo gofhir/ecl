@@ -63,6 +63,7 @@ func VerifyContract(t *testing.T, newProvider func() ecl.DataProvider) {
 		{"BatchConcreteValuesAgreesWithPerPair", checkBatchConcreteValuesAgrees},
 		{"InboundRelationshipsAgreesWithTargets", checkInboundAgreesWithTargets},
 		{"NegatedDescriptionIsNotSetSubtraction", checkNegatedDescriptionIsRowLevel},
+		{"DialectAliasResolvesToRealRefsets", checkDialectAliasResolves},
 	}
 
 	for _, c := range checks {
@@ -670,3 +671,52 @@ func nonNilSet(s ecl.Set) ecl.Set {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// checkDialectAliasResolves covers DialectAliasResolver.
+//
+// The failure this guards is an implementation that answers every alias, whether
+// it knows it or not. The capability's contract is that an unknown alias must be
+// ABSENT from the map: absent means "cannot resolve", which the evaluator reports,
+// while returning an empty slice reads as "no dialect constraint" and silently
+// widens the query to every dialect. An implementation backed by a map lookup gets
+// this right by accident; one that builds the result by iterating the request does
+// not.
+//
+// It also checks that a resolved alias names reference sets the provider actually
+// has members for, since an alias mapped to an SCTID nothing is a member of makes
+// every expression using it return the empty set.
+func checkDialectAliasResolves(ctx context.Context, t *testing.T, p ecl.DataProvider) {
+	resolver, ok := p.(ecl.DialectAliasResolver)
+	if !ok {
+		t.Skip("the provider does not implement ecl.DialectAliasResolver; the dialect alias form will report ErrUnsupportedFeature")
+	}
+
+	// en-gb and en-us are the two aliases every SNOMED CT edition shares, so they
+	// are the only ones a data-independent check may expect.
+	const gb, us = "en-gb", "en-us"
+	resolved, err := resolver.ResolveDialectAliases(ctx, []string{gb, us})
+	if err != nil {
+		t.Fatalf("ResolveDialectAliases: %v", err)
+	}
+	if len(resolved) == 0 {
+		t.Skipf("the provider resolves neither %s nor %s, so there is nothing to check", gb, us)
+	}
+
+	for alias, ids := range resolved {
+		if len(ids) == 0 {
+			t.Errorf("alias %q maps to an empty slice; an alias that cannot be resolved must be ABSENT from the map, because an empty slice reads as \"no dialect constraint\" and widens the query to every dialect", alias)
+		}
+	}
+
+	// A nonsense alias must not come back. It is deliberately not a plausible
+	// dialect: a provider is entitled to know aliases this check has never heard
+	// of, so only something no edition could define proves anything.
+	const nonsense = "zz-nonexistent-dialect"
+	got, err := resolver.ResolveDialectAliases(ctx, []string{nonsense})
+	if err != nil {
+		t.Fatalf("ResolveDialectAliases with an unknown alias: %v", err)
+	}
+	if _, present := got[nonsense]; present {
+		t.Errorf("the provider resolved %q, an alias no SNOMED CT edition defines; an unknown alias must be absent from the result so the evaluator can report it instead of matching every dialect", nonsense)
+	}
+}

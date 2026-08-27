@@ -1198,17 +1198,12 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 		if !ok {
 			continue
 		}
-		if len(df.Dialects) == 0 {
-			// Reached by the alias form (`dialect = en-gb`): mapping an alias to
-			// the SCTID of a language reference set is terminology data, and only
-			// the international English aliases are universal — national dialects
-			// use namespace-specific refset IDs. Use the dialectId form
-			// (`dialectId = 900000000000508004`) meanwhile.
-			//
+		if len(df.Dialects) == 0 && len(df.Aliases) == 0 {
+			// Neither form carried an entry, so there is nothing to filter by.
 			// Intersecting with an empty match instead would return the empty set
-			// for every dialect expression without a word, which is what happened
-			// before this node was populated at all.
-			return nil, fmt.Errorf("%w: dialect alias filter needs an alias-to-refset mapping; use the dialectId form", ErrUnsupportedFeature)
+			// for every such expression, which is what happened before this node
+			// was populated at all.
+			return nil, fmt.Errorf("%w: dialect filter names no dialect", ErrUnsupportedFeature)
 		}
 		dOpts, err := buildDialectFilterOpts(ctx, df, provider)
 		if err != nil {
@@ -1238,7 +1233,7 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 	// returned active concepts, because the negated conjunction was empty and
 	// Minus subtracted nothing.
 	for _, cl := range buildConceptFilterClauses(conceptFilters) {
-		opts, matchesNothing, err := conceptClauseOpts(ctx, cl.filter, provider)
+		plan, err := planConceptClause(ctx, cl.filter, provider)
 		if err != nil {
 			return nil, err
 		}
@@ -1246,12 +1241,21 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 		// to the provider would instead mean "no filter on this dimension" and
 		// the clause would match everything.
 		matched := NewSet()
-		if !matchesNothing {
-			matched, err = provider.FilterConcepts(ctx, result, opts)
-			if err != nil {
-				return nil, fmt.Errorf("%w: FilterConcepts: %w", ErrProvider, err)
+		if !plan.matchesNothing {
+			for i, opts := range plan.calls {
+				got, err := provider.FilterConcepts(ctx, result, opts)
+				if err != nil {
+					return nil, fmt.Errorf("%w: FilterConcepts: %w", ErrProvider, err)
+				}
+				switch {
+				case i == 0:
+					matched = nonNil(got)
+				case plan.intersect:
+					matched = matched.Intersect(nonNil(got))
+				default:
+					matched = matched.Union(nonNil(got))
+				}
 			}
-			matched = nonNil(matched)
 		}
 		if cl.negate {
 			result = result.Minus(matched)
@@ -1293,12 +1297,36 @@ func buildConceptFilterClauses(filters []ast.Filter) []conceptFilterClause {
 	return out
 }
 
-// conceptClauseOpts builds the ConceptFilterOpts for exactly one clause.
+// conceptClausePlan is how one concept filter clause becomes provider calls.
+type conceptClausePlan struct {
+	// calls holds one ConceptFilterOpts per FilterConcepts call. There is more
+	// than one only for an effectiveTime SET, because ConceptFilterOpts carries a
+	// single time value and a single operator.
+	calls []ConceptFilterOpts
+
+	// intersect combines the calls with AND rather than OR. A value set means
+	// any-of, which is a union — except under "!=", where "not any of these" is
+	// the intersection of the individual negations.
+	intersect bool
+
+	// matchesNothing reports that the clause's operand names no concept, so the
+	// clause matches nothing. It cannot be expressed through the Opts, where an
+	// empty field means "do not filter on this dimension".
+	matchesNothing bool
+}
+
+// planConceptClause builds the provider calls for exactly one concept filter
+// clause.
 //
-// The bool reports that the clause's operand names no concept, so the clause
-// matches nothing. It cannot be expressed through the Opts, where an empty field
-// means "do not filter on this dimension".
-func conceptClauseOpts(ctx context.Context, f ast.Filter, provider DataProvider) (ConceptFilterOpts, bool, error) {
+// Most clauses are one call. A value set is expressed differently per dimension:
+// definitionStatus and module carry any-of natively in their ID slices, so a set
+// is still one call, while effectiveTime carries one value and one operator and
+// therefore becomes one call per value. Decomposing it that way is exact — a
+// union of single-value filters is what any-of means — and needs nothing of the
+// provider, which is why it is preferred over widening ConceptFilterOpts: a new
+// field would be silently ignored by every provider written against the current
+// contract, and the filter would quietly match on one value out of the set.
+func planConceptClause(ctx context.Context, f ast.Filter, provider DataProvider) (conceptClausePlan, error) {
 	var opts ConceptFilterOpts
 	switch x := f.(type) {
 	case *ast.ActiveFilter:
@@ -1310,7 +1338,7 @@ func conceptClauseOpts(ctx context.Context, f ast.Filter, provider DataProvider)
 		for _, val := range x.Values {
 			ids, resolved, err := resolveFilterIDs(ctx, val, provider)
 			if err != nil {
-				return opts, false, fmt.Errorf("evaluating definitionStatus filter: %w", err)
+				return conceptClausePlan{}, fmt.Errorf("evaluating definitionStatus filter: %w", err)
 			}
 			if !resolved {
 				continue
@@ -1318,13 +1346,13 @@ func conceptClauseOpts(ctx context.Context, f ast.Filter, provider DataProvider)
 			opts.DefinitionStatusIDs = append(opts.DefinitionStatusIDs, ids...)
 		}
 		if len(x.Values) > 0 && len(opts.DefinitionStatusIDs) == 0 {
-			return opts, true, nil
+			return conceptClausePlan{matchesNothing: true}, nil
 		}
 	case *ast.ModuleFilter:
 		for _, mod := range x.Modules {
 			ids, resolved, err := resolveFilterIDs(ctx, mod, provider)
 			if err != nil {
-				return opts, false, fmt.Errorf("evaluating module filter: %w", err)
+				return conceptClausePlan{}, fmt.Errorf("evaluating module filter: %w", err)
 			}
 			if !resolved {
 				continue
@@ -1332,21 +1360,27 @@ func conceptClauseOpts(ctx context.Context, f ast.Filter, provider DataProvider)
 			opts.ModuleIDs = append(opts.ModuleIDs, ids...)
 		}
 		if len(x.Modules) > 0 && len(opts.ModuleIDs) == 0 {
-			return opts, true, nil
+			return conceptClausePlan{matchesNothing: true}, nil
 		}
 	case *ast.EffectiveTimeFilter:
-		// ConceptFilterOpts carries one time value and one operator, so a set
-		// cannot be passed to the provider. Report it rather than comparing
-		// against the first value only.
-		if len(x.Values) > 1 {
-			return opts, false, fmt.Errorf("%w: an effectiveTime filter with %d values has any-of semantics, which ConceptFilterOpts cannot express", ErrUnsupportedFeature, len(x.Values))
-		}
-		if len(x.Values) == 1 {
-			opts.EffectiveTime = x.Values[0]
-		}
 		opts.EffectiveTimeOp = x.Op
+		if len(x.Values) <= 1 {
+			if len(x.Values) == 1 {
+				opts.EffectiveTime = x.Values[0]
+			}
+			break
+		}
+
+		// One call per value. Under "!=" the set reads "none of these", so the
+		// per-value results are intersected; every other operator keeps the
+		// any-of union.
+		plan := conceptClausePlan{intersect: x.Op == "!="}
+		for _, v := range x.Values {
+			plan.calls = append(plan.calls, ConceptFilterOpts{EffectiveTime: v, EffectiveTimeOp: x.Op})
+		}
+		return plan, nil
 	}
-	return opts, false, nil
+	return conceptClausePlan{calls: []ConceptFilterOpts{opts}}, nil
 }
 
 // resolveFilterIDs evaluates a filter operand to concept IDs, falling back to
@@ -1417,11 +1451,52 @@ func matchDescriptionFilters(ctx context.Context, descFilters []ast.Filter, prov
 		return nonNil(matches), nil
 	}
 
-	matches, err := provider.MatchDescription(ctx, opts)
-	if err != nil {
-		return nil, fmt.Errorf("%w: MatchDescription: %w", ErrProvider, err)
+	// One call per term, unioned. A single term — the overwhelmingly common case —
+	// is one call with the same Opts as before.
+	out := NewSet()
+	for i, callOpts := range termCalls(descFilters, opts) {
+		matches, err := provider.MatchDescription(ctx, callOpts)
+		if err != nil {
+			return nil, fmt.Errorf("%w: MatchDescription: %w", ErrProvider, err)
+		}
+		if i == 0 {
+			out = nonNil(matches)
+			continue
+		}
+		out = out.Union(nonNil(matches))
 	}
-	return nonNil(matches), nil
+	return out, nil
+}
+
+// termCalls expands a positive term SET into one DescriptionFilterOpts per term.
+//
+// `{{ D term = ("heart" "attack") }}` is any-of, so it is the union of the
+// single-term filters — and each call still carries the sibling clauses, which is
+// what makes `(term = a OR term = b) AND language = x` come out right.
+//
+// Decomposing is preferred over widening DescriptionFilterOpts with a Terms
+// slice: a new field is silently ignored by every provider written against the
+// current contract, so the filter would quietly match on one term out of the set
+// and return a narrower answer than asked for. Nothing detects that.
+//
+// Each term carries its own match type ("match" or "wild"), so the type travels
+// with its term rather than being taken from the first one.
+func termCalls(filters []ast.Filter, base DescriptionFilterOpts) []DescriptionFilterOpts {
+	for _, f := range filters {
+		tf, ok := f.(*ast.TermFilter)
+		if !ok || len(tf.Terms) <= 1 {
+			continue
+		}
+		out := make([]DescriptionFilterOpts, 0, len(tf.Terms))
+		for _, t := range tf.Terms {
+			opts := base
+			opts.Term = t.Text
+			opts.MatchType = t.MatchType
+			out = append(out, opts)
+		}
+		return out
+	}
+	return []DescriptionFilterOpts{base}
 }
 
 // negatedOptsFor carries each clause's polarity alongside the values, so the
@@ -1504,8 +1579,15 @@ func unsupportedDescriptionFilter(filters []ast.Filter) error {
 		case *ast.DescriptionIDFilter:
 			return fmt.Errorf("%w: description id filter needs a DescriptionFilterOpts field to pass the ids to the provider", ErrUnsupportedFeature)
 		case *ast.TermFilter:
-			if len(x.Terms) > 1 {
-				return fmt.Errorf("%w: a term filter with %d terms has any-of semantics, which DescriptionFilterOpts.Term cannot express", ErrUnsupportedFeature, len(x.Terms))
+			// A POSITIVE term set is any-of, so it decomposes into one provider
+			// call per term, unioned — see termCalls. A NEGATED one does not: it
+			// selects concepts having a description whose term satisfies neither
+			// value, and that must be decided per description ROW. Intersecting
+			// per-term negations would instead accept a concept with one row
+			// failing the first term and a DIFFERENT row failing the second.
+			if len(x.Terms) > 1 && x.Op == "!=" {
+				return fmt.Errorf("%w: a negated term filter with %d terms needs the whole set on one call, because a single description row must fail every value; DescriptionFilterOpts.Term carries one term",
+					ErrUnsupportedFeature, len(x.Terms))
 			}
 		}
 	}
@@ -1587,7 +1669,66 @@ func buildDialectFilterOpts(ctx context.Context, df *ast.DialectFilter, provider
 			AcceptabilityIDs: acceptIDs,
 		})
 	}
+
+	if err := appendAliasDialects(ctx, &opts, df.Aliases, provider); err != nil {
+		return opts, err
+	}
 	return opts, nil
+}
+
+// appendAliasDialects resolves the alias form of the dialect filter through the
+// optional ecl.DialectAliasResolver and appends the result as ordinary entries.
+//
+// Alias resolution is terminology data — see the capability's godoc — so without
+// a provider that implements it the only honest answer is ErrUnsupportedFeature.
+// An alias the provider does not return is reported for the same reason: dropping
+// it would widen the query to every dialect, which is the failure mode this
+// package refuses everywhere else.
+func appendAliasDialects(ctx context.Context, opts *DialectFilterOpts, aliases []ast.DialectAliasEntry, provider DataProvider) error {
+	if len(aliases) == 0 {
+		return nil
+	}
+
+	resolver, ok := provider.(DialectAliasResolver)
+	if !ok {
+		names := make([]string, 0, len(aliases))
+		for _, a := range aliases {
+			names = append(names, a.Alias)
+		}
+		return fmt.Errorf("%w: the dialect alias form (%s) requires a provider implementing ecl.DialectAliasResolver, because mapping an alias to a language reference set is terminology data; the dialectId form always works",
+			ErrUnsupportedFeature, strings.Join(names, ", "))
+	}
+
+	names := make([]string, 0, len(aliases))
+	for _, a := range aliases {
+		names = append(names, a.Alias)
+	}
+	resolved, err := resolver.ResolveDialectAliases(ctx, names)
+	if err != nil {
+		return fmt.Errorf("%w: ResolveDialectAliases: %w", ErrProvider, err)
+	}
+
+	for _, a := range aliases {
+		dialectIDs, known := resolved[a.Alias]
+		if !known || len(dialectIDs) == 0 {
+			return fmt.Errorf("%w: the provider does not resolve the dialect alias %q; use its dialectId instead of matching every dialect",
+				ErrUnsupportedFeature, a.Alias)
+		}
+
+		var acceptIDs []string
+		for _, acc := range a.Acceptabilities {
+			ids, _, err := resolveFilterIDs(ctx, acc, provider)
+			if err != nil {
+				return fmt.Errorf("evaluating acceptability: %w", err)
+			}
+			acceptIDs = append(acceptIDs, ids...)
+		}
+		opts.Dialects = append(opts.Dialects, DialectEntryOpts{
+			DialectIDs:       dialectIDs,
+			AcceptabilityIDs: acceptIDs,
+		})
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

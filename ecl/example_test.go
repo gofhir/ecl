@@ -85,13 +85,16 @@ func ExampleEvaluate_refinement() {
 // evaluate. The evaluator returns an error rather than a silently wrong set, so a
 // server can answer 501 instead of serving bad data.
 //
-// The dialect ALIAS form is used here because it needs terminology data the parser
-// cannot invent. Several other constructs report the same sentinel only until the
-// provider implements the matching optional capability — see ecl/capabilities.go.
+// A reverse attribute inside an attribute group is used here because its rejection
+// is permanent by design: braces assert that the clauses share a relationship
+// group of the FOCUS concept, and a reverse relationship belongs to the source, so
+// there is nothing to group. Most other constructs report the same sentinel only
+// until the provider implements the matching optional capability — see
+// ecl/capabilities.go.
 func ExampleErrUnsupportedFeature() {
 	provider := exampleProvider()
 
-	expr, err := ecl.Parse("<< 404684003 {{ D dialect = en-gb }}")
+	expr, err := ecl.Parse("* : { R 363698007 = 22298006 }")
 	if err != nil {
 		fmt.Println(err)
 		return
