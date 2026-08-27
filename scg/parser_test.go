@@ -11,7 +11,7 @@ func TestParse_SingleConcept(t *testing.T) {
 	expr, err := Parse("404684003")
 	require.NoError(t, err)
 	require.NotNil(t, expr)
-	assert.Equal(t, DefStatusSubtype, expr.DefinitionStatus)
+	assert.Equal(t, DefStatusEquivalent, expr.DefinitionStatus)
 	require.Len(t, expr.FocusConcepts, 1)
 	assert.Equal(t, "404684003", expr.FocusConcepts[0].SCTID)
 	assert.Empty(t, expr.FocusConcepts[0].Term)
@@ -175,10 +175,57 @@ func TestParse_SubtypeOf(t *testing.T) {
 	assert.Equal(t, DefStatusSubtype, expr.DefinitionStatus)
 }
 
+// TestParse_DefaultDefStatus pins the SCG default: an expression without a
+// prefix asserts equivalence ("==="), not subsumption.
+//
+// It used to assert DefStatusSubtype, which inverted the logical meaning of every
+// unprefixed expression: a bare precoordinated SCTID was read as "some subtype of
+// X" rather than "X".
 func TestParse_DefaultDefStatus(t *testing.T) {
 	expr, err := Parse("22298006")
 	require.NoError(t, err)
-	assert.Equal(t, DefStatusSubtype, expr.DefinitionStatus)
+	assert.Equal(t, DefStatusEquivalent, expr.DefinitionStatus)
+
+	// The explicit prefixes must still be honored.
+	sub, err := Parse("<<< 22298006")
+	require.NoError(t, err)
+	assert.Equal(t, DefStatusSubtype, sub.DefinitionStatus)
+
+	eq, err := Parse("=== 22298006")
+	require.NoError(t, err)
+	assert.Equal(t, DefStatusEquivalent, eq.DefinitionStatus)
+}
+
+// TestParse_JuxtaposedAttributeGroups covers the multiple relationship group form
+// from the specification. SCG separates groups with whitespace alone, but the
+// parser required a comma and rejected the published example with
+// "unexpected trailing input".
+func TestParse_JuxtaposedAttributeGroups(t *testing.T) {
+	spec := "71388002 |procedure| : " +
+		"{ 260686004 |method| = 129304002 |excision - action|, " +
+		"405813007 |procedure site - direct| = 20837000 |structure of right ovary| } " +
+		"{ 260686004 |method| = 261519002 |diathermy excision - action|, " +
+		"405813007 |procedure site - direct| = 113293009 |structure of left fallopian tube| }"
+
+	expr, err := Parse(spec)
+	require.NoError(t, err)
+	require.Len(t, expr.Refinements, 2)
+	for i, grp := range expr.Refinements {
+		assert.Truef(t, grp.Grouped, "refinement %d should be a group", i)
+		assert.Lenf(t, grp.Attributes, 2, "group %d should hold two attributes", i)
+	}
+
+	// The comma stays acceptable as an optional separator.
+	withComma, err := Parse("71388002 : { 260686004 = 129304002 }, { 260686004 = 261519002 }")
+	require.NoError(t, err)
+	require.Len(t, withComma.Refinements, 2)
+
+	// An ungrouped set followed by a group, with no comma between them.
+	mixed, err := Parse("71388002 : 260686004 = 129304002 { 405813007 = 20837000 }")
+	require.NoError(t, err)
+	require.Len(t, mixed.Refinements, 2)
+	assert.False(t, mixed.Refinements[0].Grouped)
+	assert.True(t, mixed.Refinements[1].Grouped)
 }
 
 func TestParse_Error_InvalidSCTID(t *testing.T) {

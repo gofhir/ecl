@@ -11,18 +11,18 @@ package scg
 // Definition status prefix values.
 const (
 	// DefStatusEquivalent is the "===" prefix meaning the expression is
-	// equivalent to the named definition.
+	// equivalent to the named definition. This is the default when no prefix
+	// is given, per the SCG specification.
 	DefStatusEquivalent = "==="
 
 	// DefStatusSubtype is the "<<<" prefix meaning the expression is a
-	// subtype of the named definition. This is the default if no prefix
-	// is provided.
+	// subtype of the named definition.
 	DefStatusSubtype = "<<<"
 )
 
 // Expression is the top-level SCG AST node.
 type Expression struct {
-	// DefinitionStatus is "===" (equivalent) or "<<<" (subtype, default).
+	// DefinitionStatus is "===" (equivalent, the default) or "<<<" (subtype).
 	DefinitionStatus string
 
 	// FocusConcepts is one or more concept references joined by "+".

@@ -13,18 +13,47 @@ import (
 
 // Parse parses an ECL expression string and returns the AST.
 func Parse(input string) (ast.Expression, error) {
+	errListener := &eclErrorListener{}
+
 	lexer := grammar.NewECLLexer(antlr.NewInputStream(input))
+	// The lexer needs the listener too. Without this, an unrecognizable
+	// character makes ANTLR's default ConsoleErrorListener write to os.Stderr
+	// (from inside a library), drop the character from the token stream, and
+	// let Parse return a corrupted AST with a nil error.
+	lexer.RemoveErrorListeners()
+	lexer.AddErrorListener(errListener)
+
 	stream := antlr.NewCommonTokenStream(lexer, antlr.TokenDefaultChannel)
 	parser := grammar.NewECLParser(stream)
-
-	// Error handling
-	errListener := &eclErrorListener{}
 	parser.RemoveErrorListeners()
 	parser.AddErrorListener(errListener)
 
 	tree := parser.Expressionconstraint()
-	if errListener.err != nil {
-		return nil, errListener.err
+
+	// The expressionconstraint rule in ECL.g4 does not end in EOF, so ANTLR
+	// stops at the first complete parse and discards the rest without
+	// reporting anything: "11687002 GARBAGE" parsed as 11687002 with err ==
+	// nil, and "A MINUS B MINUS C" silently truncated to "A MINUS B".
+	//
+	// The message quotes the remaining INPUT, not the token text: the ECL
+	// lexer is character-level, so GetText() would be just "G" here.
+	if tok := stream.LT(1); tok != nil && tok.GetTokenType() != antlr.TokenEOF {
+		// GetStart is a RUNE index, not a byte offset, so slicing the string
+		// directly cut multi-byte characters in half and produced mojibake:
+		// `404684003 |ááá| GARBAGE` reported trailing input "\xa1| GARBAGE".
+		rest := input
+		if runes := []rune(input); tok.GetStart() >= 0 && tok.GetStart() < len(runes) {
+			rest = string(runes[tok.GetStart():])
+		}
+		errListener.errs = append(errListener.errs, SyntaxError{
+			Line:   tok.GetLine(),
+			Column: tok.GetColumn(),
+			Msg:    fmt.Sprintf("unexpected trailing input %q", strings.TrimSpace(rest)),
+		})
+	}
+
+	if len(errListener.errs) > 0 {
+		return nil, &ParseError{Errors: errListener.errs}
 	}
 
 	visitor := &astBuilder{}
@@ -39,13 +68,58 @@ func Parse(input string) (ast.Expression, error) {
 // Error listener
 // ---------------------------------------------------------------------------.
 
-type eclErrorListener struct {
-	antlr.DefaultErrorListener
-	err error
+// SyntaxError is a single syntax error reported while parsing an expression.
+type SyntaxError struct {
+	// Line is the 1-based line the error was reported on.
+	Line int
+	// Column is the 0-based character offset within the line.
+	Column int
+	// Msg is the underlying description from the parser or lexer.
+	Msg string
 }
 
+// Error renders the error in the "syntax error at line:column: msg" form.
+func (e SyntaxError) Error() string {
+	return fmt.Sprintf("syntax error at %d:%d: %s", e.Line, e.Column, e.Msg)
+}
+
+// ParseError collects every syntax error found in one expression. Callers can
+// classify a failure with errors.As instead of matching on message text:
+//
+//	var pe *ecl.ParseError
+//	if errors.As(err, &pe) { /* 400 Bad Request, report pe.Errors */ }
+type ParseError struct {
+	// Errors holds every reported error, in the order the parser found them.
+	Errors []SyntaxError
+}
+
+// Error renders every collected error, separated by "; ".
+//
+// The single-error form is byte-identical to what Parse returned before
+// ParseError existed ("syntax error at line:column: msg"), so callers that
+// match on that text keep working. Callers that add their own prefix (the CLI
+// does) stay unaffected too.
+func (e *ParseError) Error() string {
+	if len(e.Errors) == 1 {
+		return e.Errors[0].Error()
+	}
+	msgs := make([]string, 0, len(e.Errors))
+	for _, se := range e.Errors {
+		msgs = append(msgs, se.Error())
+	}
+	return strings.Join(msgs, "; ")
+}
+
+type eclErrorListener struct {
+	antlr.DefaultErrorListener
+	errs []SyntaxError
+}
+
+// SyntaxError appends the error. It must accumulate rather than overwrite: the
+// previous implementation assigned to a single field, so only the last error of
+// a batch survived.
 func (l *eclErrorListener) SyntaxError(_ antlr.Recognizer, _ any, line, column int, msg string, _ antlr.RecognitionException) {
-	l.err = fmt.Errorf("syntax error at %d:%d: %s", line, column, msg)
+	l.errs = append(l.errs, SyntaxError{Line: line, Column: column, Msg: msg})
 }
 
 // ---------------------------------------------------------------------------
@@ -360,57 +434,65 @@ func (v *astBuilder) buildDescriptionFilterClauses(fc grammar.IDescriptionfilter
 	if !ok {
 		return nil
 	}
+
 	var out []ast.Filter
 	for _, df := range concrete.AllDescriptionfilter() {
 		d, ok := df.(*grammar.DescriptionfilterContext)
 		if !ok {
 			continue
 		}
-		if c := d.Termfilter(); c != nil {
-			if f := v.buildTermFilter(c); f != nil {
+		// One entry per sub-rule of `descriptionfilter`. A table rather than a
+		// chain of ifs so the set of handled branches is visible at a glance:
+		// every sub-rule the grammar defines must appear here, or its clause
+		// disappears from the AST and the query silently widens.
+		for _, branch := range []struct {
+			present bool
+			build   func() ast.Filter
+		}{
+			{d.Termfilter() != nil, func() ast.Filter { return v.buildTermFilter(d.Termfilter()) }},
+			{d.Typefilter() != nil, func() ast.Filter { return v.buildTypeFilter(d.Typefilter()) }},
+			{d.Languagefilter() != nil, func() ast.Filter { return v.buildLanguageFilter(d.Languagefilter()) }},
+			{d.Dialectfilter() != nil, func() ast.Filter { return v.buildDialectFilter(d.Dialectfilter()) }},
+			{d.Activefilter() != nil, func() ast.Filter { return v.buildActiveFilter(d.Activefilter()) }},
+			{d.Modulefilter() != nil, func() ast.Filter { return v.buildModuleFilter(d.Modulefilter()) }},
+			{d.Effectivetimefilter() != nil, func() ast.Filter { return v.buildEffectiveTimeFilter(d.Effectivetimefilter()) }},
+			{d.Descriptionidfilter() != nil, func() ast.Filter { return v.buildDescriptionIDFilter(d.Descriptionidfilter()) }},
+		} {
+			if !branch.present {
+				continue
+			}
+			if f := branch.build(); f != nil && !isNilFilter(f) {
 				out = append(out, f)
 			}
-			continue
+			break
 		}
-		if c := d.Typefilter(); c != nil {
-			if f := v.buildTypeFilter(c); f != nil {
-				out = append(out, f)
-			}
-			continue
-		}
-		if c := d.Languagefilter(); c != nil {
-			if f := v.buildLanguageFilter(c); f != nil {
-				out = append(out, f)
-			}
-			continue
-		}
-		if c := d.Dialectfilter(); c != nil {
-			// Preserve presence — evaluator will flag as not-yet-implemented.
-			out = append(out, &ast.DialectFilter{Op: "=", Dialects: nil})
-			_ = c
-			continue
-		}
-		if c := d.Activefilter(); c != nil {
-			if f := v.buildActiveFilter(c); f != nil {
-				out = append(out, f)
-			}
-			continue
-		}
-		if c := d.Modulefilter(); c != nil {
-			if f := v.buildModuleFilter(c); f != nil {
-				out = append(out, f)
-			}
-			continue
-		}
-		if c := d.Effectivetimefilter(); c != nil {
-			if f := v.buildEffectiveTimeFilter(c); f != nil {
-				out = append(out, f)
-			}
-			continue
-		}
-		// descriptionidfilter not modeled — skip.
 	}
 	return out
+}
+
+// isNilFilter reports whether f is a typed nil, which a builder returns when the
+// clause carried nothing usable. Appending it would put a nil-valued interface in
+// the filter list and panic later.
+func isNilFilter(f ast.Filter) bool {
+	switch x := f.(type) {
+	case *ast.TermFilter:
+		return x == nil
+	case *ast.TypeFilter:
+		return x == nil
+	case *ast.LanguageFilter:
+		return x == nil
+	case *ast.DialectFilter:
+		return x == nil
+	case *ast.ActiveFilter:
+		return x == nil
+	case *ast.ModuleFilter:
+		return x == nil
+	case *ast.EffectiveTimeFilter:
+		return x == nil
+	case *ast.DescriptionIDFilter:
+		return x == nil
+	}
+	return false
 }
 
 // buildConceptFilterClauses extracts typed clauses from a conceptfilterconstraint.
@@ -510,18 +592,32 @@ func (v *astBuilder) buildTermFilter(ctx grammar.ITermfilterContext) *ast.TermFi
 	if concrete.Stringcomparisonoperator() != nil {
 		op = v.extractComparisonOp(concrete.Stringcomparisonoperator().GetText())
 	}
-	var (
-		term      string
-		matchType = "match"
-	)
+	var terms []ast.SearchTerm
 	if c := concrete.Typedsearchterm(); c != nil {
-		term, matchType = extractTypedSearchTerm(c)
-	} else if c := concrete.Typedsearchtermset(); c != nil {
-		// Take the first term in the set; multi-term sets are treated as the
-		// first term for now (evaluator documents the simplification).
-		term = stripWrappingQuotes(c.GetText())
+		terms = append(terms, searchTermOf(c))
+	} else if set, ok := concrete.Typedsearchtermset().(*grammar.TypedsearchtermsetContext); ok && set != nil {
+		// A set has any-of semantics and each member declares its own search
+		// style. Taking GetText() of the whole set used to produce one "term"
+		// containing the parentheses and the inner quotes, which matched nothing.
+		for _, tst := range set.AllTypedsearchterm() {
+			terms = append(terms, searchTermOf(tst))
+		}
 	}
-	return &ast.TermFilter{Op: op, Term: term, MatchType: matchType}
+	if len(terms) == 0 {
+		return nil
+	}
+
+	tf := &ast.TermFilter{Op: op, Terms: terms}
+	// Deprecated scalars, kept populated for readers written against v1.1.
+	tf.Term = terms[0].Text           //nolint:staticcheck // deprecated field kept populated for v1 readers
+	tf.MatchType = terms[0].MatchType //nolint:staticcheck // deprecated field kept populated for v1 readers
+	return tf
+}
+
+// searchTermOf extracts one typedsearchterm with its search style.
+func searchTermOf(ctx grammar.ITypedsearchtermContext) ast.SearchTerm {
+	text, matchType := extractTypedSearchTerm(ctx)
+	return ast.SearchTerm{Text: text, MatchType: matchType}
 }
 
 // extractTypedSearchTerm returns the raw search term and its match-type
@@ -531,19 +627,60 @@ func extractTypedSearchTerm(ctx grammar.ITypedsearchtermContext) (term, matchTyp
 	matchType = "match"
 	concrete, ok := ctx.(*grammar.TypedsearchtermContext)
 	if !ok {
-		return stripWrappingQuotes(ctx.GetText()), matchType
+		return unescapeECLString(stripWrappingQuotes(ctx.GetText()), false), matchType
 	}
 	if s := concrete.Matchsearchtermset(); s != nil {
-		return stripWrappingQuotes(s.GetText()), "match"
+		return unescapeECLString(stripWrappingQuotes(s.GetText()), false), "match"
 	}
 	if s := concrete.Wildsearchtermset(); s != nil {
-		return stripWrappingQuotes(s.GetText()), "wild"
+		return unescapeECLString(stripWrappingQuotes(s.GetText()), true), "wild"
 	}
-	return stripWrappingQuotes(concrete.GetText()), matchType
+	return unescapeECLString(stripWrappingQuotes(concrete.GetText()), false), matchType
 }
 
-// stripWrappingQuotes removes a single layer of surrounding " quotes if present
-// and trims whitespace that commonly surrounds the quoted content.
+// unescapeECLString decodes the escape sequences the ECL grammar defines:
+//
+//	escapedchar     : (bs qm) | (bs bs)              -- \" and \\
+//	escapedwildchar : (bs qm) | (bs bs) | (bs star)  -- also \*
+//
+// The raw token text keeps the backslashes, so a term that reached the provider
+// undecoded never matched: `{{ term = "a\"b" }}` searched for the six characters
+// a \ " b rather than the three a " b.
+//
+// Note that keepWildEscape leaves `\*` untouched for a wild pattern: decoding it
+// to a bare asterisk would turn a LITERAL asterisk into a wildcard, so the glob
+// matcher is the one responsible for reading `\*` as a literal.
+func unescapeECLString(s string, keepWildEscape bool) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 >= len(s) {
+			b.WriteByte(s[i])
+			continue
+		}
+		switch s[i+1] {
+		case '"', '\\':
+			b.WriteByte(s[i+1])
+			i++
+		case '*':
+			if keepWildEscape {
+				b.WriteString(`\*`)
+			} else {
+				b.WriteByte('*')
+			}
+			i++
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
+}
+
+// stripWrappingQuotes removes a single layer of surrounding quotes if present and
+// trims the whitespace that commonly surrounds the quoted content.
 func stripWrappingQuotes(s string) string {
 	s = strings.TrimSpace(s)
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
@@ -654,6 +791,231 @@ func (v *astBuilder) buildLanguageFilter(ctx grammar.ILanguagefilterContext) *as
 	return lf
 }
 
+// buildDialectFilter builds an *ast.DialectFilter from a dialectfilter context.
+//
+// The grammar offers two forms:
+//
+//	dialectidfilter    : dialectId = <SCTID> | (set of SCTIDs)
+//	dialectaliasfilter : dialect   = en-gb   | (set of aliases)
+//
+// The two forms land in two different fields. An alias like "en-gb" is not a
+// concept reference: mapping it to the SCTID of a language reference set is
+// terminology data — only the international English aliases are universal, while
+// national dialects use namespace-specific refset IDs — so inventing a table
+// inside the parser would resolve some expressions and silently mis-resolve
+// others. The alias text is recorded verbatim in Aliases and the evaluator asks
+// the provider to resolve it, through the optional ecl.DialectAliasResolver.
+//
+// This node used to be emitted with Dialects always nil and Op forced to "=",
+// which made every dialect expression evaluate to the empty set without a word.
+func (v *astBuilder) buildDialectFilter(ctx grammar.IDialectfilterContext) *ast.DialectFilter {
+	concrete, ok := ctx.(*grammar.DialectfilterContext)
+	if !ok {
+		return nil
+	}
+
+	df := &ast.DialectFilter{Op: "="}
+
+	// A filter-level acceptability applies to every entry that declares none of
+	// its own.
+	var acceptability []ast.Expression
+	if as := concrete.Acceptabilityset(); as != nil {
+		acceptability = v.buildAcceptabilities(as)
+	}
+
+	if idf, ok := concrete.Dialectidfilter().(*grammar.DialectidfilterContext); ok && idf != nil {
+		if op := idf.Booleancomparisonoperator(); op != nil {
+			df.Op = v.extractComparisonOp(op.GetText())
+		}
+		if sub := idf.Subexpressionconstraint(); sub != nil {
+			if expr := v.visitExpr(sub); expr != nil {
+				entry := ast.DialectEntry{Dialect: expr, Acceptabilities: acceptability}
+				if len(acceptability) > 0 {
+					entry.Acceptability = acceptability[0] //nolint:staticcheck // deprecated field kept populated for v1 readers
+				}
+				df.Dialects = append(df.Dialects, entry)
+			}
+		}
+		if set, ok := idf.Dialectidset().(*grammar.DialectidsetContext); ok && set != nil {
+			df.Dialects = append(df.Dialects, v.dialectEntriesOf(set, acceptability)...)
+		}
+		return df
+	}
+
+	// Alias form.
+	if af, ok := concrete.Dialectaliasfilter().(*grammar.DialectaliasfilterContext); ok && af != nil {
+		if op := af.Booleancomparisonoperator(); op != nil {
+			df.Op = v.extractComparisonOp(op.GetText())
+		}
+		if alias := af.Dialectalias(); alias != nil {
+			entry := ast.DialectAliasEntry{Alias: alias.GetText(), Acceptabilities: acceptability}
+			df.Aliases = append(df.Aliases, entry)
+		}
+		if set, ok := af.Dialectaliasset().(*grammar.DialectaliassetContext); ok && set != nil {
+			df.Aliases = append(df.Aliases, v.dialectAliasEntriesOf(set, acceptability)...)
+		}
+	}
+	return df
+}
+
+// dialectAliasEntriesOf pairs each alias of a dialectaliasset with the
+// acceptability that follows it, walking the children IN ORDER for the same
+// reason dialectEntriesOf does: the grammar makes acceptability optional per
+// entry, so ANTLR's flat lists cannot be zipped by index.
+func (v *astBuilder) dialectAliasEntriesOf(set *grammar.DialectaliassetContext, fallback []ast.Expression) []ast.DialectAliasEntry {
+	var (
+		entries []ast.DialectAliasEntry
+		pending *ast.DialectAliasEntry
+	)
+	flush := func() {
+		if pending == nil {
+			return
+		}
+		if len(pending.Acceptabilities) == 0 {
+			pending.Acceptabilities = fallback
+		}
+		entries = append(entries, *pending)
+		pending = nil
+	}
+
+	for _, child := range set.GetChildren() {
+		switch c := child.(type) {
+		case *grammar.DialectaliasContext:
+			flush()
+			pending = &ast.DialectAliasEntry{Alias: c.GetText()}
+		case *grammar.AcceptabilitysetContext:
+			if pending != nil {
+				pending.Acceptabilities = v.buildAcceptabilities(c)
+			}
+		}
+	}
+	flush()
+	return entries
+}
+
+// dialectEntriesOf pairs each dialect of a dialectidset with the acceptability
+// that follows it, walking the children IN ORDER.
+//
+// The grammar makes acceptability optional per entry:
+//
+//	dialectidset : LEFT_PAREN ws eclconceptreference (ws acceptabilityset)?
+//	               (mws eclconceptreference (ws acceptabilityset)? )* ws RIGHT_PAREN
+//
+// so ANTLR's flat AllEclconceptreference() and AllAcceptabilityset() lists cannot
+// be zipped by index. Doing that attached the first acceptability to the first
+// dialect regardless of where it appeared: `(A B (X))` gave X to A and left B
+// bare, and `(A (X) B)` produced the identical AST.
+func (v *astBuilder) dialectEntriesOf(set *grammar.DialectidsetContext, fallback []ast.Expression) []ast.DialectEntry {
+	var (
+		entries []ast.DialectEntry
+		pending *ast.DialectEntry
+	)
+	flush := func() {
+		if pending == nil {
+			return
+		}
+		if len(pending.Acceptabilities) == 0 {
+			pending.Acceptabilities = fallback
+		}
+		if len(pending.Acceptabilities) > 0 {
+			pending.Acceptability = pending.Acceptabilities[0] //nolint:staticcheck // deprecated field kept populated for v1 readers
+		}
+		entries = append(entries, *pending)
+		pending = nil
+	}
+
+	for _, child := range set.GetChildren() {
+		switch c := child.(type) {
+		case grammar.IEclconceptreferenceContext:
+			flush()
+			if expr := v.visitExpr(c); expr != nil {
+				pending = &ast.DialectEntry{Dialect: expr}
+			}
+		case grammar.IAcceptabilitysetContext:
+			if pending != nil {
+				pending.Acceptabilities = v.buildAcceptabilities(c)
+			}
+		}
+	}
+	flush()
+	return entries
+}
+
+// buildAcceptabilities renders an acceptabilityset as concept references, with
+// any-of semantics.
+//
+// It used to return on the first reference, so `(preferred acceptable)` silently
+// became `preferred` and narrowed the result.
+func (v *astBuilder) buildAcceptabilities(as grammar.IAcceptabilitysetContext) []ast.Expression {
+	concrete, ok := as.(*grammar.AcceptabilitysetContext)
+	if !ok {
+		return nil
+	}
+	var out []ast.Expression
+	if crs, ok := concrete.Acceptabilityconceptreferenceset().(*grammar.AcceptabilityconceptreferencesetContext); ok && crs != nil {
+		for _, ref := range crs.AllEclconceptreference() {
+			if expr := v.visitExpr(ref); expr != nil {
+				out = append(out, expr)
+			}
+		}
+	}
+	// The token form. Handling only the SCTID set above dropped `(prefer)` and
+	// `(accept)` entirely, and an empty AcceptabilityIDs means "any acceptability"
+	// to the provider — so the query silently widened instead of narrowing.
+	if ts, ok := concrete.Acceptabilitytokenset().(*grammar.AcceptabilitytokensetContext); ok && ts != nil {
+		for _, tok := range ts.AllAcceptabilitytoken() {
+			if id := acceptabilityTokenID(tok); id != "" {
+				out = append(out, &ast.ConceptRef{ID: id})
+			}
+		}
+	}
+	return out
+}
+
+// acceptabilityTokenID maps an acceptability token to its well-known SCTID.
+func acceptabilityTokenID(tok grammar.IAcceptabilitytokenContext) string {
+	concrete, ok := tok.(*grammar.AcceptabilitytokenContext)
+	if !ok {
+		return ""
+	}
+	switch {
+	case concrete.Preferred() != nil:
+		return "900000000000548007" // preferred
+	case concrete.Acceptable() != nil:
+		return "900000000000549004" // acceptable
+	}
+	return ""
+}
+
+// buildDescriptionIDFilter builds an *ast.DescriptionIDFilter.
+//
+// This branch used to be skipped without emitting anything, and when the filter
+// was a constraint's only clause the ast.Filtered node was never created at all:
+// `< 404684003 {{ D id = 123456789012 }}` produced an AST identical to
+// `< 404684003` and the query silently returned every descendant.
+func (v *astBuilder) buildDescriptionIDFilter(ctx grammar.IDescriptionidfilterContext) *ast.DescriptionIDFilter {
+	concrete, ok := ctx.(*grammar.DescriptionidfilterContext)
+	if !ok {
+		return nil
+	}
+	op := "="
+	if c := concrete.Idcomparisonoperator(); c != nil {
+		op = v.extractComparisonOp(c.GetText())
+	}
+	f := &ast.DescriptionIDFilter{Op: op}
+	if id := concrete.Descriptionid(); id != nil {
+		f.IDs = append(f.IDs, strings.TrimSpace(id.GetText()))
+	} else if set, ok := concrete.Descriptionidset().(*grammar.DescriptionidsetContext); ok && set != nil {
+		for _, id := range set.AllDescriptionid() {
+			f.IDs = append(f.IDs, strings.TrimSpace(id.GetText()))
+		}
+	}
+	if len(f.IDs) == 0 {
+		return nil
+	}
+	return f
+}
+
 func (v *astBuilder) buildActiveFilter(ctx grammar.IActivefilterContext) *ast.ActiveFilter {
 	concrete, ok := ctx.(*grammar.ActivefilterContext)
 	if !ok {
@@ -696,17 +1058,23 @@ func (v *astBuilder) buildModuleFilter(ctx grammar.IModulefilterContext) *ast.Mo
 	}
 	mf := &ast.ModuleFilter{Op: op}
 	if sc := concrete.Subexpressionconstraint(); sc != nil {
-		mf.Module = v.visitExpr(sc)
-	} else if crs := concrete.Eclconceptreferenceset(); crs != nil {
-		// Pick the first ref from the set; multi-module sets represented as
-		// a single module is a simplification (most ECL uses single module).
-		if crsCtx, ok := crs.(*grammar.EclconceptreferencesetContext); ok {
-			refs := crsCtx.AllEclconceptreference()
-			if len(refs) > 0 {
-				mf.Module = v.visitExpr(refs[0])
+		if expr := v.visitExpr(sc); expr != nil {
+			mf.Modules = append(mf.Modules, expr)
+		}
+	} else if crs, ok := concrete.Eclconceptreferenceset().(*grammar.EclconceptreferencesetContext); ok && crs != nil {
+		// The set has any-of semantics. Only the first reference used to be
+		// kept, so `moduleId = (A B)` silently became `moduleId = A`.
+		for _, ref := range crs.AllEclconceptreference() {
+			if expr := v.visitExpr(ref); expr != nil {
+				mf.Modules = append(mf.Modules, expr)
 			}
 		}
 	}
+	if len(mf.Modules) == 0 {
+		return nil
+	}
+	// Deprecated scalar, kept populated for readers written against v1.1.
+	mf.Module = mf.Modules[0] //nolint:staticcheck // deprecated field kept populated for v1 readers
 	return mf
 }
 
@@ -719,13 +1087,22 @@ func (v *astBuilder) buildEffectiveTimeFilter(ctx grammar.IEffectivetimefilterCo
 	if concrete.Timecomparisonoperator() != nil {
 		op = concrete.Timecomparisonoperator().GetText()
 	}
-	var value string
+	ef := &ast.EffectiveTimeFilter{Op: op}
 	if tv := concrete.Timevalue(); tv != nil {
-		value = stripWrappingQuotes(tv.GetText())
-	} else if tvs := concrete.Timevalueset(); tvs != nil {
-		value = stripWrappingQuotes(tvs.GetText())
+		ef.Values = append(ef.Values, stripWrappingQuotes(tv.GetText()))
+	} else if tvs, ok := concrete.Timevalueset().(*grammar.TimevaluesetContext); ok && tvs != nil {
+		// GetText() of the whole set used to be stored as ONE value, parentheses
+		// and inner quotes included, which no provider could match.
+		for _, tv := range tvs.AllTimevalue() {
+			ef.Values = append(ef.Values, stripWrappingQuotes(tv.GetText()))
+		}
 	}
-	return &ast.EffectiveTimeFilter{Op: op, Value: value}
+	if len(ef.Values) == 0 {
+		return nil
+	}
+	// Deprecated scalar, kept populated for readers written against v1.1.
+	ef.Value = ef.Values[0] //nolint:staticcheck // deprecated field kept populated for v1 readers
+	return ef
 }
 
 func (v *astBuilder) buildDefinitionStatusFilter(ctx grammar.IDefinitionstatusfilterContext) *ast.DefinitionStatusFilter {
@@ -741,15 +1118,21 @@ func (v *astBuilder) buildDefinitionStatusFilter(ctx grammar.IDefinitionstatusfi
 			}
 			f := &ast.DefinitionStatusFilter{Op: op}
 			if sc := idCtx.Subexpressionconstraint(); sc != nil {
-				f.Value = v.visitExpr(sc)
-			} else if crs := idCtx.Eclconceptreferenceset(); crs != nil {
-				if crsCtx, ok := crs.(*grammar.EclconceptreferencesetContext); ok {
-					refs := crsCtx.AllEclconceptreference()
-					if len(refs) > 0 {
-						f.Value = v.visitExpr(refs[0])
+				if expr := v.visitExpr(sc); expr != nil {
+					f.Values = append(f.Values, expr)
+				}
+			} else if crs, ok := idCtx.Eclconceptreferenceset().(*grammar.EclconceptreferencesetContext); ok && crs != nil {
+				// Any-of. Only the first reference used to survive.
+				for _, ref := range crs.AllEclconceptreference() {
+					if expr := v.visitExpr(ref); expr != nil {
+						f.Values = append(f.Values, expr)
 					}
 				}
 			}
+			if len(f.Values) == 0 {
+				return nil
+			}
+			f.Value = f.Values[0] //nolint:staticcheck // deprecated field kept populated for v1 readers
 			return f
 		}
 	}
@@ -766,25 +1149,28 @@ func (v *astBuilder) buildDefinitionStatusFilter(ctx grammar.IDefinitionstatusfi
 					return
 				}
 				var id string
-				if dt.Primitivetoken() != nil {
+				switch {
+				case dt.Primitivetoken() != nil:
 					id = "900000000000074008" // primitive
-				} else if dt.Definedtoken() != nil {
+				case dt.Definedtoken() != nil:
 					id = "900000000000073002" // defined
 				}
 				if id != "" {
-					f.Value = &ast.ConceptRef{ID: id}
+					f.Values = append(f.Values, &ast.ConceptRef{ID: id})
 				}
 			}
 			if single := tCtx.Definitionstatustoken(); single != nil {
 				addToken(single)
-			} else if set := tCtx.Definitionstatustokenset(); set != nil {
-				if setCtx, ok := set.(*grammar.DefinitionstatustokensetContext); ok {
-					toks := setCtx.AllDefinitionstatustoken()
-					if len(toks) > 0 {
-						addToken(toks[0])
-					}
+			} else if set, ok := tCtx.Definitionstatustokenset().(*grammar.DefinitionstatustokensetContext); ok && set != nil {
+				// `definitionStatus = (primitive defined)` kept only the first.
+				for _, tok := range set.AllDefinitionstatustoken() {
+					addToken(tok)
 				}
 			}
+			if len(f.Values) == 0 {
+				return nil
+			}
+			f.Value = f.Values[0] //nolint:staticcheck // deprecated field kept populated for v1 readers
 			return f
 		}
 	}
@@ -917,17 +1303,39 @@ func (v *astBuilder) collectSubrefinement(ctx grammar.ISubrefinementContext, ref
 			ref.Groups = append(ref.Groups, grp)
 		}
 	case concrete.Eclattributeset() != nil:
-		attrs := v.collectAttributes(concrete.Eclattributeset())
-		ref.Ungrouped = append(ref.Ungrouped, attrs...)
+		set := v.collectAttributeSet(concrete.Eclattributeset())
+		ref.AttrSet = mergeAttrSet(ref.AttrSet, set)
+		ref.Ungrouped = append(ref.Ungrouped, flattenAttrSet(set)...) //nolint:staticcheck // deprecated field kept populated for v1 readers
 	case concrete.Eclrefinement() != nil:
-		// Nested refinement in parentheses
-		inner := v.visitRefinement(concrete.Eclrefinement())
-		if inner != nil {
-			ref.Groups = append(ref.Groups, inner.Groups...)
-			ref.Ungrouped = append(ref.Ungrouped, inner.Ungrouped...)
-			ref.Conjunction = append(ref.Conjunction, inner.Conjunction...)
-			ref.Disjunction = append(ref.Disjunction, inner.Disjunction...)
+		// A parenthesised refinement is a SCOPE: keep it as its own node.
+		//
+		// This used to merge inner.Groups/Ungrouped/Conjunction/Disjunction into
+		// the parent, which destroyed the parentheses: the parent then held both
+		// a Conjunction and a Disjunction with no record of which operands
+		// belonged to the inner scope, so `({A} OR {B}) , C` became
+		// indistinguishable from `{A} , ({B} OR C)`.
+		//
+		// It goes in its own field rather than in Conjunction. Reusing
+		// Conjunction conflated "the first sub-refinement was parenthesised" with
+		// "there is a conjunction set", which made the legitimate shape
+		// `(<refinement>) OR <clause>` look like a node holding both a
+		// conjunction and a disjunction.
+		if inner := v.visitRefinement(concrete.Eclrefinement()); inner != nil {
+			ref.Nested = inner
 		}
+	}
+}
+
+// mergeAttrSet combines two attribute trees with AND, which is the operator
+// between successive sub-refinements of the same refinement.
+func mergeAttrSet(a, b *ast.AttributeSet) *ast.AttributeSet {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	default:
+		return &ast.AttributeSet{Op: ast.AttrSetAnd, Items: []*ast.AttributeSet{a, b}}
 	}
 }
 
@@ -950,7 +1358,8 @@ func (v *astBuilder) visitAttributeGroup(ctx grammar.IEclattributegroupContext) 
 	}
 
 	if concrete.Eclattributeset() != nil {
-		grp.Attrs = v.collectAttributes(concrete.Eclattributeset())
+		grp.AttrSet = v.collectAttributeSet(concrete.Eclattributeset())
+		grp.Attrs = flattenAttrSet(grp.AttrSet) //nolint:staticcheck // deprecated field kept populated for v1 readers
 	}
 
 	return grp
@@ -964,7 +1373,19 @@ func (v *astBuilder) VisitEclattributegroup(ctx *grammar.EclattributegroupContex
 // Attribute set — collects all attributes (possibly with conjunction/disjunction)
 // ---------------------------------------------------------------------------.
 
-func (v *astBuilder) collectAttributes(ctx grammar.IEclattributesetContext) []*ast.Attribute {
+// collectAttributeSet builds the boolean tree of an eclattributeset, preserving
+// whether the clauses were joined by AND (",") or OR.
+//
+// The grammar rule is
+//
+//	eclattributeset : subattributeset ws (conjunctionattributeset | disjunctionattributeset)?;
+//
+// so a level is either a conjunction or a disjunction, never both, and the
+// operator is unambiguous. Flattening both into one slice — which is what
+// collectAttributes below still does for the deprecated field — made `a = x OR
+// b = y` and `a = x, b = y` produce byte-identical ASTs, and the evaluator then
+// intersected the disjuncts.
+func (v *astBuilder) collectAttributeSet(ctx grammar.IEclattributesetContext) *ast.AttributeSet {
 	if ctx == nil {
 		return nil
 	}
@@ -972,33 +1393,47 @@ func (v *astBuilder) collectAttributes(ctx grammar.IEclattributesetContext) []*a
 	if !ok {
 		return nil
 	}
-	var attrs []*ast.Attribute
 
-	// First sub-attribute
+	var items []*ast.AttributeSet
 	if concrete.Subattributeset() != nil {
-		attrs = append(attrs, v.collectSubAttributes(concrete.Subattributeset())...)
+		if s := v.collectSubAttributeSet(concrete.Subattributeset()); s != nil {
+			items = append(items, s)
+		}
 	}
 
-	// Conjunction attributes
-	if concrete.Conjunctionattributeset() != nil {
+	op := ast.AttrSetAnd
+	switch {
+	case concrete.Conjunctionattributeset() != nil:
 		conj := concrete.Conjunctionattributeset().(*grammar.ConjunctionattributesetContext)
 		for _, sub := range conj.AllSubattributeset() {
-			attrs = append(attrs, v.collectSubAttributes(sub)...)
+			if s := v.collectSubAttributeSet(sub); s != nil {
+				items = append(items, s)
+			}
 		}
-	}
-
-	// Disjunction attributes
-	if concrete.Disjunctionattributeset() != nil {
+	case concrete.Disjunctionattributeset() != nil:
+		op = ast.AttrSetOr
 		disj := concrete.Disjunctionattributeset().(*grammar.DisjunctionattributesetContext)
 		for _, sub := range disj.AllSubattributeset() {
-			attrs = append(attrs, v.collectSubAttributes(sub)...)
+			if s := v.collectSubAttributeSet(sub); s != nil {
+				items = append(items, s)
+			}
 		}
 	}
 
-	return attrs
+	switch len(items) {
+	case 0:
+		return nil
+	case 1:
+		return items[0] // a lone leaf needs no boolean wrapper
+	default:
+		return &ast.AttributeSet{Op: op, Items: items}
+	}
 }
 
-func (v *astBuilder) collectSubAttributes(ctx grammar.ISubattributesetContext) []*ast.Attribute {
+// collectSubAttributeSet builds the tree of a subattributeset: either a single
+// attribute leaf, or recursively the parenthesised eclattributeset. Note it can
+// never return a group — `subattributeset` does not admit eclattributegroup.
+func (v *astBuilder) collectSubAttributeSet(ctx grammar.ISubattributesetContext) *ast.AttributeSet {
 	if ctx == nil {
 		return nil
 	}
@@ -1007,15 +1442,38 @@ func (v *astBuilder) collectSubAttributes(ctx grammar.ISubattributesetContext) [
 		return nil
 	}
 	if concrete.Eclattribute() != nil {
-		attr := v.visitAttribute(concrete.Eclattribute())
-		if attr != nil {
-			return []*ast.Attribute{attr}
+		if attr := v.visitAttribute(concrete.Eclattribute()); attr != nil {
+			return &ast.AttributeSet{Attr: attr}
 		}
+		return nil
 	}
-	if concrete.Eclattributeset() != nil {
-		return v.collectAttributes(concrete.Eclattributeset())
+	// Parenthesised nested set: recurse so the scope survives.
+	return v.collectAttributeSet(concrete.Eclattributeset())
+}
+
+// collectAttributes flattens an attribute set into a slice, losing the AND/OR
+// distinction.
+//
+// Deprecated: it exists only to keep ast.Refinement.Ungrouped and
+// ast.AttributeGroup.Attrs populated for readers written against v1.1. Use
+// collectAttributeSet.
+func (v *astBuilder) collectAttributes(ctx grammar.IEclattributesetContext) []*ast.Attribute {
+	return flattenAttrSet(v.collectAttributeSet(ctx))
+}
+
+// flattenAttrSet collects every attribute leaf of a set, in order.
+func flattenAttrSet(set *ast.AttributeSet) []*ast.Attribute {
+	if set == nil {
+		return nil
 	}
-	return nil
+	if set.Attr != nil {
+		return []*ast.Attribute{set.Attr}
+	}
+	var out []*ast.Attribute
+	for _, item := range set.Items {
+		out = append(out, flattenAttrSet(item)...)
+	}
+	return out
 }
 
 func (v *astBuilder) VisitEclattributeset(ctx *grammar.EclattributesetContext) any {

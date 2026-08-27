@@ -39,8 +39,23 @@ func verhoeffCheck(s string) bool {
 	return c == 0
 }
 
-// IsValid checks if a SNOMED CT identifier is valid.
-// An SCTID is 6-18 digits and passes the Verhoeff check digit algorithm.
+// IsValid reports whether a SNOMED CT identifier is structurally valid.
+//
+// It enforces every rule the SCTID ABNF states:
+//
+//		sctId = digitNonZero 5*17( digit )
+//
+//	  - 6 to 18 digits, all decimal;
+//	  - a non-zero first digit (leading zeros are not permitted);
+//	  - a partition identifier of "00", "01", "02", "10", "11" or "12";
+//	  - for the long-form partitions ("1x"), at least 11 digits, since those
+//	    carry a 7-digit namespace;
+//	  - a valid Verhoeff check digit.
+//
+// It used to check only the length, the digits and the checksum, despite the
+// package doc promising partition rules: IsValid("000000001") returned true, and
+// roughly one in ten 8-digit identifiers passed with a partition that cannot
+// exist.
 func IsValid(id string) bool {
 	n := len(id)
 	if n < 6 || n > 18 {
@@ -51,7 +66,29 @@ func IsValid(id string) bool {
 			return false
 		}
 	}
+	if id[0] == '0' {
+		return false
+	}
+	if !validPartition(id[n-3 : n-1]) {
+		return false
+	}
+	// Partitions 10, 11 and 12 are the long form: item identifier + 7-digit
+	// namespace + 2-digit partition + check digit, so at least 11 digits.
+	if id[n-3] == '1' && n < 11 {
+		return false
+	}
 	return verhoeffCheck(id)
+}
+
+// validPartition reports whether a 2-digit partition identifier is one the
+// specification defines. The first digit selects short form (0, no namespace) or
+// long form (1, namespaced); the second selects the component type.
+func validPartition(p string) bool {
+	switch p {
+	case "00", "01", "02", "10", "11", "12":
+		return true
+	}
+	return false
 }
 
 // PartitionID returns the 2-digit partition identifier from an SCTID.

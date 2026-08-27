@@ -1,0 +1,308 @@
+name: Filter constraints
+fixture: ../fixtures/standard.yaml
+specSection: "5.4 Filters"
+
+cases:
+  - name: term filter substring match
+    expression: '<< 404684003 {{ D term = "infarction" }}'
+    expectedIds: ["22298006"]
+
+  - name: term filter case-insensitive
+    expression: '<< 404684003 {{ D term = "INFARCTION" }}'
+    expectedIds: ["22298006"]
+
+  - name: term filter wild glob (anchored prefix)
+    expression: '<< 404684003 {{ D term = wild: "Diabet*" }}'
+    expectedIds: ["73211009"]
+
+  - name: term filter wild glob (substring with leading *)
+    expression: '<< 404684003 {{ D term = wild: "*diabet*" }}'
+    expectedIds: ["73211009", "11687002"]
+
+  - name: language filter en only
+    expression: '<< 22298006 {{ D language = en }}'
+    expectedIds: ["22298006"]
+
+  - name: language filter multi-value any-of (en OR es)
+    expression: '<< 22298006 {{ D language = (en OR es) }}'
+    expectedIds: ["22298006"]
+
+  - name: language filter es only finds bilingual concept
+    expression: '<< 404684003 {{ D language = es }}'
+    expectedIds: ["22298006"]
+
+  # The negated description filters moved to 09-errors.yaml: their semantics are
+  # a per-description-row negation, which cannot be expressed as a set operation
+  # against the current DataProvider contract. The evaluator now reports
+  # ErrUnsupportedFeature instead of returning base.Minus(matches), which was
+  # wrong for any concept holding both a matching and a non-matching description.
+
+  # Concept filters, in contrast, identify sets of concepts, so each clause can
+  # be composed independently. A single global negate flag used to discard the
+  # positive sibling clauses.
+  - name: concept filter with mixed polarity keeps the positive clause
+    expression: '<< 404684003 {{ C definitionStatusId = 900000000000073002, moduleId != 900000000000012004 }}'
+    expectedIds: ["22298006", "73211009"]
+
+  # 22298006, 73211009 and 11687002 are in the core module, so "!=" excludes all
+  # three; 95566004 is in the model component module and the rest declare none.
+  - name: concept filter negated module
+    expression: '<< 404684003 {{ C moduleId != 900000000000207008 }}'
+    expectedIds: ["404684003", "64572001", "95566004"]
+
+  - name: concept filter positive module
+    expression: '<< 404684003 {{ C moduleId = 900000000000207008 }}'
+    expectedIds: ["11687002", "22298006", "73211009"]
+
+  - name: concept filter definition status
+    expression: '<< 404684003 {{ C definitionStatusId = 900000000000073002 }}'
+    expectedIds: ["22298006", "73211009"]
+
+  # The active axis belongs to FilterConcepts alone. AllConcepts used to filter
+  # by the active flag, and since the wildcard is resolved BEFORE filters are
+  # applied, `* {{ C active = false }}` could never return anything.
+  - name: wildcard with active false returns the inactive concepts
+    expression: "* {{ C active = false }}"
+    expectedIds: ["11111111", "22222222", "33333333"]
+
+  - name: descendants with active true excludes nothing here
+    expression: "<< 73211009 {{ C active = true }}"
+    expectedIds: ["11687002", "73211009"]
+
+  # Dialect filters. The parser used to discard the filter's contents and force
+  # Op to "=", so the evaluator built empty options, matched nothing and
+  # intersected: EVERY dialect expression returned the empty set silently.
+  # 22298006 is preferred in en-gb and acceptable in en-us; 73211009 exists only
+  # in en-us, so the two refsets select different sets.
+  - name: dialect filter by refset id (en-gb)
+    expression: "<< 404684003 {{ D dialectId = 900000000000508004 }}"
+    expectedIds: ["22298006"]
+
+  - name: dialect filter by refset id (en-us)
+    expression: "<< 404684003 {{ D dialectId = 900000000000509007 }}"
+    expectedIds: ["22298006", "73211009"]
+
+  # Member field filters with a literal value. This used to fail at runtime with
+  # "unsupported AST node type: *ast.StringValue" because the literal was routed
+  # through Evaluate, which has nothing to resolve for it.
+  - name: member field filter with a string value
+    expression: '^ 900000000000497000 {{ M mapTarget = "G30.9" }}'
+    expectedIds: ["22298006"]
+
+  - name: member field filter with a negated string value
+    expression: '^ 900000000000497000 {{ M mapTarget != "G30.9" }}'
+    expectedIds: ["73211009"]
+
+  # The default "match" search type is word-prefix, not substring: every word of
+  # the search term must be a prefix of some word of the description, in any
+  # order. The reference fixture used strings.Contains, which was wrong in both
+  # directions -- and since the README points implementors at that fixture, it
+  # taught the wrong semantics.
+  - name: term match ignores word order
+    expression: '<< 404684003 {{ D term = "infarction myocardial" }}'
+    expectedIds: ["22298006"]
+
+  - name: term match does not match mid-word
+    expression: '<< 404684003 {{ D term = "farct" }}'
+    expectedIds: []
+
+  - name: term match accepts a word prefix
+    expression: '<< 404684003 {{ D term = "infarct" }}'
+    expectedIds: ["22298006"]
+
+  - name: term match requires every word to match
+    expression: '<< 404684003 {{ D term = "myocardial diabetes" }}'
+    expectedIds: []
+
+  # An operand that names no concept must make the clause match NOTHING. An empty
+  # field in the provider Opts means "do not filter on this dimension", so
+  # returning no IDs for it turned the clause into a no-op and matched everything.
+  - name: filter operand naming no concept matches nothing
+    expression: "<< 404684003 {{ C definitionStatusId = (< 900000000000073002) }}"
+    expectedIds: []
+
+  - name: negated filter operand naming no concept removes nothing
+    expression: "<< 404684003 {{ C definitionStatusId != (< 900000000000073002) }}"
+    expectedIds: ["11687002", "22298006", "404684003", "64572001", "73211009", "95566004"]
+
+  # A wild pattern with no '*' is an exact match, not a prefix.
+  - name: wild pattern without a star is exact
+    expression: '<< 404684003 {{ D term = wild: "Diabet" }}'
+    expectedIds: []
+
+  - name: wild pattern matching the whole term
+    expression: '<< 404684003 {{ D term = wild: "Diabetes mellitus" }}'
+    expectedIds: ["73211009"]
+
+  # Escape sequences must be decoded before the term reaches the provider. The raw
+  # token text keeps the backslashes, so an undecoded term searched for those too.
+  # A real escape: the search term is `"brittle"`, quotes included. Undecoded, the
+  # provider received a backslash too and matched nothing.
+  - name: term filter with an escaped quote
+    expression: '<< 404684003 {{ D term = "\"brittle\"" }}'
+    expectedIds: ["11687002"]
+
+  # A module set has any-of semantics; only the first reference used to survive.
+  - name: module filter with a set
+    expression: '<< 404684003 {{ C moduleId = (900000000000207008 900000000000012004) }}'
+    expectedIds: ["11687002", "22298006", "73211009", "95566004"]
+
+  - name: definition status filter with a token set
+    expression: '<< 404684003 {{ C definitionStatus = (primitive defined) }}'
+    expectedIds: ["11687002", "22298006", "73211009", "95566004"]
+
+  # A dialect-only constraint must not consult MatchDescription: dialect clauses
+  # are answered by MatchDialect, and passing zero-value DescriptionFilterOpts
+  # asks "every description", dropping every concept that has none.
+  - name: dialect-only filter over a hierarchy query
+    expression: "<< 138875005 {{ D dialectId = 900000000000508004 }}"
+    expectedIds: ["22298006"]
+
+  - name: dialect combined with a term clause
+    expression: '<< 138875005 {{ D term = "Myocardial", dialectId = 900000000000508004 }}'
+    expectedIds: ["22298006"]
+
+  # The acceptability token form. Reading only the SCTID set dropped it entirely,
+  # and an empty AcceptabilityIDs means "any" to the provider, so the query
+  # silently widened instead of narrowing.
+  - name: dialect filter with an acceptability token
+    expression: "<< 138875005 {{ D dialectId = 900000000000509007 (prefer) }}"
+    expectedIds: ["73211009"]
+
+  - name: dialect filter with the equivalent acceptability SCTID
+    expression: "<< 138875005 {{ D dialectId = 900000000000509007 (900000000000548007) }}"
+    expectedIds: ["73211009"]
+
+  - name: dialect filter with the acceptable token
+    expression: "<< 138875005 {{ D dialectId = 900000000000509007 (accept) }}"
+    expectedIds: ["22298006"]
+
+  # Negated description filters, enabled by the fixture implementing
+  # ecl.NegatingDescriptionProvider. The negation is per description ROW: a concept
+  # matches when it HAS a description failing the comparison.
+  #
+  # 22298006 has an FSN in `en` and a synonym in `es`, so it satisfies
+  # `language != es` through the FSN. The set-level Minus this replaced EXCLUDED
+  # it, because it also has a Spanish row — the defect these cases pin down.
+  - name: negated language filter is per description row
+    expression: "<< 404684003 {{ D language != es }}"
+    expectedIds: ["11687002", "22298006", "404684003", "64572001", "73211009", "95566004"]
+
+  - name: positive language filter for contrast
+    expression: "<< 404684003 {{ D language = es }}"
+    expectedIds: ["22298006"]
+
+  # 73211009's FSN is "Diabetes mellitus", and 11687002 also has a synonym that
+  # does not match, so both have a description failing the comparison.
+  - name: negated term filter is per description row
+    expression: '<< 73211009 {{ D term != "Type 1 diabetes mellitus" }}'
+    expectedIds: ["11687002", "73211009"]
+
+  - name: negated description type filter
+    expression: "<< 404684003 {{ D type != fsn }}"
+    expectedIds: ["11687002", "22298006"]
+
+  # A negated dialect filter is owned by the provider: DialectFilterOpts.Negate
+  # carries the operator and MatchDialect answers accordingly, so the negation is
+  # applied exactly once and at the description ROW level.
+  #
+  # 22298006 is preferred in en-gb and acceptable in en-us, so it satisfies
+  # `!= en-gb` through its en-us row: the negated form is NOT the complement of
+  # the positive one.
+  - name: negated dialect filter is per description row
+    expression: "* {{ D dialectId != 900000000000508004 }}"
+    expectedIds: ["22298006", "73211009"]
+
+  - name: negated dialect combined with a term clause
+    expression: '<< 404684003 {{ D term = "Diabetes", dialectId != 900000000000508004 }}'
+    expectedIds: ["73211009"]
+
+  # effectiveTime. The fixture declares it on four concepts only, and a concept
+  # without one cannot satisfy any comparison — answering otherwise would make
+  # `effectiveTime != X` select the concepts that have no effectiveTime at all.
+  - name: effectiveTime equals a single value
+    expression: '<< 138875005 {{ C effectiveTime = "20240131" }}'
+    expectedIds: ["22298006", "95566004"]
+
+  - name: effectiveTime before a value
+    expression: '<< 138875005 {{ C effectiveTime < "20230731" }}'
+    expectedIds: ["11687002"]
+
+  - name: effectiveTime at or after a value
+    expression: '<< 138875005 {{ C effectiveTime >= "20230731" }}'
+    expectedIds: ["22298006", "73211009", "95566004"]
+
+  # A SET of values is any-of, so it is the union of the single-value filters.
+  # ConceptFilterOpts carries one value and one operator, so the evaluator issues
+  # one provider call per value rather than widening the contract — a new Opts
+  # field would be silently ignored by every existing provider and the filter
+  # would quietly match on one value out of the set.
+  - name: effectiveTime set is the union of its values
+    expression: '<< 138875005 {{ C effectiveTime = ("20240131" "20230731") }}'
+    expectedIds: ["22298006", "73211009", "95566004"]
+
+  # Under "!=" the set reads "none of these", which is the INTERSECTION of the
+  # per-value negations. Unioning them would return every concept that differs
+  # from either value, i.e. all four.
+  - name: effectiveTime not-equals a set excludes every value
+    expression: '<< 138875005 {{ C effectiveTime != ("20240131" "20230731") }}'
+    expectedIds: ["11687002"]
+
+  # A term SET is any-of, so it is the union of the single-term filters. As with
+  # effectiveTime, the evaluator issues one provider call per term instead of
+  # widening DescriptionFilterOpts with a Terms slice: a new field would be
+  # silently ignored by every existing provider, and the filter would quietly
+  # match on one term out of the set.
+  - name: term set is the union of its terms
+    expression: '<< 404684003 {{ D term = ("infarction" "diabetes") }}'
+    expectedIds: ["22298006", "73211009", "11687002"]
+
+  # Each call carries the sibling clauses too, so the conjunction distributes over
+  # the set: (term = infarto OR term = diabetes) AND language = es. Only the
+  # Spanish description of myocardial infarction satisfies both, and it has to be
+  # the SAME description row.
+  - name: term set distributes over a sibling clause
+    expression: '<< 404684003 {{ D term = ("infarto" "diabetes"), language = es }}'
+    expectedIds: ["22298006"]
+
+  # Match type travels with its own term rather than being taken from the first.
+  # Taking the first would make "infarction" a wild pattern, which is anchored and
+  # would not match "Myocardial infarction"; and 11687002 is excluded because the
+  # anchored "Diabet*" does not match "Type 1 diabetes mellitus".
+  - name: each term in a set keeps its own match type
+    expression: '<< 404684003 {{ D term = (wild:"Diabet*" "infarction") }}'
+    expectedIds: ["22298006", "73211009"]
+
+  # ── Dialect ALIAS form ────────────────────────────────────────────────────
+  # Resolving "en-gb" to a language reference set is terminology data, so it comes
+  # from the optional ecl.DialectAliasResolver, which the reference fixture
+  # implements from its dialectAliases declarations. Without that capability the
+  # form reports ErrUnsupportedFeature; see capabilities.go.
+  - name: dialect alias resolves to the same set as its dialectId
+    expression: '<< 138875005 {{ D dialect = en-gb }}'
+    expectedIds: ["22298006"]
+
+  - name: dialect alias is case-insensitive
+    expression: '<< 138875005 {{ D dialect = EN-GB }}'
+    expectedIds: ["22298006"]
+
+  - name: dialect alias set is any-of
+    expression: '<< 138875005 {{ D dialect = (en-gb en-us) }}'
+    expectedIds: ["22298006", "73211009"]
+
+  # Acceptability discriminates within one alias: 22298006 is ACCEPTABLE in en-us
+  # while 73211009 is PREFERRED there.
+  - name: dialect alias with an acceptability
+    expression: '<< 138875005 {{ D dialect = en-us (900000000000549004) }}'
+    expectedIds: ["22298006"]
+
+  - name: dialect alias with the other acceptability
+    expression: '<< 138875005 {{ D dialect = en-us (900000000000548007) }}'
+    expectedIds: ["73211009"]
+
+  # The acceptability belongs to the alias it FOLLOWS, exactly as in the
+  # dialectId form: en-us restricted to acceptable, en-gb unrestricted. Zipping
+  # the two lists by index instead would attach it to whichever came first.
+  - name: acceptability in an alias set pairs with the alias it follows
+    expression: '<< 138875005 {{ D dialect = (en-us (900000000000549004) en-gb) }}'
+    expectedIds: ["22298006"]

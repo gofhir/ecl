@@ -88,14 +88,65 @@ type Refined struct {
 
 // Refinement holds attribute constraints, optionally grouped, with conjunction/disjunction.
 type Refinement struct {
-	Groups      []*AttributeGroup
-	Ungrouped   []*Attribute
+	// AttrSet is the boolean tree of the refinement's ungrouped attribute
+	// clauses. Prefer it over Ungrouped: a flat slice cannot express OR, so
+	// `a = x OR b = y` and `a = x, b = y` were indistinguishable.
+	AttrSet *AttributeSet
+
+	Groups []*AttributeGroup
+
+	// Nested is a parenthesised sub-refinement, which the grammar allows as the
+	// first operand of a refinement. It is kept as its own node so the
+	// parentheses survive: `({A} OR {B}) , C` must stay distinguishable from
+	// `{A} , ({B} OR C)`.
+	Nested *Refinement
+
+	// Deprecated: use AttrSet. Kept populated for compatibility with readers
+	// written against v1.1; it flattens AND and OR into one list and will be
+	// removed in v2.
+	Ungrouped []*Attribute
+
+	// Conjunction and Disjunction hold the sub-refinements of a
+	// conjunctionRefinementSet or disjunctionRefinementSet. The grammar admits
+	// one or the other at a level, never both.
 	Conjunction []*Refinement
 	Disjunction []*Refinement
 }
 
+// AttrSetOp is the boolean operator joining the items of an AttributeSet.
+type AttrSetOp string
+
+// Operators for AttributeSet.
+const (
+	AttrSetAnd AttrSetOp = "AND"
+	AttrSetOr  AttrSetOp = "OR"
+)
+
+// AttributeSet is a boolean tree of attribute clauses. It preserves the operator
+// and the parenthesised nesting the ECL grammar allows, which a flat
+// []*Attribute cannot express.
+//
+// Exactly one of Attr or Items is set:
+//   - Attr:  a single attribute clause (a leaf)
+//   - Items: nested sets combined with Op
+//
+// Note there is no group leaf. The grammar keeps the two levels apart:
+// `subrefinement` admits an eclattributegroup, but `subattributeset` does not,
+// so a group can never appear inside an attribute set — it arrives through
+// Refinement.Groups or through a sibling sub-refinement instead.
+type AttributeSet struct {
+	Op    AttrSetOp
+	Attr  *Attribute
+	Items []*AttributeSet
+}
+
 // AttributeGroup represents a curly-brace-grouped set of attributes with optional cardinality.
 type AttributeGroup struct {
+	// AttrSet is the boolean tree of the group's clauses. Prefer it over Attrs,
+	// which cannot express OR.
+	AttrSet *AttributeSet
+
+	// Deprecated: use AttrSet. Kept populated for compatibility; removed in v2.
 	Attrs       []*Attribute
 	Cardinality *Cardinality
 }
@@ -143,17 +194,33 @@ type Filter interface {
 	filterKind() string
 }
 
+// SearchTerm is one search term of a term filter, with the search style the
+// grammar declared for it.
+type SearchTerm struct {
+	// Text is the term with its escape sequences decoded, except that a wild
+	// term keeps `\*` as-is so a literal asterisk stays distinguishable from a
+	// wildcard.
+	Text string
+
+	// MatchType is "match" (word match, the default) or "wild" (glob).
+	MatchType string
+}
+
 // TermFilter represents a description term filter ({{ term = "..." }}).
 //
-// MatchType captures the search style declared by the grammar:
-//   - "match" (default): substring/word match
-//   - "wild":            glob-style wildcard match
-//   - "regex":           regular-expression match (extension; not in the
-//     official grammar but reserved for implementations that support it)
+// The grammar allows a SET of terms — `{{ term = ("heart" "attack") }}` — with
+// any-of semantics, and each member may declare its own search style. Terms
+// carries them all.
 type TermFilter struct {
-	Op        string // "=" or "!="
-	Term      string
-	MatchType string // "match", "wild", "regex"
+	Op string // "=" or "!="
+
+	// Terms holds every search term, with any-of semantics.
+	Terms []SearchTerm
+
+	// Deprecated: use Terms. Holds the first term, and cannot represent a set.
+	Term string
+	// Deprecated: use Terms. Holds the first term's match type.
+	MatchType string
 }
 
 // TypeFilter represents a description type filter.
@@ -170,14 +237,41 @@ type LanguageFilter struct {
 
 // DialectFilter represents a description dialect filter.
 type DialectFilter struct {
-	Op       string
+	Op string
+
+	// Dialects holds the entries of the dialectId form, which names language
+	// reference sets by SCTID.
 	Dialects []DialectEntry
+
+	// Aliases holds the entries of the alias form (`dialect = en-gb`). It is
+	// separate from Dialects because an alias is not a concept reference: mapping
+	// it to a language reference set's SCTID is terminology data, which the
+	// evaluator obtains from an optional provider capability.
+	Aliases []DialectAliasEntry
 }
 
-// DialectEntry pairs a dialect (concept ref or alias) with an optional acceptability.
+// DialectAliasEntry pairs a dialect alias with its optional acceptabilities.
+type DialectAliasEntry struct {
+	// Alias is the language-reference-set alias as written, e.g. "en-gb". Case is
+	// preserved; resolution is the provider's business.
+	Alias string
+
+	// Acceptabilities holds every acceptability the entry names, with any-of
+	// semantics, exactly as in DialectEntry.
+	Acceptabilities []Expression
+}
+
+// DialectEntry pairs a dialect (concept ref or alias) with its optional
+// acceptabilities.
 type DialectEntry struct {
-	Dialect       Expression // concept ref or alias
-	Acceptability Expression // optional
+	Dialect Expression // concept ref or alias
+
+	// Acceptabilities holds every acceptability the entry names, with any-of
+	// semantics. The grammar allows a set: `(preferred acceptable)`.
+	Acceptabilities []Expression
+
+	// Deprecated: use Acceptabilities. Holds the first one only.
+	Acceptability Expression
 }
 
 // ActiveFilter represents an active status filter.
@@ -187,13 +281,24 @@ type ActiveFilter struct {
 
 // ModuleFilter represents a module filter.
 type ModuleFilter struct {
-	Op     string
+	Op string
+
+	// Modules holds every module the filter names, with any-of semantics. The
+	// grammar allows a set: `{{ C moduleId = (900000000000207008 900000000000012004) }}`.
+	Modules []Expression
+
+	// Deprecated: use Modules. Holds the first module only.
 	Module Expression
 }
 
 // EffectiveTimeFilter represents an effective time filter.
 type EffectiveTimeFilter struct {
-	Op    string
+	Op string
+
+	// Values holds every time value the filter names, with any-of semantics.
+	Values []string
+
+	// Deprecated: use Values. Holds the first value only.
 	Value string
 }
 
@@ -208,8 +313,21 @@ type ConceptEffectiveTimeFilter = EffectiveTimeFilter
 
 // DefinitionStatusFilter represents a concept definition status filter.
 type DefinitionStatusFilter struct {
-	Op    string
+	Op string
+
+	// Values holds every definition status the filter names, with any-of
+	// semantics.
+	Values []Expression
+
+	// Deprecated: use Values. Holds the first value only.
 	Value Expression
+}
+
+// DescriptionIDFilter represents a description identifier filter
+// ({{ D id = 123456789012 }}).
+type DescriptionIDFilter struct {
+	Op  string // "=" or "!="
+	IDs []string
 }
 
 // MemberFieldFilter represents a member field filter in member filter constraints.
@@ -267,6 +385,7 @@ func (*RefsetContainingAny) eclNode()    {}
 func (*DotExpression) eclNode()          {}
 func (*Refined) eclNode()                {}
 func (*Refinement) eclNode()             {}
+func (*AttributeSet) eclNode()           {}
 func (*AttributeGroup) eclNode()         {}
 func (*Attribute) eclNode()              {}
 func (*Cardinality) eclNode()            {}
@@ -275,7 +394,9 @@ func (*IntegerValue) eclNode()           {}
 func (*DecimalValue) eclNode()           {}
 func (*BooleanValue) eclNode()           {}
 func (*Filtered) eclNode()               {}
+func (*SearchTerm) eclNode()             {}
 func (*TermFilter) eclNode()             {}
+func (*DescriptionIDFilter) eclNode()    {}
 func (*TypeFilter) eclNode()             {}
 func (*LanguageFilter) eclNode()         {}
 func (*DialectFilter) eclNode()          {}
@@ -293,6 +414,7 @@ func (*Bottom) eclNode()                 {}
 // --- filterKind() implementations ---.
 
 func (*TermFilter) filterKind() string             { return "term" }
+func (*DescriptionIDFilter) filterKind() string    { return "descriptionId" }
 func (*TypeFilter) filterKind() string             { return "type" }
 func (*LanguageFilter) filterKind() string         { return "language" }
 func (*DialectFilter) filterKind() string          { return "dialect" }

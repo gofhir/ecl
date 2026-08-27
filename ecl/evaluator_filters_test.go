@@ -268,23 +268,50 @@ func TestEvaluate_CombinedFilters(t *testing.T) {
 	assert.ElementsMatch(t, []string{"22298006"}, got.Slice())
 }
 
-func TestEvaluate_DescriptionFilter_Term_Negated(t *testing.T) {
+// TestEvaluate_DescriptionFilter_Negated_IsRejected covers the negated forms of
+// the description family.
+//
+// These tests used to assert the set-level interpretation: `term != "infarction"`
+// returned "the concepts that do not have a description containing infarction",
+// computed as base.Minus(matches). That is not the ECL semantics. A negated
+// description filter selects concepts that HAVE a description whose value fails
+// the comparison, which is a per-description-row negation: a concept with both an
+// FSN and a Spanish synonym satisfies `language != es` through its FSN, yet
+// Minus removes it because it also has a Spanish row.
+//
+// Getting it right needs the provider to negate at the row level, which the
+// optional ecl.NegatingDescriptionProvider allows. Note newFilterFixture does NOT
+// implement it, so these exercise the fallback: a classifiable error instead of a
+// silently wrong set. The capability path is covered by
+// TestEvaluate_DescriptionFilter_Negated_WithCapability.
+func TestEvaluate_DescriptionFilter_Negated_IsRejected(t *testing.T) {
 	p := newFilterFixture()
-	// term != "infarction" → concepts whose descriptions do NOT contain "infarction".
-	// Only MI (22298006) has "infarction" in its term.
-	got := evalECL(t, `<< 404684003 {{ term != "infarction" }}`, p)
-	assert.False(t, got.Contains("22298006"), "22298006 has 'infarction' in term")
-	assert.True(t, got.Contains("73211009"), "73211009 should remain")
-	assert.True(t, got.Contains("64572001"), "64572001 should remain")
+	for _, expr := range []string{
+		`<< 404684003 {{ term != "infarction" }}`,
+		`<< 404684003 {{ language != es }}`,
+		`<< 404684003 {{ D type != fsn }}`,
+	} {
+		t.Run(expr, func(t *testing.T) {
+			tree, err := Parse(expr)
+			require.NoError(t, err)
+			_, err = Evaluate(context.Background(), tree, p)
+			require.Error(t, err)
+			require.ErrorIs(t, err, ErrUnsupportedFeature)
+			require.Contains(t, err.Error(), "NegatingDescriptionProvider")
+		})
+	}
 }
 
-func TestEvaluate_DescriptionFilter_Language_Negated(t *testing.T) {
+// TestEvaluate_DescriptionFilter_MixedPolarity documents why the old single
+// `negate` flag was wrong even when one clause was positive: any "!=" clause
+// flipped the whole conjunction, discarding its positive siblings.
+func TestEvaluate_DescriptionFilter_MixedPolarity(t *testing.T) {
 	p := newFilterFixture()
-	// language != es → concepts that do NOT have a Spanish description.
-	// Only MI (22298006) has a Spanish description.
-	got := evalECL(t, `<< 404684003 {{ language != es }}`, p)
-	assert.False(t, got.Contains("22298006"), "22298006 has Spanish desc")
-	assert.True(t, got.Contains("73211009"))
+	tree, err := Parse(`<< 404684003 {{ term = "Myocardial", language != es }}`)
+	require.NoError(t, err)
+	_, err = Evaluate(context.Background(), tree, p)
+	require.ErrorIs(t, err, ErrUnsupportedFeature,
+		"a mixed-polarity description filter must be rejected, not evaluated with the positive clause dropped")
 }
 
 func TestEvaluate_MemberFilter(t *testing.T) {

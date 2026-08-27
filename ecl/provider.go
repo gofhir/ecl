@@ -6,7 +6,32 @@ import "context"
 // Consumers implement this against their storage (PostgreSQL closure tables,
 // in-memory maps, Elasticsearch, etc.).
 //
-// All methods take slices/sets to enable batch queries and avoid N+1 patterns.
+// Most methods take slices/sets so they can be answered with a batch query.
+// Two are per-concept by signature (ConcreteValues and PropertiesByGroup) and are
+// called once per focus concept. Implement the optional BatchPropertiesProvider
+// and BatchConcreteValuesProvider to collapse those loops into one call each; see
+// capabilities.go, which also lists what else an optional interface unlocks.
+//
+// # Contract
+//
+// These rules apply to every method and are what the evaluator relies on. They
+// are not optional: an implementation that breaks them produces wrong results
+// rather than errors.
+//
+//   - Never return a nil Set. Use NewSet() for the empty result. The evaluator
+//     normalizes nil defensively, but do not rely on that.
+//   - An empty (non-nil) input Set or slice yields the empty Set — never the
+//     whole terminology.
+//   - Results are unordered. The evaluator sorts when it needs determinism.
+//   - Hierarchy methods are transitive, except Children and Parents, which are
+//     depth 1 by definition.
+//   - The active axis belongs to FilterConcepts alone. No other method may
+//     filter by the active flag: doing so makes expressions such as
+//     `* {{ C active = false }}` unable to return anything, because the
+//     wildcard is resolved before the filter is applied.
+//
+// The bundled conformance suite exercises these rules; run it against your
+// implementation to check them.
 type DataProvider interface {
 	// ── Hierarchy ──────────────────────────────────────────────────────────
 	// Descendants returns all transitive descendants of the given concepts.
@@ -23,20 +48,36 @@ type DataProvider interface {
 	Parents(ctx context.Context, conceptIDs []string, includeSelf bool) (Set, error)
 
 	// ── Concepts ───────────────────────────────────────────────────────────
-	// ConceptExists returns the subset of the input that exists in the terminology.
+	// ConceptExists returns the subset of the input that exists in the
+	// terminology, whether active or not. Like AllConcepts, it must not filter
+	// by the active flag.
 	ConceptExists(ctx context.Context, conceptIDs []string) (Set, error)
 
-	// AllConcepts returns all active concepts (used for the wildcard *).
+	// AllConcepts returns every concept that exists in the terminology, active
+	// or not (used for the wildcard *).
+	//
+	// It must NOT filter by the active flag. The wildcard is resolved before
+	// filters are applied, so an implementation that returns only active
+	// concepts makes `* {{ C active = false }}` return the empty set no matter
+	// what FilterConcepts does. Restricting the active axis is FilterConcepts'
+	// job.
 	AllConcepts(ctx context.Context) (Set, error)
 
 	// ── Attributes (for refinements) ───────────────────────────────────────
 	// RelationshipTargets returns the union of target concept IDs of relationships
 	// whose source is in sourceIDs and type is in typeIDs.
+	//
+	// When sourceIDs is nil, every source is considered (wildcard). The
+	// evaluator passes nil for the reverse-wildcard form `R attr = *`, so an
+	// implementation that dereferences sourceIDs without checking will panic on
+	// that expression. An empty non-nil Set still means "no sources", i.e. the
+	// empty result.
 	RelationshipTargets(ctx context.Context, sourceIDs Set, typeIDs Set) (Set, error)
 
 	// RelationshipSources returns the union of source concept IDs of relationships
 	// whose target is in targetIDs and type is in typeIDs (for reverse flag "R").
-	// When targetIDs is nil, all targets are considered (wildcard).
+	// When targetIDs is nil, all targets are considered (wildcard) — though the
+	// evaluator currently always passes a concrete set here.
 	RelationshipSources(ctx context.Context, targetIDs Set, typeIDs Set) (Set, error)
 
 	// ConcreteValues returns concrete values for the given source concept and attribute type.
@@ -68,8 +109,18 @@ type DataProvider interface {
 	RefsetsContainingMembers(ctx context.Context, conceptIDs []string) (Set, error)
 
 	// ── History supplements (v2.0) ─────────────────────────────────────────
-	// HistoricalAssociations expands a set of inactive concepts to their
-	// historical replacements according to the given profile (MIN, MOD, MAX, ALL).
+	// HistoricalAssociations returns the INACTIVE concepts that were replaced by
+	// any of the given concepts, according to the profile (MIN, MOD, MAX, ALL).
+	//
+	// Direction matters and is the opposite of what one might assume. The spec
+	// defines the supplement as
+	//
+	//	(X) OR (^ 900000000000527005 {{ M targetComponentId = (X) }})
+	//
+	// so the input is the set of (typically active) concepts, and the result is
+	// the historical concepts whose targetComponentId points AT them. An
+	// implementation that expands active concepts to their replacements instead
+	// makes `{{ +HISTORY }}` a silent no-op for every realistic input.
 	HistoricalAssociations(ctx context.Context, conceptIDs Set, profile string) (Set, error)
 
 	// ── Alternate identifiers (v2.2) ──────────────────────────────────────
@@ -112,7 +163,10 @@ type DescriptionFilterOpts struct {
 	// Term is a substring or phrase to match (case-insensitive).
 	Term string
 
-	// MatchType is "match", "wild" (glob), or "regex". Default "match".
+	// MatchType is "match" (word-prefix, the default) or "wild" (glob).
+	//
+	// A "match" search succeeds when every word of Term is a prefix of some word
+	// of the description, in any order — not a substring test.
 	MatchType string
 
 	// TypeIDs filters by description type SCTIDs (any-of). Empty = no filter.

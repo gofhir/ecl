@@ -1,3 +1,23 @@
+// SNOMED CT Expression Constraint Language grammar.
+//
+// Vendored from https://github.com/IHTSDO/snomed-expression-constraint-language
+// at commit b0e07105ae395821bcc953f3d6084b57dc7bef2c (2026-01-21), path
+// syntax/ECL.g4. Copyright SNOMED International (IHTSDO), Apache License 2.0 —
+// the same licence this repository uses.
+//
+// ONE deliberate local fix, and nothing else:
+//
+//	upstream line 13:  refsetOperator : memberOf | refsetContainingAny;
+//	here:              refsetOperator : memberof | refsetContainingAny;
+//
+// Upstream references the rule as `memberOf` but defines it as `memberof` on the
+// next line, so ANTLR cannot resolve it and the grammar does not generate. Do not
+// "fix" this back when syncing: verify against upstream first. The
+// grammar-upstream workflow diffs the two and expects exactly this one hunk.
+//
+// Everything under ecl/grammar/ except this file is generated. Edit this file and
+// run `make generate`; a CI gate regenerates and diffs byte for byte.
+
 grammar ECL;
 expressionconstraint : ws ( refinedexpressionconstraint | compoundexpressionconstraint | dottedexpressionconstraint | subexpressionconstraint ) ws;
 refinedexpressionconstraint : subexpressionconstraint ws COLON ws eclrefinement;

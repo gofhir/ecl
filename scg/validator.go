@@ -26,7 +26,7 @@ type Issue struct {
 
 	// Kind is one of: "unknown" (not in terminology), "inactive" (exists
 	// but not active — currently not checked here, reserved for future
-	// use), or "invalid_sctid" (fails Verhoeff check digit).
+	// use), or "invalid_sctid" (is not a structurally valid SCTID (length, leading zero, partition, or Verhoeff check digit) digit).
 	Kind string
 
 	// Path describes where the error occurred, e.g.
@@ -80,7 +80,7 @@ func Validate(ctx context.Context, expr *Expression, provider ecl.DataProvider) 
 				SCTID:   id,
 				Kind:    IssueKindInvalidSCTID,
 				Path:    path,
-				Message: fmt.Sprintf("SCTID %q fails Verhoeff check", id),
+				Message: fmt.Sprintf("SCTID %q is not a structurally valid SCTID (length, leading zero, partition, or Verhoeff check digit)", id),
 			})
 			return
 		}

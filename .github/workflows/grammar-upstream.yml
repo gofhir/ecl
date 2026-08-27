@@ -1,0 +1,37 @@
+name: Upstream drift
+
+# Two directories are copies of files SNOMED International owns: the ECL grammar
+# and the official example corpus. Nothing in the pull-request pipeline would
+# notice either of them moving — the regeneration gate in ci.yml regenerates from
+# OUR copy of the grammar, which proves reproducibility, not fidelity.
+#
+# Upstream publishing a new version is news rather than a defect, so this runs on
+# a schedule instead of blocking pull requests. It fails loudly when it finds
+# drift, which is what puts it in the Actions summary.
+on:
+  schedule:
+    # Weekly, Mondays at 06:00 UTC.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+  # Also on changes to the vendored artefacts themselves, so a sync commit is
+  # checked against upstream rather than taken on trust.
+  push:
+    paths:
+      - "ecl/grammar/ECL.g4"
+      - "ecl/testdata/official-examples/**"
+      - "scripts/check-upstream.sh"
+      - ".github/workflows/grammar-upstream.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: Vendored SNOMED artefacts vs upstream
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compare against IHTSDO/snomed-expression-constraint-language
+        run: ./scripts/check-upstream.sh

@@ -45,14 +45,19 @@ linters:
     - wastedassign
     - whitespace
   settings:
+    # The complexity gates were set above the worst function in the codebase
+    # (Evaluate measured gocognit 77, gocyclo 51), so they could never fire. They
+    # now sit at values that bite; functions that legitimately exceed them are
+    # excluded by path+text below, which is honest, where an unreachable
+    # threshold merely looked like a gate.
     cyclop:
-      max-complexity: 60
+      max-complexity: 25
     errorlint:
       errorf: true
       asserts: true
       comparison: true
     gocognit:
-      min-complexity: 80
+      min-complexity: 40
     goconst:
       min-len: 3
       min-occurrences: 3
@@ -65,7 +70,7 @@ linters:
         - style
         - performance
     gocyclo:
-      min-complexity: 60
+      min-complexity: 25
     godot:
       scope: toplevel
       capital: true
@@ -79,7 +84,8 @@ linters:
         - shadow
       enable-all: true
     maintidx:
-      under: 15
+      # The default is 20; anything lower than that is not a gate.
+      under: 20
     misspell:
       locale: US
     revive:
@@ -137,12 +143,53 @@ linters:
       - linters:
           - forcetypeassert
         path: ecl/parser\.go
+      # Type-switch dispatchers. Their complexity is the number of AST node
+      # kinds, not tangled logic: splitting them would spread one exhaustive
+      # switch across several functions and make a missing case harder to spot.
+      # Excluded by name so a NEW complex function still trips the gate.
+      - linters:
+          - gocognit
+          - gocyclo
+          - cyclop
+          - maintidx
+        path: ecl/evaluator\.go
+        # cyclop and gocyclo word their messages differently, so match the name.
+        text: "evaluateNode"
+      - linters:
+          - gocyclo
+          - cyclop
+        path: cmd/gofhir-ecl/explain\.go
+        text: "printAST"
+      # Filter builders: one branch per filter kind, each a few lines. Same
+      # reasoning as above. TODO: fold the repeated
+      # "evaluate, else fall back to the literal SCTID" shape into a helper —
+      # resolveFilterIDs already does it for two of them.
+      - linters:
+          - gocognit
+        path: ecl/parser\.go
+        text: "build(TypeFilter|DefinitionStatusFilter)"
+      # evaluateFiltered and filterByConcreteValue are genuinely worth splitting;
+      # excluded for now so the gate can be enabled without a refactor in the
+      # same change.
+      - linters:
+          - gocognit
+          - gocyclo
+          - cyclop
+        path: ecl/evaluator\.go
+        text: "(evaluateFiltered|filterByConcreteValue)"
       # The in-memory DataProvider implementation methods are required to be
       # exported (they satisfy the ecl.DataProvider interface) but the
       # receiver type is intentionally unexported.
+      # UnimplementedDataProvider's 18 methods are interface satisfaction only.
+      # The type's doc comment explains all of them; a one-line comment per method
+      # would be 18 restatements of "returns ErrUnsupportedFeature".
       - linters:
           - revive
-        path: internal/conformance/fixture\.go
+        path: ecl/unimplemented\.go
+        text: "exported method UnimplementedDataProvider\\."
+      - linters:
+          - revive
+        path: ecl/providertest/fixture\.go
         text: "exported method inMemoryProvider\\."
       # CLI subcommands print to stdout via fmt.Fprintf/Fprintln; their
       # error returns are not actionable in a CLI context.

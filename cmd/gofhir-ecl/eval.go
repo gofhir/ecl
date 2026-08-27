@@ -9,7 +9,7 @@ import (
 	"sort"
 
 	"github.com/gofhir/ecl/ecl"
-	"github.com/gofhir/ecl/internal/conformance"
+	"github.com/gofhir/ecl/ecl/providertest"
 )
 
 func runEval(args []string) error {
@@ -18,24 +18,24 @@ func runEval(args []string) error {
 
 func runEvalWithOutput(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("eval", flag.ContinueOnError)
-	fs.SetOutput(out)
+	fs.SetOutput(os.Stderr) // diagnostics go to stderr; out carries results only
 	fixturePath := fs.String("fixture", "", "path to a YAML fixture defining the in-memory DataProvider (required)")
 	fs.Usage = func() {
-		fmt.Fprintln(out, "Usage: gofhir-ecl eval --fixture <path> <expression>")
-		fmt.Fprintln(out)
-		fmt.Fprintln(out, "Evaluates the expression against an in-memory provider built from the YAML")
-		fmt.Fprintln(out, "fixture. Prints the resulting concept IDs, one per line.")
+		fmt.Fprintln(os.Stderr, "Usage: gofhir-ecl eval --fixture <path> <expression>")
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "Evaluates the expression against an in-memory provider built from the YAML")
+		fmt.Fprintln(os.Stderr, "fixture. Prints the resulting concept IDs, one per line.")
 	}
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *fixturePath == "" {
 		fs.Usage()
-		return fmt.Errorf("--fixture is required")
+		return fmt.Errorf("%w: --fixture is required", errUsage)
 	}
 	if fs.NArg() != 1 {
 		fs.Usage()
-		return fmt.Errorf("expected exactly one expression argument")
+		return fmt.Errorf("%w: expected exactly one expression argument", errUsage)
 	}
 
 	expr, err := readExpression(fs.Arg(0))
@@ -47,7 +47,7 @@ func runEvalWithOutput(args []string, out io.Writer) error {
 		return fmt.Errorf("parse: %w", err)
 	}
 
-	provider, err := conformance.LoadFixtureFile(*fixturePath)
+	provider, err := providertest.LoadFixtureFile(*fixturePath)
 	if err != nil {
 		return fmt.Errorf("load fixture: %w", err)
 	}

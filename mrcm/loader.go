@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gofhir/ecl/ecl"
 	"github.com/gofhir/ecl/sctid"
 )
 
@@ -77,6 +78,12 @@ func LoadFromJSON(r io.Reader) (*Model, error) {
 		if !sctid.IsValid(jd.AttributeID) {
 			return nil, fmt.Errorf("mrcm: domains[%d]: invalid attributeId %q", i, jd.AttributeID)
 		}
+		// Validate the ECL at load time. Without this a rule with an unparseable
+		// (or empty) domainEcl loaded fine and then failed on every validation
+		// that touched the attribute -- far from where the mistake was made.
+		if err := validateRuleECL(jd.DomainECL); err != nil {
+			return nil, fmt.Errorf("mrcm: domains[%d].domainEcl: %w", i, err)
+		}
 		card, err := parseCardinality(jd.Cardinality)
 		if err != nil {
 			return nil, fmt.Errorf("mrcm: domains[%d].cardinality: %w", i, err)
@@ -104,6 +111,9 @@ func LoadFromJSON(r io.Reader) (*Model, error) {
 	for i, jr := range jm.Ranges {
 		if !sctid.IsValid(jr.AttributeID) {
 			return nil, fmt.Errorf("mrcm: ranges[%d]: invalid attributeId %q", i, jr.AttributeID)
+		}
+		if err := validateRuleECL(jr.RangeECL); err != nil {
+			return nil, fmt.Errorf("mrcm: ranges[%d].rangeEcl: %w", i, err)
 		}
 		strength := jr.RuleStrengthID
 		if strength == "" {
@@ -165,4 +175,17 @@ func parseCardinality(s string) (Cardinality, error) {
 	}
 
 	return Cardinality{Min: minVal, Max: maxVal}, nil
+}
+
+// validateRuleECL checks that a rule's ECL constraint parses, so a malformed rule
+// is rejected where it is written rather than on every validation that reaches it.
+// An empty constraint is a mistake too: it would evaluate to nothing.
+func validateRuleECL(expr string) error {
+	if strings.TrimSpace(expr) == "" {
+		return fmt.Errorf("must not be empty")
+	}
+	if _, err := ecl.Parse(expr); err != nil {
+		return fmt.Errorf("invalid ECL %q: %w", expr, err)
+	}
+	return nil
 }

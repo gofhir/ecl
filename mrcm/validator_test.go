@@ -2,6 +2,7 @@ package mrcm
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -366,4 +367,325 @@ func TestValidate_NilArgs(t *testing.T) {
 	assert.Error(t, err)
 	_, err = Validate(context.Background(), expr, newTestModel(), nil)
 	assert.Error(t, err)
+}
+
+// TestValidate_MultipleDomainRowsAreAlternatives covers the shape the MRCM
+// Attribute Domain refset actually distributes: one row per domain (and per
+// contentTypeId) for the same attribute.
+//
+// The rows are ALTERNATIVES -- the focus concept has to be in at least one. The
+// validator used to require it to be in every row and emitted a domain_violation
+// for each one it was not in, so a valid expression came back invalid.
+func TestValidate_MultipleDomainRowsAreAlternatives(t *testing.T) {
+	model := &Model{
+		Domains: []AttributeDomain{
+			{
+				AttributeID:    "363698007",
+				DomainECL:      "<< 404684003", // clinical finding
+				Grouped:        true,
+				Cardinality:    Cardinality{Min: 0, Max: -1},
+				RuleStrengthID: RuleStrengthMandatory,
+			},
+			{
+				AttributeID:    "363698007",
+				DomainECL:      "<< 442083009", // a different domain
+				Grouped:        true,
+				Cardinality:    Cardinality{Min: 0, Max: -1},
+				RuleStrengthID: RuleStrengthMandatory,
+			},
+		},
+		Ranges: []AttributeRange{
+			{AttributeID: "363698007", RangeECL: "<< 442083009", RuleStrengthID: RuleStrengthMandatory},
+		},
+	}
+
+	// 22298006 is in the first domain only, which is enough.
+	expr := mustParseSCG(t, "22298006:{363698007=74281007}")
+	res, err := Validate(context.Background(), expr, model, newTestProvider())
+	require.NoError(t, err)
+	assert.True(t, res.Valid, "issues: %+v", res.Issues)
+}
+
+// TestValidate_MinimumCardinalityOnAbsentAttribute covers the case the minimum
+// exists to catch: a mandatory attribute that is missing entirely.
+//
+// The check used to iterate the counts collected from the expression, which by
+// construction only contains attributes that are PRESENT, so `count < Min` was
+// unreachable and a rule with Min:1 reported Valid=true.
+func TestValidate_MinimumCardinalityOnAbsentAttribute(t *testing.T) {
+	model := &Model{
+		Domains: []AttributeDomain{
+			{
+				AttributeID:    "363698007",
+				DomainECL:      "<< 404684003",
+				Grouped:        true,
+				Cardinality:    Cardinality{Min: 1, Max: -1}, // mandatory
+				RuleStrengthID: RuleStrengthMandatory,
+			},
+			{
+				AttributeID:    "246075003",
+				DomainECL:      "<< 404684003",
+				Grouped:        false,
+				Cardinality:    Cardinality{Min: 0, Max: -1},
+				RuleStrengthID: RuleStrengthMandatory,
+			},
+		},
+		Ranges: []AttributeRange{
+			{AttributeID: "246075003", RangeECL: "<< 442083009", RuleStrengthID: RuleStrengthMandatory},
+		},
+	}
+	provider := newTestProvider()
+	provider.exists["246075003"] = true
+
+	// A POSTCOORDINATED definition that omits the mandatory attribute: it states
+	// what the concept is refined by, so an absent mandatory attribute is missing.
+	expr := mustParseSCG(t, "22298006:246075003=425391005")
+	res, err := Validate(context.Background(), expr, model, provider)
+	require.NoError(t, err)
+	assert.False(t, res.Valid, "a missing mandatory attribute must be reported")
+
+	var cardinality []Issue
+	for _, issue := range res.Issues {
+		if issue.Kind == IssueKindCardinalityViolation {
+			cardinality = append(cardinality, issue)
+		}
+	}
+	require.Len(t, cardinality, 1)
+	assert.Equal(t, "363698007", cardinality[0].AttributeID)
+}
+
+// TestValidate_BareConceptHasNothingToCount covers the other side: a bare concept
+// reference asserts nothing about its own attributes.
+//
+// Under the SCG default it means "equivalent to this concept", whose definition is
+// whatever the terminology says, so no mandatory attribute is missing. Checking
+// cardinality anyway reported a violation for every precoordinated code.
+func TestValidate_BareConceptHasNothingToCount(t *testing.T) {
+	model := &Model{Domains: []AttributeDomain{{
+		AttributeID:    "363698007",
+		DomainECL:      "<< 404684003",
+		Grouped:        true,
+		Cardinality:    Cardinality{Min: 1, Max: -1},
+		RuleStrengthID: RuleStrengthMandatory,
+	}}}
+
+	res, err := Validate(context.Background(), mustParseSCG(t, "22298006"), model, newTestProvider())
+	require.NoError(t, err)
+	assert.True(t, res.Valid, "a bare concept has no refinement to validate; issues: %+v", res.Issues)
+}
+
+// TestValidate_MinimumCardinalityIgnoresInapplicableDomain checks the other half:
+// a mandatory attribute whose domain does not contain the focus concept says
+// nothing about the expression and must not be reported.
+func TestValidate_MinimumCardinalityIgnoresInapplicableDomain(t *testing.T) {
+	model := &Model{
+		Domains: []AttributeDomain{
+			{
+				AttributeID:    "363698007",
+				DomainECL:      "<< 442083009", // 22298006 is not in here
+				Grouped:        true,
+				Cardinality:    Cardinality{Min: 1, Max: -1},
+				RuleStrengthID: RuleStrengthMandatory,
+			},
+		},
+	}
+
+	expr := mustParseSCG(t, "22298006")
+	res, err := Validate(context.Background(), expr, model, newTestProvider())
+	require.NoError(t, err)
+	assert.True(t, res.Valid, "issues: %+v", res.Issues)
+}
+
+// TestLoad_RejectsInvalidRuleECL covers validating the rule ECL at load time. A
+// rule with an empty or unparseable constraint used to load fine and then fail on
+// every validation that reached the attribute, far from the actual mistake.
+func TestLoad_RejectsInvalidRuleECL(t *testing.T) {
+	for name, doc := range map[string]string{
+		"empty domainEcl":     `{"domains":[{"attributeId":"363698007","domainEcl":"","grouped":true}]}`,
+		"malformed domainEcl": `{"domains":[{"attributeId":"363698007","domainEcl":"<< invalid!!!","grouped":true}]}`,
+		"empty rangeEcl":      `{"ranges":[{"attributeId":"363698007","rangeEcl":""}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadFromBytes([]byte(doc))
+			require.Error(t, err)
+		})
+	}
+
+	// A well-formed model still loads.
+	_, err := LoadFromBytes([]byte(`{"domains":[{"attributeId":"363698007","domainEcl":"<< 404684003","grouped":true}]}`))
+	require.NoError(t, err)
+}
+
+// TestValidate_ProviderFailureIsNotAnMRCMViolation covers the difference between
+// a broken rule and a broken backend.
+//
+// Every evaluation failure used to be reported as an invalid_rule issue, so a
+// database outage came back as "your expression is MRCM-invalid" -- a false
+// accusation about the caller's data. A provider failure now propagates.
+func TestValidate_ProviderFailureIsNotAnMRCMViolation(t *testing.T) {
+	model := newTestModel()
+	expr := mustParseSCG(t, "22298006:{363698007=74281007}")
+
+	res, err := Validate(context.Background(), expr, model, failingStubProvider{})
+	require.Error(t, err, "a provider failure must propagate, not be reported as invalid")
+	require.Nil(t, res)
+
+	// A malformed rule, in contrast, IS an issue: one bad rule must not hide the
+	// rest of the report.
+	broken := newTestModel()
+	broken.Domains = append(broken.Domains, AttributeDomain{
+		AttributeID:    "246075003",
+		DomainECL:      "<< invalid!!!",
+		Cardinality:    Cardinality{Min: 0, Max: -1},
+		RuleStrengthID: RuleStrengthMandatory,
+	})
+	provider := newTestProvider()
+	provider.exists["246075003"] = true
+
+	res, err = Validate(context.Background(), mustParseSCG(t, "22298006:246075003=425391005"), broken, provider)
+	require.NoError(t, err)
+	require.False(t, res.Valid)
+
+	var invalid int
+	for _, issue := range res.Issues {
+		if issue.Kind == IssueKindInvalidRule {
+			invalid++
+		}
+	}
+	require.Equal(t, 1, invalid, "the invalid_rule issue must be reported exactly once, not per focus/occurrence")
+}
+
+// TestValidate_RangeRowsAreAlternatives covers range rows being alternatives, the
+// same shape already fixed for domain rows. Two mandatory range rules for one
+// attribute produced a spurious range_violation for whichever row did not match.
+func TestValidate_RangeRowsAreAlternatives(t *testing.T) {
+	model := &Model{
+		Domains: []AttributeDomain{
+			{
+				AttributeID:    "363698007",
+				DomainECL:      "<< 404684003",
+				Grouped:        true,
+				Cardinality:    Cardinality{Min: 0, Max: -1},
+				RuleStrengthID: RuleStrengthMandatory,
+			},
+		},
+		Ranges: []AttributeRange{
+			// One row per contentTypeId, as the refset distributes them.
+			{AttributeID: "363698007", RangeECL: "<< 386053000", RuleStrengthID: RuleStrengthMandatory},
+			{AttributeID: "363698007", RangeECL: "<< 442083009", RuleStrengthID: RuleStrengthMandatory},
+		},
+	}
+
+	// 74281007 is under 442083009 but not under 386053000: satisfying one row is
+	// enough.
+	expr := mustParseSCG(t, "22298006:{363698007=74281007}")
+	res, err := Validate(context.Background(), expr, model, newTestProvider())
+	require.NoError(t, err)
+	require.True(t, res.Valid, "issues: %+v", res.Issues)
+
+	// A value in neither row is still reported, once. 363698007 is under neither
+	// 386053000 nor 442083009 (note `<< X` includes X itself, so the value cannot
+	// be one of the range roots).
+	bad := mustParseSCG(t, "22298006:{363698007=363698007}")
+	res, err = Validate(context.Background(), bad, model, newTestProvider())
+	require.NoError(t, err)
+	require.False(t, res.Valid)
+	require.Len(t, res.Issues, 1)
+	require.Equal(t, IssueKindRangeViolation, res.Issues[0].Kind)
+}
+
+// failingStubProvider stands in for an unhealthy backend. It returns a PLAIN
+// error, not ErrUnsupportedFeature: the latter is a property of the rule and is
+// deliberately classified as an invalid_rule issue instead.
+type failingStubProvider struct{ ecl.UnimplementedDataProvider }
+
+var errBackendDown = errors.New("backend down")
+
+func (failingStubProvider) ConceptExists(_ context.Context, ids []string) (ecl.Set, error) {
+	return ecl.NewSetFromSlice(ids), nil
+}
+
+func (failingStubProvider) Descendants(context.Context, []string, bool) (ecl.Set, error) {
+	return nil, errBackendDown
+}
+
+// TestValidate_OptionalDomainRowIsNotAViolation covers an attribute whose domain
+// rows are all advisory.
+//
+// Non-mandatory rows are filtered out, so `len(applicable) == 0` fired even
+// though the focus concept WAS in the domain, and a perfectly valid expression
+// came back with a domain_violation. That was a regression: the
+// previous code skipped optional rows silently.
+func TestValidate_OptionalDomainRowIsNotAViolation(t *testing.T) {
+	model := &Model{Domains: []AttributeDomain{{
+		AttributeID:    "363698007",
+		DomainECL:      "<< 404684003",
+		Grouped:        true,
+		Cardinality:    Cardinality{Min: 0, Max: -1},
+		RuleStrengthID: RuleStrengthOptional,
+	}}}
+
+	res, err := Validate(context.Background(), mustParseSCG(t, "22298006:{363698007=74281007}"), model, newTestProvider())
+	require.NoError(t, err)
+	assert.True(t, res.Valid, "an advisory rule must not produce a violation; issues: %+v", res.Issues)
+}
+
+// TestValidate_UncheckableRuleIsNotADomainViolation covers the same distinction
+// for a rule whose ECL does not parse: it is reported as invalid_rule, and must
+// NOT also claim the focus concept is out of domain, which was never tested.
+func TestValidate_UncheckableRuleIsNotADomainViolation(t *testing.T) {
+	model := &Model{Domains: []AttributeDomain{{
+		AttributeID:    "363698007",
+		DomainECL:      "<< invalid!!!",
+		Grouped:        true,
+		Cardinality:    Cardinality{Min: 0, Max: -1},
+		RuleStrengthID: RuleStrengthMandatory,
+	}}}
+
+	res, err := Validate(context.Background(), mustParseSCG(t, "22298006:{363698007=74281007}"), model, newTestProvider())
+	require.NoError(t, err)
+	require.False(t, res.Valid)
+	for _, issue := range res.Issues {
+		assert.NotEqual(t, IssueKindDomainViolation, issue.Kind,
+			"a rule that could not be evaluated must not be reported as a domain violation")
+	}
+}
+
+// TestValidate_GroupedRowsAreAlternatives covers applicable rows disagreeing on
+// Grouped. Requiring every row made the attribute unwritable: both the grouped
+// and the ungrouped violation were reachable and no expression could avoid them.
+func TestValidate_GroupedRowsAreAlternatives(t *testing.T) {
+	model := &Model{
+		Domains: []AttributeDomain{
+			{AttributeID: "363698007", DomainECL: "<< 404684003", Grouped: true, Cardinality: Cardinality{Min: 0, Max: -1}, RuleStrengthID: RuleStrengthMandatory},
+			{AttributeID: "363698007", DomainECL: "<< 404684003", Grouped: false, Cardinality: Cardinality{Min: 0, Max: -1}, RuleStrengthID: RuleStrengthMandatory},
+		},
+		Ranges: []AttributeRange{{AttributeID: "363698007", RangeECL: "<< 442083009", RuleStrengthID: RuleStrengthMandatory}},
+	}
+
+	for _, expr := range []string{"22298006:{363698007=74281007}", "22298006:363698007=74281007"} {
+		t.Run(expr, func(t *testing.T) {
+			res, err := Validate(context.Background(), mustParseSCG(t, expr), model, newTestProvider())
+			require.NoError(t, err)
+			assert.True(t, res.Valid, "satisfying one applicable row is enough; issues: %+v", res.Issues)
+		})
+	}
+}
+
+// TestValidate_CardinalityRowsAreAlternatives covers applicable rows disagreeing
+// on Max, which produced a spurious cardinality violation.
+func TestValidate_CardinalityRowsAreAlternatives(t *testing.T) {
+	model := &Model{
+		Domains: []AttributeDomain{
+			{AttributeID: "363698007", DomainECL: "<< 404684003", Grouped: true, Cardinality: Cardinality{Min: 0, Max: 1}, RuleStrengthID: RuleStrengthMandatory},
+			{AttributeID: "363698007", DomainECL: "<< 404684003", Grouped: true, Cardinality: Cardinality{Min: 0, Max: -1}, RuleStrengthID: RuleStrengthMandatory},
+		},
+		Ranges: []AttributeRange{{AttributeID: "363698007", RangeECL: "<< 442083009", RuleStrengthID: RuleStrengthMandatory}},
+	}
+
+	// Two occurrences fit the second row but not the first.
+	expr := mustParseSCG(t, "22298006:{363698007=74281007,363698007=425391005}")
+	res, err := Validate(context.Background(), expr, model, newTestProvider())
+	require.NoError(t, err)
+	assert.True(t, res.Valid, "issues: %+v", res.Issues)
 }

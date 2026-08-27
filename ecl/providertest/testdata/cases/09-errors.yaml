@@ -1,0 +1,112 @@
+name: Syntax errors and unsupported constructs
+specSection: "ECL v2.2 grammar — invalid input must be rejected, not truncated"
+fixture: standard.yaml
+cases:
+  # Until the EOF anchor was added, the expressionconstraint rule stopped at the
+  # first complete parse and discarded the rest with err == nil: `validate`
+  # answered OK on these, and the evaluator ran on a different expression than
+  # the one the user wrote.
+  - name: trailing garbage after a complete expression
+    expression: "11687002 TOTALGARBAGE"
+    expectError: true
+
+  - name: trailing words after a hierarchy operator
+    expression: "<< 404684003 ESTO SOBRA"
+    expectError: true
+
+  # exclusionexpressionconstraint takes exactly two operands, so a chain needs
+  # parentheses. This used to truncate silently to "404684003 MINUS 11687002".
+  - name: chained MINUS without parentheses
+    expression: "404684003 MINUS 11687002 MINUS 73211009"
+    expectError: true
+
+  # Compound sets are homogeneous in the grammar: mixing conjunction and
+  # disjunction at one level requires parentheses.
+  - name: AND and OR mixed without parentheses
+    expression: "< 404684003 AND < 11687002 OR < 73211009"
+    expectError: true
+
+  # The lexer had no error listener, so an unrecognizable character was written
+  # to os.Stderr, dropped from the token stream, and the parse "succeeded" with a
+  # corrupted term. UTF8_LETTER in ECL.g4 starts at 'À', so U+2019 and U+00A0
+  # fall in the gap. Reporting them is the fix here; widening the grammar is
+  # tracked separately.
+  - name: typographic apostrophe in a term is reported, not dropped
+    expression: "404684003 |Crohn’s disease|"
+    expectError: true
+
+  - name: no-break space in a term is reported, not dropped
+    expression: "404684003 |Body structure|"
+    expectError: true
+
+  # Accented Latin letters are inside UTF8_LETTER: the cut is not ASCII vs
+  # non-ASCII, and this must keep parsing.
+  - name: accented term still parses
+    expression: "404684003 |hipertensión|"
+    expectedIds: ["404684003"]
+
+  - name: unbalanced parenthesis
+    expression: "(< 404684003"
+    expectError: true
+
+  - name: attribute without a value
+    expression: "< 404684003 : 363698007 ="
+    expectError: true
+
+
+  # The dialect ALIAS form needs an alias-to-refset mapping, which is terminology
+  # data rather than something a parser can invent: only the international English
+  # aliases are universal, and the same alias can name different reference sets in
+  # different editions. A provider supplies it through the optional
+  # ecl.DialectAliasResolver, which the reference fixture implements for en-gb and
+  # en-us -- so the supported cases live in 05-filters.yaml.
+  #
+  # en-nz is deliberately NOT declared there. An alias the provider cannot resolve
+  # has to be reported: treating it as "no dialect constraint" would widen the
+  # query to every dialect, and the caller would never know.
+  - name: an unresolvable dialect alias is reported as unsupported
+    expression: "<< 404684003 {{ D dialect = en-nz }}"
+    expectError: true
+
+  # The parser now models these, but DescriptionFilterOpts cannot carry them to
+  # the provider. Reporting beats building Opts that silently drop part of the
+  # constraint -- which is how the description id filter used to widen a query to
+  # every descendant.
+  - name: description id filter is reported as unsupported
+    expression: "< 404684003 {{ D id = 123456789012 }}"
+    expectError: true
+
+  # A POSITIVE term set is supported — it decomposes into a union, see
+  # 05-filters.yaml. A NEGATED one does not: it selects concepts having a
+  # description whose term satisfies NEITHER value, which one description row has
+  # to decide. Intersecting per-term negations would wrongly accept a concept with
+  # one row failing the first term and a different row failing the second.
+  - name: negated term filter set is reported as unsupported
+    expression: '<< 404684003 {{ D term != ("infarction" "diabetes") }}'
+    expectError: true
+
+  # Braces assert that the clauses share ONE relationship group of the FOCUS
+  # concept. A reverse relationship belongs to the source, so there is nothing of
+  # the focus's to group and the construct is either redundant (a lone clause,
+  # measured identical to the ungrouped form) or misleading (a mixed group silently
+  # constrains the SOURCE). Ontoserver rejects it too; write it outside the braces.
+  - name: reverse attribute inside a group is reported as unsupported
+    expression: "* : { R 363698007 = 22298006 }"
+    expectError: true
+
+  - name: reverse attribute in a group with a sibling clause is reported as unsupported
+    expression: "* : { R 363698007 = 22298006, 116676008 = 55641003 }"
+    expectError: true
+
+  - name: not-equals on a reverse attribute inside a group is reported as unsupported
+    expression: "* : { R 363698007 != 22298006 }"
+    expectError: true
+
+  - name: disjunction of reverse attributes inside a group is reported as unsupported
+    expression: "* : { R 363698007 = 22298006 OR R 116676008 = 22298006 }"
+    expectError: true
+
+  - name: group cardinality with a reverse attribute is reported as unsupported
+    expression: "* : [2..*] { R 363698007 = 22298006 }"
+    expectError: true
+

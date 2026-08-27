@@ -89,8 +89,12 @@ func (p *parser) expect(s string) error {
 func (p *parser) parseExpression() (*Expression, error) {
 	p.skipWS()
 
-	// Definition status defaults to subtype.
-	defStatus := DefStatusSubtype
+	// Definition status defaults to equivalentTo per the SCG specification: an
+	// expression without a prefix asserts equivalence, not subsumption. It used
+	// to default to subtypeOf, which inverted the logical meaning of every
+	// unprefixed expression -- a bare precoordinated SCTID became "some subtype
+	// of X" rather than "X".
+	defStatus := DefStatusEquivalent
 	if p.consume(DefStatusEquivalent) {
 		defStatus = DefStatusEquivalent
 	} else if p.consume(DefStatusSubtype) {
@@ -235,20 +239,28 @@ func (p *parser) parseRefinement() ([]AttributeGroup, error) {
 		groups = append(groups, AttributeGroup{Grouped: false, Attributes: attrs})
 	}
 
-	// Additional groups, each preceded by ",".
+	// Additional groups. The SCG grammar separates attributeGroups with
+	// whitespace alone:
+	//
+	//	refinement = ((attributeSet ws [attributeGroup]) / attributeGroup)
+	//	             *(ws attributeGroup)
+	//
+	// Requiring a comma rejected valid expressions, including the multiple
+	// relationship group example published in the specification. The comma is
+	// still accepted as an optional separator, since it appears in the wild and
+	// rejecting it would help nobody.
 	for {
 		p.skipWS()
-		// We only continue if the comma is followed by a "{" — otherwise the
-		// comma belonged to the ungrouped attributeSet (already consumed by
-		// parseAttributeSet) and we should stop.
 		save := p.pos
-		if !p.consume(",") {
-			break
-		}
-		p.skipWS()
-		if p.peek() != '{' {
-			// Not actually a group — rewind.
-			p.pos = save
+		if p.consume(",") {
+			p.skipWS()
+			if p.peek() != '{' {
+				// The comma belonged to the ungrouped attributeSet (already
+				// consumed by parseAttributeSet), not to a group — rewind.
+				p.pos = save
+				break
+			}
+		} else if p.peek() != '{' {
 			break
 		}
 		grp, err := p.parseAttributeGroup()
@@ -347,7 +359,7 @@ func (p *parser) parseAttributeValue() (AttributeValue, error) {
 			return AttributeValue{}, err
 		}
 		// Nested expressions inherit the default definition status.
-		sub.DefinitionStatus = DefStatusSubtype
+		sub.DefinitionStatus = DefStatusEquivalent
 		p.skipWS()
 		if err := p.expect(")"); err != nil {
 			return AttributeValue{}, err

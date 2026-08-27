@@ -1,0 +1,139 @@
+name: standard
+codeSystem: http://snomed.info/sct
+version: 2024-01-31
+
+# Hierarchy:
+#
+#   138875005 (root)
+#     └─ 404684003 Clinical finding
+#         ├─ 22298006 Myocardial infarction
+#         ├─ 73211009 Diabetes mellitus
+#         │     └─ 11687002 Type 1 diabetes
+#         └─ 64572001 Disease
+#               └─ 95566004 Hypertensive disorder
+
+concepts:
+  - {id: "138875005", display: "SNOMED CT Concept"}
+  - {id: "404684003", display: "Clinical finding"}
+  # definitionStatusId / moduleId / effectiveTime are declared on a subset of
+  # concepts so the {{ C ... }} filters have something to discriminate. A
+  # concept without them keeps the loader's defaults, which is what the
+  # pre-existing cases assume.
+  - {id: "22298006",  display: "Myocardial infarction", definitionStatusId: "900000000000073002", moduleId: "900000000000207008", effectiveTime: "20240131"}
+  - {id: "73211009",  display: "Diabetes mellitus", definitionStatusId: "900000000000073002", moduleId: "900000000000207008", effectiveTime: "20230731"}
+  - {id: "11687002",  display: "Type 1 diabetes mellitus", definitionStatusId: "900000000000074008", moduleId: "900000000000207008", effectiveTime: "20220131"}
+  - {id: "64572001",  display: "Disease"}
+  - {id: "95566004",  display: "Hypertensive disorder", definitionStatusId: "900000000000074008", moduleId: "900000000000012004", effectiveTime: "20240131"}
+  # Attribute types
+  - {id: "363698007", display: "Finding site"}
+  - {id: "116676008", display: "Associated morphology"}
+  - {id: "1142139005", display: "Count of base of active ingredient"}
+  # Targets
+  - {id: "74281007",  display: "Body structure"}
+  - {id: "55641003",  display: "Infarct"}
+  - {id: "113331007", display: "Endocrine system structure"}
+  # Inactive concepts. Two of them, so `{{ C active = false }}` asserts on a set
+  # rather than on a single row, and so history profiles have something to
+  # discriminate. Neither has a parent, so they are outside the root's closure
+  # and the hierarchy cases are unaffected.
+  - {id: "11111111",  display: "Old MI (inactive)", active: false}
+  - {id: "22222222",  display: "Superseded MI concept (inactive)", active: false}
+  - {id: "33333333",  display: "Loosely related MI concept (inactive)", active: false}
+  # Description type SCTIDs (so ConceptExists succeeds)
+  - {id: "900000000000003001", display: "Fully specified name"}
+  - {id: "900000000000013009", display: "Synonym"}
+  # Definition status SCTIDs
+  - {id: "900000000000074008", display: "Primitive"}
+  - {id: "900000000000073002", display: "Defined"}
+  # Dialect language refsets and acceptability SCTIDs, for {{ D dialect = ... }}
+  - {id: "900000000000508004", display: "Great Britain English language reference set"}
+  - {id: "900000000000509007", display: "United States English language reference set"}
+  - {id: "900000000000548007", display: "Preferred"}
+  - {id: "900000000000549004", display: "Acceptable"}
+  # Map refset, for {{ M ... }} member filters
+  - {id: "900000000000497000", display: "CTV3 simple map reference set"}
+  # Module SCTIDs referenced by the metadata above
+  - {id: "900000000000207008", display: "SNOMED CT core module"}
+  - {id: "900000000000012004", display: "SNOMED CT model component module"}
+
+# Direct parents. Closure is computed at fixture-load time.
+parents:
+  "404684003": ["138875005"]
+  "22298006":  ["404684003"]
+  "73211009":  ["404684003"]
+  "64572001":  ["404684003"]
+  "11687002":  ["73211009"]
+  "95566004":  ["64572001"]
+
+descriptions:
+  - {concept: "404684003", language: "en", typeId: "900000000000003001", value: "Clinical finding"}
+  - {concept: "22298006",  language: "en", typeId: "900000000000003001", value: "Myocardial infarction"}
+  - {concept: "22298006",  language: "es", typeId: "900000000000013009", value: "Infarto de miocardio"}
+  - {concept: "73211009",  language: "en", typeId: "900000000000003001", value: "Diabetes mellitus"}
+  - {concept: "11687002",  language: "en", typeId: "900000000000003001", value: "Type 1 diabetes mellitus"}
+  # Carries a literal double quote so a term filter can exercise the \" escape.
+  - {concept: "11687002",  language: "en", typeId: "900000000000013009", value: 'Type 1 "brittle" diabetes'}
+  - {concept: "64572001",  language: "en", typeId: "900000000000003001", value: "Disease"}
+  - {concept: "95566004",  language: "en", typeId: "900000000000003001", value: "Hypertensive disorder"}
+
+relationships:
+  # Myocardial infarction: site = body structure, morphology = infarct
+  - {source: "22298006", typeId: "363698007", target: "74281007", group: 1}
+  - {source: "22298006", typeId: "116676008", target: "55641003", group: 1}
+  # A SECOND relationship group on the same concept. Without it every
+  # relationship sat in group 1 and attribute-group cardinality was
+  # structurally unverifiable: no expression could tell "one matching group"
+  # from "two". With this, `[1..1] { 363698007 = * }` and `[2..*] { 363698007 = * }`
+  # select different sets.
+  - {source: "22298006", typeId: "363698007", target: "113331007", group: 2}
+  # A SECOND relationship from the same source to the same target, in another
+  # group. Reverse cardinality counts SOURCE CONCEPTS per the specification, so
+  # 74281007 still has exactly one: counting inbound relationships would say two.
+  - {source: "73211009", typeId: "116676008", target: "55641003", group: 1}
+  - {source: "73211009", typeId: "116676008", target: "55641003", group: 2}
+  # Diabetes mellitus: site = endocrine system structure
+  - {source: "73211009", typeId: "363698007", target: "113331007", group: 1}
+  # Diabetes carries a count concrete value (used by concrete-value tests)
+  - {source: "73211009", typeId: "1142139005", group: 1, concrete: {kind: "integer", value: "5"}}
+
+refsets:
+  "900000000000497000": ["22298006", "73211009"]
+
+# (dialectId, acceptabilityId) per description, for {{ D dialect = ... }}.
+# 22298006 is preferred in en-gb and acceptable in en-us; 73211009 only exists
+# in en-us, so a dialect filter discriminates between them.
+dialects:
+  - {dialectId: "900000000000508004", acceptabilityId: "900000000000548007", conceptId: "22298006", language: "en"}
+  - {dialectId: "900000000000509007", acceptabilityId: "900000000000549004", conceptId: "22298006", language: "en"}
+  - {dialectId: "900000000000509007", acceptabilityId: "900000000000548007", conceptId: "73211009", language: "en"}
+
+# Alias → language reference set, for {{ D dialect = en-gb }}. Declaring this is
+# what makes the fixture satisfy ecl.DialectAliasResolver. en-nz is deliberately
+# ABSENT: an alias a provider cannot resolve must be reported, not silently
+# treated as "any dialect", and 09-errors.yaml pins that.
+dialectAliases:
+  en-gb: ["900000000000508004"]
+  en-us: ["900000000000509007"]
+
+# Per-member custom fields, for {{ M field = ... }}. The values are strings, the
+# shape that used to fail at runtime with "unsupported AST node type".
+memberFields:
+  - {refset: "900000000000497000", member: "22298006", fieldName: "mapTarget", value: "G30.9"}
+  - {refset: "900000000000497000", member: "73211009", fieldName: "mapTarget", value: "E11.9"}
+
+# Three associations pointing at the SAME active concept through refsets in
+# different profile tiers, so MIN / MOD / MAX select different sets. With a single
+# association the three profiles returned the same thing and the cases could not
+# discriminate between them at all.
+#
+#   SAME_AS                  -> MIN, MOD and MAX
+#   REPLACED_BY              -> MOD and MAX
+#   POSSIBLY_EQUIVALENT_TO   -> MAX only
+historicalAssociations:
+  - {refset: "900000000000527005", source: "11111111", target: "22298006"}  # SAME_AS
+  - {refset: "900000000000528000", source: "22222222", target: "22298006"}  # REPLACED_BY
+  - {refset: "900000000000523009", source: "33333333", target: "22298006"}  # POSSIBLY_EQUIVALENT_TO
+
+altIdentifiers:
+  "LOINC":
+    "1234-5": ["22298006"]

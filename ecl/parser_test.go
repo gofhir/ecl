@@ -168,7 +168,8 @@ func TestParse_TermFilter_MatchTypes(t *testing.T) {
 				}
 			}
 			require.NotNil(t, tf, "expected a TermFilter clause")
-			assert.Equal(t, tc.matchType, tf.MatchType)
+			require.Len(t, tf.Terms, 1)
+			assert.Equal(t, tc.matchType, tf.Terms[0].MatchType)
 		})
 	}
 }

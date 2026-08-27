@@ -1,0 +1,172 @@
+name: Refinements (basic, grouped, reverse, dot)
+fixture: ../fixtures/standard.yaml
+specSection: "5.3 Refinements"
+
+cases:
+  - name: ungrouped attribute equality
+    expression: "<< 404684003 : 363698007 = 74281007"
+    expectedIds: ["22298006"]
+
+  - name: ungrouped attribute with hierarchical value
+    expression: "<< 404684003 : 363698007 = << 74281007"
+    expectedIds: ["22298006"]
+
+  - name: attribute name wildcard via Any (*)
+    expression: "<< 404684003 : * = 74281007"
+    expectedIds: ["22298006"]
+
+  # Re-baselined when the fixture gained a second relationship group on
+  # 22298006 (needed to make attribute-group cardinality verifiable at all).
+  # MI now has two finding sites, one per group, and dot notation returns the
+  # union of the targets — which makes this a stronger case than the
+  # single-target version it replaces.
+  - name: dot notation traversal returns every target (finding sites of MI)
+    expression: "(22298006).363698007"
+    expectedIds: ["74281007", "113331007"]
+
+  - name: reverse attribute - body structure is a finding-site target of clinical findings
+    expression: "74281007 : R 363698007 = << 404684003"
+    expectedIds: ["74281007"]
+
+  - name: refinement with two attributes (AND in same group)
+    expression: "<< 404684003 : { 363698007 = 74281007, 116676008 = 55641003 }"
+    expectedIds: ["22298006"]
+
+  # Attribute-group cardinality. AttributeGroup.Cardinality was never read and
+  # the group loop stopped at the first match, so every cardinality behaved as
+  # "at least one" and [0..0] returned exactly the inverse of the requested set.
+  # 22298006 has a 363698007 relationship in two groups, 73211009 in one.
+  - name: group cardinality defaults to one-or-more
+    expression: "* : { 363698007 = * }"
+    expectedIds: ["22298006", "73211009"]
+
+  - name: group cardinality exactly one
+    expression: "* : [1..1] { 363698007 = * }"
+    expectedIds: ["73211009"]
+
+  - name: group cardinality two or more
+    expression: "* : [2..*] { 363698007 = * }"
+    expectedIds: ["22298006"]
+
+  - name: group cardinality zero excludes the concepts that have the group
+    expression: "<< 404684003 : [0..0] { 363698007 = 74281007 }"
+    expectedIds: ["11687002", "404684003", "64572001", "73211009", "95566004"]
+
+  # Concrete-value cardinality: this path decided with a bool and an early break.
+  - name: concrete value cardinality exactly one
+    expression: "* : [1..1] 1142139005 = #5"
+    expectedIds: ["73211009"]
+
+  - name: concrete value cardinality two or more matches nobody
+    expression: "* : [2..*] 1142139005 = #5"
+    expectedIds: []
+
+  # "attr != value" negates the VALUE, not the existence of the attribute: it
+  # selects concepts that HAVE a relationship of that type pointing somewhere
+  # else. The ungrouped path used to invert the cardinality predicate instead,
+  # which implements [0..0] attr = value and produced a set disjoint from the one
+  # the grouped path returned for the same clause.
+  - name: not-equals selects concepts with another value
+    expression: "* : 363698007 != 74281007"
+    expectedIds: ["22298006", "73211009"]
+
+  - name: not-equals agrees between the grouped and ungrouped paths
+    expression: "* : { 363698007 != 74281007 }"
+    expectedIds: ["22298006", "73211009"]
+
+  - name: not-equals excludes a concept whose only value is the excluded one
+    expression: "<< 22298006 : 116676008 != 55641003"
+    expectedIds: []
+
+  # Re-baselined when the fixture gained a second source for 116676008=55641003:
+  # 73211009 now has that morphology, so [0..0] correctly excludes it.
+  - name: zero cardinality is the form that means "does not have it"
+    expression: "<< 404684003 : [0..0] 116676008 = 55641003"
+    expectedIds: ["11687002", "404684003", "64572001", "95566004"]
+
+  # Disjunction. The parser used to flatten AND and OR into one list, so these
+  # were evaluated as intersections and returned the empty set.
+  - name: disjunction of ungrouped attributes
+    expression: "* : 363698007 = 74281007 OR 363698007 = 113331007"
+    expectedIds: ["22298006", "73211009"]
+
+  - name: conjunction of the same two clauses still intersects
+    expression: "* : 363698007 = 74281007 , 363698007 = 113331007"
+    expectedIds: ["22298006"]
+
+  - name: disjunction of attribute groups
+    expression: "* : { 363698007 = 74281007 } OR { 1142139005 = #5 }"
+    expectedIds: ["22298006", "73211009"]
+
+  - name: conjunction of attribute groups matches nobody
+    expression: "* : { 363698007 = 74281007 } , { 1142139005 = #5 }"
+    expectedIds: []
+
+  - name: disjunction inside an attribute group
+    expression: "* : { 363698007 = 113331007 OR 116676008 = 55641003 }"
+    expectedIds: ["22298006", "73211009"]
+
+  # The grammar cannot put a group inside an attribute set, so the comma
+  # promotes the group to the refinement level. Dispatching on the attribute
+  # tree alone would drop the group and widen the result.
+  - name: attribute and group combined with a comma
+    expression: "* : 363698007 = 74281007 , { 116676008 = 55641003 }"
+    expectedIds: ["22298006"]
+
+  - name: attribute and group combined where the group excludes everything
+    expression: "* : 363698007 = 74281007 , { 1142139005 = #5 }"
+    expectedIds: []
+
+  # Parentheses are a scope: flattening them let the trailing conjunct escape
+  # the union.
+  - name: parenthesised disjunction keeps its scope
+    expression: "* : ({ 363698007 = 74281007 } OR { 363698007 = 113331007 }) , 1142139005 = #5"
+    expectedIds: ["73211009"]
+
+  - name: parenthesised disjunction of ungrouped attributes
+    expression: "* : (363698007 = 74281007 OR 1142139005 = #5)"
+    expectedIds: ["22298006", "73211009"]
+
+  # A parenthesised sub-refinement followed by OR is valid. Keeping it in
+  # Refinement.Conjunction made this look like a node holding both a conjunction
+  # and a disjunction, and the scope guard rejected it outright.
+  - name: parenthesised refinement followed by a disjunct
+    expression: "* : ({ 363698007 = 74281007 }) OR 1142139005 = #5"
+    expectedIds: ["22298006", "73211009"]
+
+  # Reverse attribute counting, enabled by the fixture implementing
+  # ecl.InboundRelationshipsProvider. RelationshipTargets returns a Set and so
+  # loses the inbound multiplicity a cardinality needs and the per-type total "!="
+  # needs; both used to be answered from the Set anyway, and wrongly.
+  #
+  # Inbound 363698007: 74281007 <- 22298006; 113331007 <- 22298006 and <- 73211009.
+  - name: reverse attribute with exact cardinality
+    expression: "* : [1..1] R 363698007 = 22298006"
+    expectedIds: ["74281007", "113331007"]
+
+  - name: reverse attribute with a cardinality nothing meets
+    expression: "* : [2..*] R 363698007 = 22298006"
+    expectedIds: []
+
+  # "!=" selects concepts pointed at from somewhere OTHER than the value set, not
+  # concepts nothing points at: 74281007's only inbound is from 22298006.
+  - name: reverse attribute not-equals counts within the type
+    expression: "* : R 363698007 != 22298006"
+    expectedIds: ["113331007"]
+
+  # Reverse attributes inside a group are rejected outright; see 09-errors.yaml.
+
+  # Reverse cardinality counts SOURCE CONCEPTS, not inbound relationships. The
+  # specification says it "constrains the number of source concepts ... for which
+  # each destination concept may be relevant attribute value", illustrated by
+  # `[3..3] R 127489000` meaning "an active ingredient of exactly three products".
+  #
+  # 55641003 receives 116676008 from 22298006 once and from 73211009 TWICE, in
+  # two different groups: two source concepts, three relationships.
+  - name: reverse cardinality counts source concepts not relationships
+    expression: "* : [2..2] R 116676008 = *"
+    expectedIds: ["55641003"]
+
+  - name: counting relationships instead would have matched three
+    expression: "* : [3..3] R 116676008 = *"
+    expectedIds: []
