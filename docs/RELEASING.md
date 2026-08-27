@@ -89,6 +89,7 @@ What belongs in one:
 make check           # lint, -race with coverage, conformance, tidy, vet
 make check-upstream  # the vendored SNOMED International artefacts vs upstream
 make oracle          # differential test against a real terminology server
+make fuzz FUZZTIME=10m   # longer than CI's 60s pass
 ```
 
 `make check` is the gate; the other two need network and report news rather than

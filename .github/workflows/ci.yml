@@ -189,3 +189,38 @@ jobs:
           [ -n "$offenders" ] && echo "$offenders"
           [ -n "$footers" ] && echo "$footers"
           exit 1
+
+  fuzz:
+    name: Fuzz the parser
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      # Parse is reachable from untrusted input in the use this library is built
+      # for -- a FHIR server taking an expression from a URL -- and the absence of
+      # this job is how the parser came to spend 7.6 seconds and 92 million
+      # allocations on a 2.2 KB expression without anyone noticing.
+      #
+      # A short budget: this is a regression net over the committed seed corpus,
+      # not a fuzzing campaign. Twelve seconds was enough to find a 26-byte input
+      # that grew the heap without bound, so a minute is not a token gesture.
+      # Run longer locally with `make fuzz FUZZTIME=10m`.
+      - name: Fuzz FuzzParse for 60s
+        run: go test ./ecl/ -run '^$' -fuzz FuzzParse -fuzztime 60s
+
+      # A crasher is written under testdata/fuzz/ and is the whole value of the
+      # run: without this, the input that failed dies with the runner and the
+      # finding has to be rediscovered.
+      - name: Upload any crasher
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: ecl/testdata/fuzz/
+          if-no-files-found: ignore
