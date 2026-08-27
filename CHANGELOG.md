@@ -1,5 +1,47 @@
 # Changelog
 
+## [1.2.0](https://github.com/gofhir/ecl/compare/v1.1.0...v1.2.0) (2026-08-27)
+
+
+### Features
+
+* **ecl:** evaluate filter value sets, and resolve dialect aliases via a capability ([c0f977b](https://github.com/gofhir/ecl/commit/c0f977b6889b6e36873a7df1df3f2d3ba5782402))
+* **ecl:** expose providertest with an embedded suite, and add UnimplementedDataProvider ([e8dcc30](https://github.com/gofhir/ecl/commit/e8dcc3004223f90c0f47a00757a7b00a226d42f1))
+* **ecl:** offer the deferred work as optional provider capabilities ([e473929](https://github.com/gofhir/ecl/commit/e473929f9e6fb6b4a10583ba7e7edb5d3d3cf44b))
+* **ecl:** wire NegatingDescriptionProvider into the evaluator ([4120fb1](https://github.com/gofhir/ecl/commit/4120fb1472fae05a6192d7f8f551e16b20c8b2e1))
+* **ecl:** wire the last capability, and have VerifyContract check them ([7f438d9](https://github.com/gofhir/ecl/commit/7f438d946139a0206950f1af259c8308b2c0316f))
+* **evaluator:** support "!=" and OR on a reverse attribute inside a group ([1a96a25](https://github.com/gofhir/ecl/commit/1a96a259e727633b5013dd6a69c7589c92d7ffcc))
+* **providertest:** split contract conformance from fixture conformance ([b9ddeed](https://github.com/gofhir/ecl/commit/b9ddeedf922ee99eacf33c018190ac4e490c69b1))
+
+
+### Bug Fixes
+
+* address code review of this branch ([364d465](https://github.com/gofhir/ecl/commit/364d465f513025db83362f00c74c8db58b9c9d71))
+* address fourth code review of this branch ([9e01dd8](https://github.com/gofhir/ecl/commit/9e01dd814771c6d7bb2416a33a81d4da6b63e653))
+* address second code review of this branch ([c5203f7](https://github.com/gofhir/ecl/commit/c5203f73451a11d96e0525875abe7cff1470b6b4))
+* **ci:** make release-please find the previous release, and guard the decision ([9775b2f](https://github.com/gofhir/ecl/commit/9775b2fbd9e191fb8de14891f24ef216a26a3ed0))
+* **ci:** make release-please find the previous release, and guard the decision ([9a4f16f](https://github.com/gofhir/ecl/commit/9a4f16f0bedfd660cfe04f0a27d82eb18fb5a1df))
+* **ci:** pass --repo to gh in the release workflow ([e8055fd](https://github.com/gofhir/ecl/commit/e8055fdc8a914564694e828bfc534b37f6070d8d))
+* **ci:** pass --repo to gh in the release workflow ([bd4ec14](https://github.com/gofhir/ecl/commit/bd4ec14b63eb41ef6ad25ce51bc6897f5ee1557d))
+* **cli:** send diagnostics to stderr, exit 0 on -h, and add exit codes ([b0a1abb](https://github.com/gofhir/ecl/commit/b0a1abb6af812693119d615a77772a5dd9dd5aa2))
+* **conformance:** correct the direction of history supplements ([b683c84](https://github.com/gofhir/ecl/commit/b683c847139c83eb30fd77cecedfe98c11e02019))
+* **conformance:** implement term match as word-prefix instead of substring ([2942e72](https://github.com/gofhir/ecl/commit/2942e727703ffabf112353a8525fb88fcc6f112a))
+* **ecl:** correct the silently-wrong evaluator semantics, and verify against sources this project did not write ([6c976f1](https://github.com/gofhir/ecl/commit/6c976f11324cb04f186b80f4ff037091337e9538))
+* **ecl:** populate the dialect filter and accept literal member field values ([e519a2b](https://github.com/gofhir/ecl/commit/e519a2bbe3bec655dd057c1e5d09de8cc7af801e))
+* **ecl:** reject reverse attributes inside an attribute group ([26b1e75](https://github.com/gofhir/ecl/commit/26b1e7511a6b11fea2de916cab4c252749e44a42))
+* **ecl:** specify the DataProvider contract and stop nil Sets from panicking ([4b5590b](https://github.com/gofhir/ecl/commit/4b5590b17ad9e82ab2bbda900910b1476346216a))
+* **evaluator:** apply cardinality to attribute groups and concrete values ([050c623](https://github.com/gofhir/ecl/commit/050c623e1361e03c0bb076613df6f6e02ec980ee))
+* **evaluator:** compose filter negation per clause instead of one global flag ([9d4425b](https://github.com/gofhir/ecl/commit/9d4425b965915f2e0ebf84bb7aa89ed29104c459))
+* **evaluator:** count source concepts for reverse cardinality, per the spec ([01e13de](https://github.com/gofhir/ecl/commit/01e13de65b4002c19c4c4e4b2bdefb7683a1e87d))
+* **evaluator:** evaluate OR inside refinements as a union, not an intersection ([e3f7307](https://github.com/gofhir/ecl/commit/e3f73075de4ef18ecd0211a09b6edb3934860b57))
+* **evaluator:** make "!=" negate the attribute value, not its existence ([db14f97](https://github.com/gofhir/ecl/commit/db14f973ec8abf4b9bfa3cec2f7a9a2291cf0545))
+* **evaluator:** make Top and Bottom use transitive ancestors and descendants ([34576e0](https://github.com/gofhir/ecl/commit/34576e0ed985f6b44f97fdf72aedd6f6f0390692))
+* make the reverse attribute path consistent, and stop widening on tokens ([caeefdf](https://github.com/gofhir/ecl/commit/caeefdf3decdef74198b4beff7b9a2b63075e611))
+* **mrcm:** treat domain rows as alternatives and check minimum cardinality ([e825e03](https://github.com/gofhir/ecl/commit/e825e036293a9b13c868d2a65682ec38866e9784))
+* **parser:** model the filter branches that were being dropped ([38d3924](https://github.com/gofhir/ecl/commit/38d3924d9b9959ee9f0df0a2fb921474a8693308))
+* **parser:** reject trailing input and report lexer errors ([ef1a586](https://github.com/gofhir/ecl/commit/ef1a58619d332f50c8576cfd894279709005c204))
+* **scg,sctid:** accept juxtaposed groups, default to equivalentTo, enforce partitions ([b7c1916](https://github.com/gofhir/ecl/commit/b7c1916e75a77fb2ce7a7d9feeedcc0ad85dda24))
+
 ## [1.1.0](https://github.com/gofhir/ecl/compare/v1.0.0...v1.1.0) (2026-04-26)
 
 
