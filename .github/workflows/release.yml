@@ -62,3 +62,49 @@ jobs:
             cat generated-body.md
           } > release-body.md
           gh release edit "$TAG" --notes-file release-body.md
+
+      # The ci.yml major-bump job checks the COMMITS of a pull request. It cannot
+      # see a major that comes from anywhere else, and one did: release-please
+      # proposed 2.0.0 for what was meant to be v1.2.0, because
+      # include-component-in-tag defaults to true in manifest mode, so it looked
+      # for a release tagged "go-ecl-v1.1.0", found none against the real "v1.1.0"
+      # tags, re-read the entire history, and re-counted a "feat(ecl)!:" that had
+      # already shipped in v1.0.0.
+      #
+      # Nothing detected that. The commits were clean; the CONFIGURATION was not.
+      # So this reads what release-please actually decided -- the version in the
+      # manifest on its own branch -- rather than trusting any input to it.
+      - name: A proposed major must be deliberate
+        if: ${{ always() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          manifest_at() {
+            gh api "repos/${GITHUB_REPOSITORY}/contents/.release-please-manifest.json?ref=$1" \
+              --jq .content | base64 -d | jq -r '."."'
+          }
+
+          branch=$(gh pr list --state open --json headRefName \
+            --jq '[.[] | select(.headRefName | startswith("release-please--"))][0].headRefName')
+          if [ -z "$branch" ] || [ "$branch" = "null" ]; then
+            echo "No open release PR, so there is no proposed version to check."
+            exit 0
+          fi
+
+          pr=$(gh pr list --state open --head "$branch" --json number --jq '.[0].number')
+          current=$(manifest_at "${GITHUB_REF_NAME}")
+          proposed=$(manifest_at "$branch")
+          echo "Release PR #${pr} on ${branch}: ${current} -> ${proposed}"
+
+          if [ "${proposed%%.*}" = "${current%%.*}" ]; then
+            echo "Same major; nothing to flag."
+            exit 0
+          fi
+
+          if gh pr view "$pr" --json labels --jq '.labels[].name' | grep -qx 'major-release'; then
+            echo "Major bump proposed, and PR #${pr} is labelled major-release. Deliberate."
+            exit 0
+          fi
+
+          echo "::error::Release PR #${pr} proposes ${proposed}, a MAJOR bump from ${current}. For a Go module that means a /v2 import path and a migration for every consumer. If it is intended, label the PR 'major-release'. If not, the cause is upstream of the PR -- check release-please-config.json and whether the last release's tag is the one release-please looks for."
+          exit 1

@@ -39,6 +39,28 @@ a breaking-change marker. It is a prompt, not a prohibition: label the PR
 `major-release` and it passes. That job exists because a `fix(ecl)!:` was written
 out of habit in this repository for a change that was not breaking.
 
+### The other way a major arrives
+
+A clean set of commits is not enough, and this bit for real. Merging the v1.2.0
+work produced a release PR titled `chore(main): release go-ecl 2.0.0`. The commits
+carried no marker; the **configuration** did the damage.
+
+`include-component-in-tag` defaults to `true` in manifest mode, so with
+`package-name: go-ecl` release-please looked for a release tagged
+`go-ecl-v1.1.0`. The real tags are `v1.1.0`. Finding no match it re-read the
+history from the beginning and re-counted a `feat(ecl)!:` that had already shipped
+in v1.0.0. The config now sets `include-component-in-tag: false`.
+
+The lesson is where the check has to live. `major-bump` inspects a pull request's
+commits and structurally cannot see this. So `release.yml` has a second guard
+that reads what release-please **actually decided** — the version in the manifest
+on its own branch — and fails when the major moves without a `major-release`
+label. Check the decision, not the inputs to it.
+
+A symptom worth recognising: the release PR's changelog listing commits from the
+beginning of the project means release-please did not find the previous release,
+and every already-shipped breaking change is back in scope.
+
 ## Hand-written release notes
 
 release-please builds the Release body from commit **subjects**. That is enough for
