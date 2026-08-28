@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/gofhir/ecl/ecl"
@@ -26,9 +27,17 @@ const (
 	IssueKindDomainViolation      = "domain_violation"
 	IssueKindRangeViolation       = "range_violation"
 	IssueKindCardinalityViolation = "cardinality_violation"
-	IssueKindGroupedViolation     = "grouped_violation"
-	IssueKindUngroupedViolation   = "ungrouped_violation"
-	IssueKindUnknownAttribute     = "unknown_attribute"
+
+	// IssueKindInGroupCardinalityViolation reports too many distinct values of an
+	// attribute inside ONE relationship group. It is separate from
+	// cardinality_violation because the two constrain different things and an
+	// expression can satisfy one while breaking the other: three finding sites in
+	// three groups is fine under a concept cardinality of 0..*, and a violation
+	// under an in-group cardinality of 0..1 only if two of them share a group.
+	IssueKindInGroupCardinalityViolation = "in_group_cardinality_violation"
+	IssueKindGroupedViolation            = "grouped_violation"
+	IssueKindUngroupedViolation          = "ungrouped_violation"
+	IssueKindUnknownAttribute            = "unknown_attribute"
 
 	// IssueKindInvalidRule reports a rule in the model that could not be
 	// applied — typically an unparseable domain or range ECL. It is an issue
@@ -91,8 +100,11 @@ type Issue struct {
 // Cardinality is checked against the model's rules rather than against the
 // attributes present in the expression, so a mandatory attribute that is missing
 // entirely is reported. Multiple domain rows for one attribute are alternatives:
-// the focus concept only has to be in one of them. In-group cardinality
-// (AttributeDomain.InGroupCardinality) is loaded but not yet enforced.
+// the focus concept only has to be in one of them.
+//
+// In-group cardinality (AttributeDomain.InGroupCardinality) is enforced per
+// relationship group; see validateInGroupCardinality, which also records what the
+// specification leaves open about the minimum.
 //
 // A nil expression, model, or provider returns an error.
 func Validate(ctx context.Context, expr *scg.Expression, model *Model, provider ecl.DataProvider) (*Result, error) {
@@ -142,13 +154,10 @@ type validator struct {
 // expr and applies MRCM rules. The pathPrefix is a dotted path that describes
 // the location of expr inside a parent expression (empty for the top level).
 func (v *validator) validateExpression(expr *scg.Expression, pathPrefix string) error {
-	// Per-attribute counts (across all groups) for the cardinality check.
-	counts := make(map[string]int)
-	for _, group := range expr.Refinements {
-		for _, attr := range group.Attributes {
-			counts[attr.Name.SCTID]++
-		}
-	}
+	// Per-attribute counts of DISTINCT VALUES across all groups, for the
+	// concept-level cardinality check. See distinctValueCounts: the specification
+	// counts values, not occurrences.
+	counts := distinctValueCounts(allAttributes(expr))
 
 	for _, focus := range expr.FocusConcepts {
 		for gi, group := range expr.Refinements {
@@ -167,6 +176,9 @@ func (v *validator) validateExpression(expr *scg.Expression, pathPrefix string) 
 		// for every precoordinated code.
 		if len(expr.Refinements) > 0 {
 			if err := v.validateCardinality(focus.SCTID, counts, pathPrefix); err != nil {
+				return err
+			}
+			if err := v.validateInGroupCardinality(focus.SCTID, expr, pathPrefix); err != nil {
 				return err
 			}
 		}
@@ -520,4 +532,251 @@ func joinPath(prefix, segment string) string {
 		return segment
 	}
 	return prefix + "." + segment
+}
+
+// validateInGroupCardinality checks each relationship group against the in-group
+// cardinality of the domain rules applicable to the focus concept.
+//
+// The specification defines the field as
+//
+//	"The number of times the given attribute can be assigned a distinct
+//	 (non-redundant) value within a single relationship group"
+//
+// which is a different constraint from attributeCardinality, not a refinement of
+// it: three finding sites spread over three groups satisfy a concept cardinality
+// of 0..* and an in-group cardinality of 0..1 at the same time, while the same
+// three in ONE group satisfy the first and break the second. So the two checks are
+// independent and report different Kinds.
+//
+// # Only grouped rules, only braced groups
+//
+// A rule with Grouped false describes an attribute that does not live in
+// relationship groups, so its in-group cardinality constrains nothing. And SCG's
+// ungrouped attribute set is not a relationship group — the same reading the
+// evaluator applies to group 0 of PropertiesByGroup — so it is skipped. Counting
+// it as a group would let `a = x, a = y` break an in-group maximum of 1 that says
+// nothing about ungrouped attributes.
+//
+// # What the specification leaves open, and the choice made here
+//
+// The text says how many times an attribute "can be" assigned a value in a group.
+// That settles the MAXIMUM. It does not say whether a MINIMUM applies to every
+// group of the concept or only to groups where the attribute appears, and the two
+// readings differ sharply: under "every group", an in-group cardinality of 1..1 on
+// one attribute makes any group without that attribute a violation.
+//
+// This enforces the minimum only WITHIN GROUPS THAT CONTAIN THE ATTRIBUTE. The
+// reason is asymmetry of harm. Under that reading a real constraint may go
+// unreported; under the other, an expression whose groups are legitimately
+// heterogeneous — a finding with a site group and a separate "due to" group — is
+// accused of violating a rule about an attribute it never put there. This package
+// has already had to remove one accusation of exactly that shape, where a bare
+// precoordinated concept was flagged for a missing mandatory attribute.
+//
+// The consequence, stated so nobody discovers it by surprise: an in-group
+// cardinality of 1..1 behaves like 0..1 here, and a minimum above 1 means "a group
+// that uses this attribute needs at least that many distinct values". If you have
+// MRCM content that depends on the other reading, that is a bug report worth
+// making — this is a decision under an ambiguity, not a conclusion.
+func (v *validator) validateInGroupCardinality(focusID string, expr *scg.Expression, pathPrefix string) error {
+	for gi, group := range expr.Refinements {
+		if !group.Grouped {
+			continue
+		}
+		counts := distinctValueCounts(group.Attributes)
+
+		// Sorted, so Result.Issues is stable across runs.
+		attrIDs := make([]string, 0, len(counts))
+		for attrID := range counts {
+			attrIDs = append(attrIDs, attrID)
+		}
+		sort.Strings(attrIDs)
+
+		for _, attrID := range attrIDs {
+			applicable, _, err := v.applicableDomains(focusID, attrID, v.domains[attrID])
+			if err != nil {
+				return err
+			}
+
+			// Only rows that put the attribute in a group AND state an in-group
+			// cardinality have anything to say.
+			grouped := make([]AttributeDomain, 0, len(applicable))
+			for _, r := range applicable {
+				if r.Grouped && inGroupSpecified(r.InGroupCardinality) {
+					grouped = append(grouped, r)
+				}
+			}
+			if len(grouped) == 0 {
+				continue
+			}
+
+			// Alternatives, as everywhere else: the count only has to fit ONE
+			// applicable row. Requiring every row produces a spurious violation
+			// whenever two rows disagree, which is what the domain and cardinality
+			// checks were both fixed for.
+			count := counts[attrID]
+			satisfied := false
+			for _, r := range grouped {
+				if count >= r.InGroupCardinality.Min &&
+					(r.InGroupCardinality.Max < 0 || count <= r.InGroupCardinality.Max) {
+					satisfied = true
+					break
+				}
+			}
+			if satisfied {
+				continue
+			}
+
+			v.addIssueOnce(Issue{
+				Kind:        IssueKindInGroupCardinalityViolation,
+				AttributeID: attrID,
+				FocusID:     focusID,
+				Message: fmt.Sprintf("attribute %s has %d distinct value(s) in one relationship group on focus %s, which fits none of its MRCM in-group cardinalities (%s)",
+					attrID, count, focusID, inGroupCardinalitySummary(grouped)),
+				Path: joinPath(pathPrefix, fmt.Sprintf("refinement[%d]", gi)),
+			})
+		}
+	}
+	return nil
+}
+
+// allAttributes flattens every attribute of an expression, grouped or not.
+func allAttributes(expr *scg.Expression) []scg.Attribute {
+	var out []scg.Attribute
+	for _, group := range expr.Refinements {
+		out = append(out, group.Attributes...)
+	}
+	return out
+}
+
+// distinctValueCounts counts, per attribute, how many DISTINCT values it is
+// assigned.
+//
+// Both cardinality fields are defined over "a distinct (non-redundant) value", so
+// `363698007 = 74281007, 363698007 = 74281007` is one value asserted twice, not
+// two values. Counting occurrences instead reported a cardinality violation for an
+// expression that merely repeated itself — which a normalizer would collapse and
+// which asserts nothing extra.
+//
+// "Non-redundant" goes further than distinct: two values where one subsumes the
+// other are redundant too, and collapsing those needs subsumption testing against
+// the terminology. That is deliberately NOT done here. It would turn a pure
+// counting step into one that fails when the provider is unavailable, and it can
+// only ever lower a count — so the effect of leaving it out is a violation
+// reported that a fully normalizing implementation would not report, never the
+// reverse. Callers who need it should normalize before validating.
+func distinctValueCounts(attrs []scg.Attribute) map[string]int {
+	seen := make(map[string]map[string]struct{}, len(attrs))
+	for _, attr := range attrs {
+		key := valueKey(attr.Value)
+		vals, ok := seen[attr.Name.SCTID]
+		if !ok {
+			vals = make(map[string]struct{}, 1)
+			seen[attr.Name.SCTID] = vals
+		}
+		vals[key] = struct{}{}
+	}
+
+	out := make(map[string]int, len(seen))
+	for attrID, vals := range seen {
+		out[attrID] = len(vals)
+	}
+	return out
+}
+
+// valueKey renders an attribute value as a comparison key.
+//
+// The prefixes keep the three kinds apart, so a concept 74281007 and the string
+// "74281007" are not accidentally the same value. A nested expression is keyed by
+// its rendered form: two structurally identical nested definitions are one value,
+// and anything else is a distinct one.
+func valueKey(val scg.AttributeValue) string {
+	switch {
+	case val.Concept != nil:
+		return "c:" + val.Concept.SCTID
+	case val.Concrete != nil:
+		return "k:" + val.Concrete.Kind + ":" + concreteText(val.Concrete)
+	case val.Nested != nil:
+		return "n:" + nestedKey(val.Nested)
+	default:
+		return "?"
+	}
+}
+
+func concreteText(c *scg.ConcreteValue) string {
+	switch c.Kind {
+	case "integer":
+		return strconv.FormatInt(c.Int, 10)
+	case "decimal":
+		return strconv.FormatFloat(c.Float, 'f', -1, 64)
+	case "boolean":
+		return strconv.FormatBool(c.Bool)
+	default:
+		return c.String
+	}
+}
+
+// nestedKey renders a nested expression canonically: focus concepts and each
+// group's attributes are sorted, so two expressions that differ only in the order
+// they were written produce the same key. Order carries no meaning in SCG.
+func nestedKey(expr *scg.Expression) string {
+	var b strings.Builder
+	b.WriteString(expr.DefinitionStatus)
+
+	focus := make([]string, 0, len(expr.FocusConcepts))
+	for _, f := range expr.FocusConcepts {
+		focus = append(focus, f.SCTID)
+	}
+	sort.Strings(focus)
+	b.WriteString("|" + strings.Join(focus, "+"))
+
+	groups := make([]string, 0, len(expr.Refinements))
+	for _, g := range expr.Refinements {
+		pairs := make([]string, 0, len(g.Attributes))
+		for _, a := range g.Attributes {
+			pairs = append(pairs, a.Name.SCTID+"="+valueKey(a.Value))
+		}
+		sort.Strings(pairs)
+		prefix := "u:"
+		if g.Grouped {
+			prefix = "g:"
+		}
+		groups = append(groups, prefix+strings.Join(pairs, ","))
+	}
+	sort.Strings(groups)
+	b.WriteString("|" + strings.Join(groups, ";"))
+
+	return b.String()
+}
+
+// inGroupCardinalitySummary renders the in-group cardinalities of some rules, for
+// an issue message.
+func inGroupCardinalitySummary(rules []AttributeDomain) string {
+	parts := make([]string, 0, len(rules))
+	for _, r := range rules {
+		maxText := "*"
+		if r.InGroupCardinality.Max >= 0 {
+			maxText = strconv.Itoa(r.InGroupCardinality.Max)
+		}
+		parts = append(parts, fmt.Sprintf("%d..%s", r.InGroupCardinality.Min, maxText))
+	}
+	return strings.Join(parts, " or ")
+}
+
+// inGroupSpecified reports whether a rule actually states an in-group cardinality.
+//
+// The zero value of Cardinality is {Min: 0, Max: 0}, which read literally means
+// "this attribute may never appear inside a relationship group" — so enforcing it
+// as written would make every AttributeDomain built as a Go literal without the
+// field forbid its own attribute. LoadFromJSON does not have that problem: an
+// absent or empty inGroupCardinality becomes 0..* there. A Model assembled in code
+// has no way to tell "unset" from "0..0".
+//
+// Treated as unset, therefore. The direction of the error matters: this can only
+// fail to enforce a constraint, never invent a violation, and the constraint it
+// gives up is one nothing needs — "never inside a group" is what Grouped false
+// already says, and it is already reported as a grouped_violation. A JSON model
+// that spells out "0..0" is a no-op here and should set "grouped": false instead.
+func inGroupSpecified(c Cardinality) bool {
+	return c.Min != 0 || c.Max != 0
 }
