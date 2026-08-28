@@ -57,6 +57,14 @@ type jsonRange struct {
 //	  ]
 //	}
 //
+// An absent or empty cardinality string means "0..*", i.e. no constraint.
+//
+// One value is worth calling out: "inGroupCardinality": "0..0" is a NO-OP. The
+// validator cannot tell it from the zero value of a Model built in Go, so it
+// treats it as unset -- see inGroupSpecified. To say an attribute must never
+// appear inside a relationship group, set "grouped": false, which is reported as a
+// grouped_violation.
+//
 // Cardinality strings ("0..*", "1..1", etc.) are parsed into Cardinality
 // structs. An empty cardinality string defaults to {0, -1} (i.e. "0..*").
 //

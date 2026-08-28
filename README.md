@@ -27,7 +27,7 @@ ECL is the standard query language for SNOMED CT. Until now, evaluating it from 
 - ✅ **ECL v2.2 evaluator** — hierarchy operators, compound (`AND`/`OR`/`MINUS`), refinements with conjunction **and disjunction**, attribute groups with cardinality, reverse `R`, dot notation, concrete values (integer/decimal/string/boolean), history supplements with MIN/MOD/MAX, Top/Bottom, MemberOf, RefsetContainingAny (`^R`), AltIdentifier
 - ✅ **Filters** — term (word-prefix and `wild`), description type, language, `dialectId`, active, module, effectiveTime, definitionStatus, memberField
 - ✅ **SCG** parser + validator
-- ✅ **MRCM** loader + validator (uses ECL evaluator internally)
+- ✅ **MRCM** loader + validator (uses ECL evaluator internally) — domain, range, grouped, and both cardinalities including **per relationship group**
 - ✅ **SCTID** Verhoeff checksum + partition validation
 - ✅ **136/136** bundled conformance cases pass, all executed by CI
 - ✅ **121/121** of SNOMED International's [official ECL examples](ecl/testdata/official-examples/) parse — the one test suite this project did not write
@@ -49,7 +49,8 @@ bad data:
 | A **negated** term filter with a set of terms — `{{ D term != ("a" "b") }}` | One description row has to fail every value, so it cannot be decomposed: intersecting per-term negations would accept a concept with one row failing the first term and a different row failing the second. The positive set form works. |
 | A cardinality or `!=` on a reverse (`R`) attribute, **unless** the provider implements `InboundRelationshipsProvider` | `RelationshipTargets` returns a `Set`, so it loses the inbound count and the per-type total. With the capability these work. |
 | A reverse (`R`) attribute **inside an attribute group** — `{ R attr = value }` | Braces assert that the clauses share one relationship group *of the focus concept*, and a reverse relationship belongs to the source, so the focus has no group to constrain. Write it outside the braces. See the note below. |
-| `AttributeDomain.InGroupCardinality` (MRCM) | Loaded and exposed, not yet enforced. |
+| An MRCM in-group cardinality **minimum** across groups that do not use the attribute | The specification says how many times an attribute *"can be"* assigned a value in a group, which settles the maximum and leaves the minimum open. Enforced only within groups that contain the attribute, so `1..1` behaves like `0..1`. See `validateInGroupCardinality` for why that direction was chosen. |
+| Subsumption-**redundant** values collapsed before counting cardinality | Both cardinality fields count *"distinct (non-redundant)"* values. Distinctness is enforced; collapsing values where one subsumes the other needs subsumption testing, so it is left to the caller. It can only over-report, never under-report. |
 
 ## Install
 
@@ -210,6 +211,20 @@ for _, issue := range res.Issues {
     fmt.Printf("%s at %s: %s\n", issue.Kind, issue.Path, issue.Message)
 }
 ```
+
+The validator reports seven kinds of issue: `domain_violation`,
+`range_violation`, `cardinality_violation`, `in_group_cardinality_violation`,
+`grouped_violation`, `ungrouped_violation`, `unknown_attribute` — plus
+`invalid_rule` for a rule in the *model* that could not be applied, which is an
+issue rather than an error so one broken rule cannot hide the violations already
+found.
+
+The two cardinalities constrain different things and an expression can satisfy one
+while breaking the other. Three finding sites spread over three groups are fine
+under a concept cardinality of `0..*` *and* an in-group cardinality of `0..1`; the
+same three in one group break the second only. Both count **distinct values**, per
+the specification's *"distinct (non-redundant) value"* — the same value asserted
+twice is one value, not two.
 
 Every snippet in this README is backed by a runnable `Example` in the package it
 documents ([`ecl/example_test.go`](ecl/example_test.go),
