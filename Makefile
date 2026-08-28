@@ -44,11 +44,16 @@ check-upstream:
 # seed corpus; a real campaign wants minutes or hours.
 FUZZTIME ?= 60s
 
-# Fuzzes the parser. Parse is reachable from untrusted input in the use this
-# library is built for, and a crasher lands in ecl/testdata/fuzz/, where it
-# becomes a permanent regression case that `make test` replays.
+# Fuzzes every entry point that takes untrusted input: both parsers and the MRCM
+# loader. A crasher lands in <pkg>/testdata/fuzz/, where it becomes a permanent
+# regression case that `make test` replays.
+#
+# Sequential because -fuzz takes one package at a time, so the wall clock is
+# three times FUZZTIME.
 fuzz:
 	go test ./ecl/ -run '^$$' -fuzz FuzzParse -fuzztime $(FUZZTIME)
+	go test ./scg/ -run '^$$' -fuzz FuzzParse -fuzztime $(FUZZTIME)
+	go test ./mrcm/ -run '^$$' -fuzz FuzzLoadFromBytes -fuzztime $(FUZZTIME)
 
 # ORACLE_URL is the terminology server the differential test compares against.
 # Any FHIR R4 endpoint serving SNOMED CT works; the CSIRO public server needs no

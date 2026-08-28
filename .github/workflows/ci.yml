@@ -211,8 +211,20 @@ jobs:
       # not a fuzzing campaign. Twelve seconds was enough to find a 26-byte input
       # that grew the heap without bound, so a minute is not a token gesture.
       # Run longer locally with `make fuzz FUZZTIME=10m`.
-      - name: Fuzz FuzzParse for 60s
+      # One step per package: -fuzz takes a single package and a single target.
+      # The ECL parser gets the longest budget because it is the one that was
+      # actually broken, and it is the slowest to explore -- ANTLR runs at roughly
+      # 28k executions per second against 220k for the hand-written SCG parser.
+      - name: Fuzz the ECL parser
         run: go test ./ecl/ -run '^$' -fuzz FuzzParse -fuzztime 60s
+
+      - name: Fuzz the SCG parser
+        run: go test ./scg/ -run '^$' -fuzz FuzzParse -fuzztime 30s
+
+      # This one runs the loader AND the validator: a model that parses but then
+      # breaks Validate is the worse bug, because it surfaces far from its cause.
+      - name: Fuzz the MRCM loader
+        run: go test ./mrcm/ -run '^$' -fuzz FuzzLoadFromBytes -fuzztime 30s
 
       # A crasher is written under testdata/fuzz/ and is the whole value of the
       # run: without this, the input that failed dies with the runner and the
@@ -222,5 +234,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fuzz-crashers
-          path: ecl/testdata/fuzz/
+          path: |
+            ecl/testdata/fuzz/
+            scg/testdata/fuzz/
+            mrcm/testdata/fuzz/
           if-no-files-found: ignore

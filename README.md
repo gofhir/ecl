@@ -388,13 +388,20 @@ and the deepest expression among the 121 official examples and 136 conformance
 cases nests **4** levels. Over the limit you get a `*ecl.ParseError`, the same type
 as a syntax error.
 
-**Fuzzed.** `FuzzParse` asserts that no input panics, that a nil tree never comes
-back with a nil error, and that no parse runs away. Run it with `make fuzz`; CI
-runs a 60-second pass per pull request and uploads any crasher. It earned its keep
-twelve seconds after being written by finding `* {{ D term = "C:\temp" }}` — 26
-bytes, an invalid escape someone types by accident — which grew the heap past 5 GB
-without bound. Crashers are committed under
-[`ecl/testdata/fuzz/`](ecl/testdata/fuzz/) and replay as ordinary tests.
+**Fuzzed.** Every entry point that takes untrusted input has a target: both
+parsers and the MRCM loader. Each asserts that no input panics, that a nil result
+never comes back with a nil error, and that nothing runs away; the MRCM one also
+runs the validator, because a model that *parses* but then breaks `Validate` is
+the worse bug — it surfaces far from its cause. Run them with `make fuzz`; CI
+fuzzes on every pull request and uploads any crasher, which is committed under
+`<pkg>/testdata/fuzz/` and replays as an ordinary test.
+
+`ecl.Parse` is the one that was actually broken: twelve seconds after the target
+was written it found `* {{ D term = "C:\temp" }}` — 26 bytes, an invalid escape
+someone types by accident — which grew the heap past 5 GB without bound. The other
+two were clean when measured, at 26.5M and 5.0M executions, which is the reason to
+have the targets rather than the reason not to: that was one afternoon's
+measurement, and these are the property.
 
 ## Conformance suite
 
