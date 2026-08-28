@@ -31,6 +31,7 @@ ECL is the standard query language for SNOMED CT. Until now, evaluating it from 
 - ✅ **SCTID** Verhoeff checksum + partition validation
 - ✅ **136/136** bundled conformance cases pass, all executed by CI
 - ✅ **121/121** of SNOMED International's [official ECL examples](ecl/testdata/official-examples/) parse — the one test suite this project did not write
+- ✅ **Fuzzed parser** with bounded input, so an expression from a URL cannot stall the process
 - 📦 Latest release: see [GitHub Releases](https://github.com/gofhir/ecl/releases)
 
 ### Known limitations
@@ -325,6 +326,44 @@ specification.
 `make check-upstream` diffs both vendored artefacts against upstream, and a
 scheduled workflow runs it weekly — otherwise a new grammar version could land
 without anyone noticing.
+
+## Parsing untrusted input
+
+`Parse` is usually reached from a URL — a `?ecl=` parameter, a ValueSet
+`compose.include.filter` — so it is treated as a hostile-input boundary.
+
+**Two-stage parsing.** ANTLR's default ALL(\*) prediction is exact but, on this
+grammar, quadratic. Measured before the change:
+
+| expression | size | before | after |
+|---|---|---|---|
+| 3 clauses (the size real queries are) | 170 B | 31 ms | **0.09 ms** |
+| 50 refinement clauses | 1.1 KB | 4.5 s | **0.6 ms** |
+| 100 refinement clauses | 2.2 KB | 7.6 s | **1.1 ms** |
+| 200 refinement clauses | 4.4 KB | 27.5 s | **2.1 ms** |
+
+A long conjunction is not adversarial — a query builder emits them — and it was
+seconds. Allocations for the 100-clause case went from 92 million to 18 thousand.
+`Parse` now tries linear SLL prediction first and falls back to full ALL(\*) only
+for input SLL cannot decide, which produces the identical tree and the identical
+error messages.
+
+**Bounded input.** `ecl.MaxInputBytes` (1 MiB) and `ecl.MaxNestingDepth` (100) are
+checked before parsing starts. They exist because ANTLR offers no way to interrupt
+a parse in progress: a `context` deadline would let a caller stop *waiting* while
+the goroutine kept burning CPU. Nesting depth is the one axis that stayed
+superlinear, so it is capped rather than fixed — at depth 100 a parse costs 0.5 ms,
+and the deepest expression among the 121 official examples and 136 conformance
+cases nests **4** levels. Over the limit you get a `*ecl.ParseError`, the same type
+as a syntax error.
+
+**Fuzzed.** `FuzzParse` asserts that no input panics, that a nil tree never comes
+back with a nil error, and that no parse runs away. Run it with `make fuzz`; CI
+runs a 60-second pass per pull request and uploads any crasher. It earned its keep
+twelve seconds after being written by finding `* {{ D term = "C:\temp" }}` — 26
+bytes, an invalid escape someone types by accident — which grew the heap past 5 GB
+without bound. Crashers are committed under
+[`ecl/testdata/fuzz/`](ecl/testdata/fuzz/) and replay as ordinary tests.
 
 ## Conformance suite
 

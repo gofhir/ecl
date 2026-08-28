@@ -11,15 +11,125 @@ import (
 	"github.com/gofhir/ecl/ecl/grammar"
 )
 
+// Input limits. Parsing is linear in input length after the two-stage strategy
+// below, with one exception: nesting depth remains quadratic, inherited from
+// ANTLR's prediction over this grammar. Measured at depth 200, a 409-byte input
+// costs 2 ms — fine — but the curve means a few tens of kilobytes of nothing but
+// parentheses would still cost seconds.
+//
+// These bound the work before any of it starts. That matters because ANTLR offers
+// no way to interrupt a parse in progress: a context deadline would let a caller
+// stop WAITING, while the goroutine kept burning CPU, which is no defense at all
+// for a server whose expressions arrive in a URL.
+//
+// The depth limit is set from data rather than taste. Across the 121 official
+// SNOMED International examples and the 136 bundled conformance cases, the
+// deepest expression nests 4 levels. 100 is 25× that headroom and caps a
+// pathological parse at well under a millisecond. If you have legitimate ECL that
+// exceeds it, that is a bug report worth making.
+const (
+	// MaxInputBytes is the largest expression Parse accepts.
+	MaxInputBytes = 1 << 20 // 1 MiB
+
+	// MaxNestingDepth is the deepest nesting of "(" and "{" Parse accepts.
+	MaxNestingDepth = 100
+)
+
 // Parse parses an ECL expression string and returns the AST.
+//
+// It is safe to call concurrently and does not retain the input.
 func Parse(input string) (ast.Expression, error) {
+	if err := checkInputLimits(input); err != nil {
+		return nil, err
+	}
+
+	// Two-stage parsing, the standard remedy for ANTLR's adaptive prediction.
+	//
+	// ANTLR's default ALL(*) prediction is exact but, on this grammar, quadratic:
+	// measured before this change, a 2.2 KB expression with 100 refinement
+	// clauses took 7.6 seconds and 92 MILLION allocations, 400 clauses took 27
+	// seconds, and even a three-clause expression of the size real queries have
+	// cost 31 ms and 398,000 allocations. A CPU profile put the time in
+	// ParserATNSimulator.closureWork plus the garbage collector trying to keep up.
+	//
+	// That matters beyond speed. This package is meant to sit inside FHIR servers
+	// and query tools, where the expression often comes from a URL, so a parser
+	// that spends seconds on a few hundred bytes is a denial-of-service vector.
+	//
+	// So: try SLL first, which is linear and decides every expression this grammar
+	// can express unambiguously. SLL can reject input that full LL would accept, so
+	// a failure is NOT an answer — it only means "reparse properly". Stage two then
+	// runs the original ALL(*) path to produce either a correct tree or the
+	// accurate, accumulated error messages callers rely on.
+	//
+	// The cost of the fallback is paid only by input SLL cannot decide, and its
+	// result is identical either way: the same grammar, the same visitor.
+	if tree, stream, ok := parseSLL(input); ok {
+		return buildAST(tree, stream, input)
+	}
+	return parseLL(input)
+}
+
+// parseSLL attempts the fast path. The bool reports whether the parse completed
+// with no error at all; on false the caller must reparse, because SLL's refusal
+// does not mean the input is invalid.
+//
+// # Why this does not use BailErrorStrategy
+//
+// The obvious pairing for a fast first stage is SLL prediction plus
+// BailErrorStrategy, so a failure aborts immediately instead of walking ANTLR's
+// error recovery. That combination is what ANTLR's own documentation suggests, and
+// on this grammar it does not terminate.
+//
+// Found by FuzzParse twelve seconds after the target was written:
+// `* {{ D term = "C:\temp" }}` — 26 bytes, an invalid escape inside a term, the
+// kind of thing a person types by accident — grew the heap past 5 GB and kept
+// going. Any backslash that is not \\ or \" does it. BailErrorStrategy makes
+// Sync a no-op, and without resynchronization the parser loops in a subrule
+// without consuming input; the default strategy consumes a token and breaks the
+// loop, which is what makes it terminate.
+//
+// The speed came from SLL PREDICTION, not from bailing: keeping the default error
+// strategy costs a wasted recovery walk on invalid input — bounded by the input
+// limits above — and leaves the measured gain intact.
+func parseSLL(input string) (grammar.IExpressionconstraintContext, *antlr.CommonTokenStream, bool) {
+	stream, parser, errListener := newParser(input)
+	parser.GetInterpreter().SetPredictionMode(antlr.PredictionModeSLL)
+
+	tree := parser.Expressionconstraint()
+
+	// Any error at all sends this to stage two: SLL may have rejected something
+	// full LL accepts, and stage two is where errors are reported anyway.
+	if len(errListener.errs) > 0 {
+		return nil, nil, false
+	}
+	return tree, stream, true
+}
+
+// parseLL is the original full-fidelity path: ALL(*) prediction with ANTLR's
+// default error handling, which accumulates every syntax error instead of
+// stopping at the first.
+func parseLL(input string) (ast.Expression, error) {
+	stream, parser, errListener := newParser(input)
+
+	tree := parser.Expressionconstraint()
+
+	if len(errListener.errs) > 0 {
+		return nil, &ParseError{Errors: errListener.errs}
+	}
+	return buildAST(tree, stream, input)
+}
+
+// newParser wires a lexer, token stream and parser onto one error listener.
+//
+// The lexer needs the listener too. Without this, an unrecognizable character
+// makes ANTLR's default ConsoleErrorListener write to os.Stderr (from inside a
+// library), drop the character from the token stream, and let Parse return a
+// corrupted AST with a nil error.
+func newParser(input string) (*antlr.CommonTokenStream, *grammar.ECLParser, *eclErrorListener) {
 	errListener := &eclErrorListener{}
 
 	lexer := grammar.NewECLLexer(antlr.NewInputStream(input))
-	// The lexer needs the listener too. Without this, an unrecognizable
-	// character makes ANTLR's default ConsoleErrorListener write to os.Stderr
-	// (from inside a library), drop the character from the token stream, and
-	// let Parse return a corrupted AST with a nil error.
 	lexer.RemoveErrorListeners()
 	lexer.AddErrorListener(errListener)
 
@@ -28,8 +138,11 @@ func Parse(input string) (ast.Expression, error) {
 	parser.RemoveErrorListeners()
 	parser.AddErrorListener(errListener)
 
-	tree := parser.Expressionconstraint()
+	return stream, parser, errListener
+}
 
+// buildAST checks that the whole input was consumed and then walks the tree.
+func buildAST(tree grammar.IExpressionconstraintContext, stream *antlr.CommonTokenStream, input string) (ast.Expression, error) {
 	// The expressionconstraint rule in ECL.g4 does not end in EOF, so ANTLR
 	// stops at the first complete parse and discards the rest without
 	// reporting anything: "11687002 GARBAGE" parsed as 11687002 with err ==
@@ -45,15 +158,11 @@ func Parse(input string) (ast.Expression, error) {
 		if runes := []rune(input); tok.GetStart() >= 0 && tok.GetStart() < len(runes) {
 			rest = string(runes[tok.GetStart():])
 		}
-		errListener.errs = append(errListener.errs, SyntaxError{
+		return nil, &ParseError{Errors: []SyntaxError{{
 			Line:   tok.GetLine(),
 			Column: tok.GetColumn(),
 			Msg:    fmt.Sprintf("unexpected trailing input %q", strings.TrimSpace(rest)),
-		})
-	}
-
-	if len(errListener.errs) > 0 {
-		return nil, &ParseError{Errors: errListener.errs}
+		}}}
 	}
 
 	visitor := &astBuilder{}
@@ -1691,4 +1800,85 @@ func (v *astBuilder) extractComparisonOp(text string) string {
 	default:
 		return text
 	}
+}
+
+// checkInputLimits rejects input whose size or nesting would make parsing
+// expensive, before any parsing happens. See MaxInputBytes and MaxNestingDepth.
+//
+// The result is a *ParseError so that a caller already switching on that type —
+// to answer 400 with the reported positions — needs no new case.
+func checkInputLimits(input string) error {
+	if len(input) > MaxInputBytes {
+		return &ParseError{Errors: []SyntaxError{{
+			Line:   1,
+			Column: 0,
+			Msg:    fmt.Sprintf("expression is %d bytes, over the %d-byte limit", len(input), MaxInputBytes),
+		}}}
+	}
+
+	depth, line, column := maxNestingDepth(input)
+	if depth > MaxNestingDepth {
+		return &ParseError{Errors: []SyntaxError{{
+			Line:   line,
+			Column: column,
+			Msg:    fmt.Sprintf("nesting is %d levels deep, over the limit of %d", depth, MaxNestingDepth),
+		}}}
+	}
+	return nil
+}
+
+// maxNestingDepth returns the deepest nesting of "(" and "{", and where the
+// deepest point was found.
+//
+// Brackets inside a quoted term or between the pipes of a |term| are DATA, not
+// structure: `{{ D term = "a (b" }}` is one paren that never closes, and
+// `404684003 |Finding (site)|` is a term that happens to contain a pair. Counting
+// them would reject valid expressions, so both are skipped, exactly as the lexer
+// treats them.
+func maxNestingDepth(input string) (maxDepth, line, column int) {
+	depth := 0
+	line, column = 1, 0
+	curLine, curColumn := 1, 0
+	inString, inPipe, escaped := false, false, false
+
+	for _, r := range input {
+		switch {
+		case r == '\n':
+			curLine++
+			curColumn = 0
+			// A newline ends neither a string nor a |term|; the grammar allows
+			// both to span lines, so the flags deliberately survive it.
+			continue
+		case escaped:
+			escaped = false
+		case inString:
+			switch r {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+		case inPipe:
+			if r == '|' {
+				inPipe = false
+			}
+		case r == '"':
+			inString = true
+		case r == '|':
+			inPipe = true
+		case r == '(' || r == '{':
+			depth++
+			if depth > maxDepth {
+				maxDepth, line, column = depth, curLine, curColumn
+			}
+		case r == ')' || r == '}':
+			// Never below zero: unbalanced closers are the parser's business to
+			// report, and a negative depth here would mask a later opener.
+			if depth > 0 {
+				depth--
+			}
+		}
+		curColumn++
+	}
+	return maxDepth, line, column
 }

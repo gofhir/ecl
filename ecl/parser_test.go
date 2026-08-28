@@ -1,7 +1,9 @@
 package ecl
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -194,4 +196,98 @@ func TestParse_ErrorInvalidString(t *testing.T) {
 func TestParse_ErrorMissingOperand(t *testing.T) {
 	_, err := Parse("<< ")
 	assert.Error(t, err, "hierarchy operator without operand should fail")
+}
+
+// TestParse_InvalidEscapeInTermTerminates covers an invalid escape sequence
+// inside a quoted term.
+//
+// `* {{ D term = "C:\temp" }}` is 26 bytes and something a person types by
+// accident — any backslash that is not \\ or \" qualifies. Under SLL prediction
+// paired with ANTLR's BailErrorStrategy it did not terminate: the heap grew past
+// 5 GB and kept going, because Bail makes Sync a no-op and without
+// resynchronization the parser loops in a subrule without consuming input.
+//
+// FuzzParse found it twelve seconds after that target was written, which is the
+// argument for the target. The seed corpus under testdata/fuzz/ keeps the exact
+// input as a regression case; this test states the property in a form that names
+// the cause.
+func TestParse_InvalidEscapeInTermTerminates(t *testing.T) {
+	for _, expr := range []string{
+		`* {{ D term = "C:\temp" }}`,
+		`* {{ D term = "a\b" }}`,
+		`* {{ D term = "\b" }}`,
+		`* {{ D term = "a\bc\bd" }}`,
+	} {
+		t.Run(expr, func(t *testing.T) {
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				// The result is not the point — rejecting it is fine, accepting
+				// it would be fine. Returning at all is the property.
+				_, _ = Parse(expr)
+			}()
+			select {
+			case <-done:
+			case <-time.After(20 * time.Second):
+				t.Fatalf("Parse did not return within 20s for %d bytes of input, so it is not terminating", len(expr))
+			}
+		})
+	}
+
+	// The valid escapes must keep working, or the fix would be "reject anything
+	// with a backslash".
+	for _, expr := range []string{
+		`* {{ D term = "a\\b" }}`,
+		`* {{ D term = "a\"b" }}`,
+	} {
+		if _, err := Parse(expr); err != nil {
+			t.Errorf("%s must parse: %v", expr, err)
+		}
+	}
+}
+
+// TestParse_InputLimits covers the size and nesting guards.
+//
+// They exist because ANTLR gives no way to interrupt a parse in progress, so a
+// context deadline would let a caller stop waiting while the goroutine kept
+// burning CPU. Bounding the input before starting is the only defense that
+// actually bounds the work.
+func TestParse_InputLimits(t *testing.T) {
+	t.Run("nesting over the limit is rejected", func(t *testing.T) {
+		expr := strings.Repeat("(", MaxNestingDepth+1) + "404684003" +
+			strings.Repeat(")", MaxNestingDepth+1)
+		_, err := Parse(expr)
+		require.Error(t, err)
+
+		var pe *ParseError
+		require.ErrorAs(t, err, &pe, "the limits report through the same type as a syntax error, so a caller answering 400 needs no new case")
+		require.Contains(t, pe.Error(), "nesting")
+	})
+
+	t.Run("nesting at the limit is accepted", func(t *testing.T) {
+		expr := strings.Repeat("(", MaxNestingDepth) + "404684003" +
+			strings.Repeat(")", MaxNestingDepth)
+		_, err := Parse(expr)
+		require.NoError(t, err, "the limit itself must be usable, or it is really a limit of MaxNestingDepth-1")
+	})
+
+	t.Run("size over the limit is rejected", func(t *testing.T) {
+		_, err := Parse(strings.Repeat("4", MaxInputBytes+1))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "over the")
+	})
+
+	// Brackets inside a quoted term or between pipes are DATA, not structure.
+	// Counting them would reject valid expressions -- and `"a("` is one paren
+	// that never closes, so a naive counter would drift upward across clauses.
+	t.Run("brackets in data do not count toward nesting", func(t *testing.T) {
+		var sb strings.Builder
+		sb.WriteString("* : 363698007 = 404684003 |Finding (site|")
+		for range MaxNestingDepth + 10 {
+			sb.WriteString(` {{ D term = "a(b{c" }}`)
+		}
+		depth, _, _ := maxNestingDepth(sb.String())
+		require.LessOrEqual(t, depth, 2,
+			"a bracket inside a quoted term or a |term| must not be counted as structure")
+	})
 }

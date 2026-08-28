@@ -1,4 +1,4 @@
-.PHONY: test test-race lint tidy generate conformance check check-upstream oracle
+.PHONY: test test-race lint tidy generate conformance check check-upstream oracle fuzz
 
 # ANTLR_VERSION must match the version the committed parser was generated with,
 # which the header of ecl/grammar/ecl_parser.go records. Pin it: generating with
@@ -39,6 +39,16 @@ check: lint test-race conformance
 # schedule in CI instead of blocking a commit.
 check-upstream:
 	./scripts/check-upstream.sh
+
+# FUZZTIME is how long to fuzz. CI uses 60s as a regression net over the committed
+# seed corpus; a real campaign wants minutes or hours.
+FUZZTIME ?= 60s
+
+# Fuzzes the parser. Parse is reachable from untrusted input in the use this
+# library is built for, and a crasher lands in ecl/testdata/fuzz/, where it
+# becomes a permanent regression case that `make test` replays.
+fuzz:
+	go test ./ecl/ -run '^$$' -fuzz FuzzParse -fuzztime $(FUZZTIME)
 
 # ORACLE_URL is the terminology server the differential test compares against.
 # Any FHIR R4 endpoint serving SNOMED CT works; the CSIRO public server needs no
