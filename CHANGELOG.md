@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.0](https://github.com/gofhir/ecl/compare/v1.3.0...v1.4.0) (2026-08-28)
+
+
+### Features
+
+* **mrcm:** enforce in-group cardinality, and count distinct values ([6438076](https://github.com/gofhir/ecl/commit/6438076b75cf03bdcfa8b755799c006ad4b4c3fa))
+* **mrcm:** enforce in-group cardinality, and count distinct values ([da4ee82](https://github.com/gofhir/ecl/commit/da4ee821c119bfb8e8e50b9f062081bfbec8d15a))
+
 ## [1.3.0](https://github.com/gofhir/ecl/compare/v1.2.0...v1.3.0) (2026-08-28)
 
 
