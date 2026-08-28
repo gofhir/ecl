@@ -324,15 +324,31 @@ That is where every semantic bug found so far actually lived.
 
 ```
 $ make oracle
-28 agreed (0 of them vacuously, on the empty set), 1 skipped, of 29 cases;
-60 HTTP requests in 28s
+35 agreed (0 of them vacuously, on the empty set), 4 skipped, of 39 cases;
+102 HTTP requests in 40s
 ```
 
-The one skip is reverse cardinality, which needs `InboundRelationshipsProvider`;
-the harness does not implement it, so this library correctly reports the construct
-unsupported instead of guessing. Agreement on an empty set is counted separately
-and never as evidence — two implementations that both return nothing agree for any
-reason at all.
+It covers set algebra, refinements, cardinality, negation, attribute groups,
+concrete values, dot notation, reverse attributes, reference sets and history
+supplements. Agreement on an empty set is counted separately and never as
+evidence — two implementations that both return nothing agree for any reason at
+all.
+
+The four skips are each a stated reason rather than a silence:
+
+- **Reverse cardinality** needs `InboundRelationshipsProvider`, which the harness
+  does not implement, so this library correctly reports the construct unsupported
+  instead of guessing.
+- **The three `{{ +HISTORY-MAX }}` cases** are blocked by a defect in the server,
+  not in either implementation. Resolving the widest profile means a member filter
+  over every association reference set, and `r4.ontoserver.csiro.au` answers HTTP
+  500 with `NullPointerException: Cannot invoke "java.util.Map.get(Object)"` for
+  two of them — `1186924009 |PARTIALLY EQUIVALENT TO|` and `1186921001 |POSSIBLY
+  REPLACED BY|`, the two most recently added — while evaluating
+  `{{ +HISTORY-MAX }}` itself without trouble. Dropping the reference sets it
+  cannot answer would compare a partial result against a complete one and blame
+  the evaluator, so the harness reports and skips. `MIN` and `MOD` do agree, which
+  is what exercises the profile mapping.
 
 It is not part of `make check`: it needs network, and a divergence needs triage
 rather than a red build. The server is another implementation, not the

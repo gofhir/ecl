@@ -617,11 +617,20 @@ func historyRefsetsForProfile(profile string) []string {
 	case "MIN", "HISTORY-MIN":
 		return []string{"900000000000527005"} // SAME_AS only
 	case "MOD", "HISTORY-MOD":
+		// The SCTIDs are right and three of the four labels used to be wrong:
+		// 900000000000528000 is WAS A (not REPLACED BY), 900000000000526001 is
+		// REPLACED BY (not WAS A), and 900000000000530003 is ALTERNATIVE (not
+		// MOVED TO, which is 900000000000524003 and belongs to MAX only).
+		// Confirmed against the terminology: `< 900000000000522004` lists all
+		// eleven association reference sets with their names.
+		//
+		// internal/oracle mirrors this list so the differential test can check it
+		// against a real terminology server. The copy is manual: change both.
 		return []string{
-			"900000000000527005", // SAME_AS
-			"900000000000528000", // REPLACED_BY
-			"900000000000526001", // WAS_A
-			"900000000000530003", // MOVED_TO
+			"900000000000527005", // SAME AS
+			"900000000000526001", // REPLACED BY
+			"900000000000528000", // WAS A
+			"900000000000530003", // ALTERNATIVE
 		}
 	default:
 		return nil // MAX / empty / unknown → all

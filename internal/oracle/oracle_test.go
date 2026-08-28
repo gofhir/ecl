@@ -63,6 +63,20 @@ func TestDifferential(t *testing.T) {
 				t.Fatalf("the corpus expression does not parse, which is a corpus defect: %v", err)
 			}
 
+			// A case guarded by Needs is skipped when this server's edition does
+			// not carry the data it names, rather than reported as a divergence.
+			if c.Needs != "" {
+				probe, err := client.ExpandECL(ctx, c.Needs)
+				if err != nil {
+					skipped++
+					t.Skipf("could not probe for the data this case needs (%s): %v", c.Needs, err)
+				}
+				if len(probe) == 0 {
+					skipped++
+					t.Skipf("this server has no content for %s, so the case says nothing about the evaluator", c.Needs)
+				}
+			}
+
 			ours, ourErr := ecl.Evaluate(ctx, expr, provider)
 
 			switch {
@@ -75,6 +89,13 @@ func TestDifferential(t *testing.T) {
 			case errors.Is(ourErr, oracle.ErrUnreachable):
 				skipped++
 				t.Skipf("server unreachable, so nothing was compared:\n  %v", ourErr)
+			case errors.Is(ourErr, oracle.ErrServerRejected):
+				// The server could not answer one of the PRIMITIVES, so this side
+				// has no result to compare. It is not a divergence and it is not
+				// this library's defect — but it is worth reading, because it names
+				// what the server would not answer.
+				skipped++
+				t.Skipf("the server could not answer a primitive this case needs:\n  %v", ourErr)
 			case errors.Is(ourErr, oracle.ErrTooLarge):
 				t.Fatalf("corpus defect — bound the expression instead of raising the cap:\n  %v", ourErr)
 			case ourErr != nil:
