@@ -917,3 +917,77 @@ func TestValidate_InGroupCardinality_RowsAreAlternatives(t *testing.T) {
 	assert.True(t, res.Valid,
 		"two values fit the second row, which is enough; issues: %+v", res.Issues)
 }
+
+// TestDistinctValueCounts_ConcreteValues covers the concrete-value half of the
+// distinctness key, which the expression-level tests never reach: they all use
+// concept-valued attributes.
+//
+// The kind prefix is what keeps `#1`, `#1.0`, `"1"` and `true` apart. Without it
+// they all render as "1" and collapse into one value, so a group asserting an
+// integer and a decimal would count as one — silently, since nothing else in the
+// suite exercises this path. That is the regression this test exists to catch.
+func TestDistinctValueCounts_ConcreteValues(t *testing.T) {
+	attrs := func(t *testing.T, expr string) []scg.Attribute {
+		t.Helper()
+		return allAttributes(mustParseSCG(t, expr))
+	}
+
+	t.Run("the same value twice is one", func(t *testing.T) {
+		assert.Equal(t, 1, distinctValueCounts(attrs(t, `22298006:{1142139005=#500,1142139005=#500}`))["1142139005"])
+		assert.Equal(t, 1, distinctValueCounts(attrs(t, `22298006:{1142139005="a",1142139005="a"}`))["1142139005"])
+	})
+
+	t.Run("different values are different", func(t *testing.T) {
+		assert.Equal(t, 2, distinctValueCounts(attrs(t, `22298006:{1142139005=#500,1142139005=#501}`))["1142139005"])
+	})
+
+	t.Run("the kind is part of the value", func(t *testing.T) {
+		for _, expr := range []string{
+			`22298006:{1142139005=#1,1142139005=#1.0}`, // integer vs decimal
+			`22298006:{1142139005=#1,1142139005="1"}`,  // integer vs string
+			`22298006:{1142139005=true,1142139005=#1}`, // boolean vs integer
+		} {
+			assert.Equalf(t, 2, distinctValueCounts(attrs(t, expr))["1142139005"],
+				"values of different kinds must not collapse: %s", expr)
+		}
+	})
+
+	t.Run("a concept is never a concrete value", func(t *testing.T) {
+		assert.NotEqual(t,
+			valueKey(scg.AttributeValue{Concept: &scg.ConceptRef{SCTID: "74281007"}}),
+			valueKey(scg.AttributeValue{Concrete: &scg.ConcreteValue{Kind: "string", String: "74281007"}}),
+			"a concept 74281007 and the string \"74281007\" are different values")
+	})
+}
+
+// TestValidate_Cardinality_DistinctValuesTightenTheMinimum covers the
+// distinct-value fix pointing the other way.
+//
+// Counting occurrences meant a MINIMUM could be satisfied by repetition: two
+// copies of one finding site met a cardinality of 2..*. They are one distinct
+// value and no longer do. The behavior is stricter than before, which is the
+// opposite direction from the maximum case and the reason the release notes list
+// three shapes rather than two.
+func TestValidate_Cardinality_DistinctValuesTightenTheMinimum(t *testing.T) {
+	model := &Model{
+		Domains: []AttributeDomain{{
+			AttributeID: "363698007", DomainECL: "<< 404684003", Grouped: true,
+			Cardinality:        Cardinality{Min: 2, Max: -1},
+			InGroupCardinality: Cardinality{Min: 0, Max: -1},
+			RuleStrengthID:     RuleStrengthMandatory,
+		}},
+		Ranges: []AttributeRange{{AttributeID: "363698007", RangeECL: "<< 442083009", RuleStrengthID: RuleStrengthMandatory}},
+	}
+
+	repeated := mustParseSCG(t, "22298006:{363698007=74281007}{363698007=74281007}")
+	res, err := Validate(context.Background(), repeated, model, newTestProvider())
+	require.NoError(t, err)
+	assert.Len(t, issuesOfKind(res, IssueKindCardinalityViolation), 1,
+		"repeating one value must not satisfy a minimum of 2; issues: %+v", res.Issues)
+
+	distinct := mustParseSCG(t, "22298006:{363698007=74281007}{363698007=425391005}")
+	res, err = Validate(context.Background(), distinct, model, newTestProvider())
+	require.NoError(t, err)
+	assert.Empty(t, issuesOfKind(res, IssueKindCardinalityViolation),
+		"two distinct values satisfy it; issues: %+v", res.Issues)
+}
