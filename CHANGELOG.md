@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.3.0](https://github.com/gofhir/ecl/compare/v1.2.0...v1.3.0) (2026-08-28)
+
+
+### Features
+
+* **ecl:** make parsing linear, bound the input, and fuzz it ([3bb4f1a](https://github.com/gofhir/ecl/commit/3bb4f1a859106cd81b224d7cdeaa20cf82e2e27e))
+* **ecl:** make parsing linear, bound the input, and fuzz it ([294f083](https://github.com/gofhir/ecl/commit/294f08370a4b3f8e21aff40ec933497fa7724d5b))
+
 ## [1.2.0](https://github.com/gofhir/ecl/compare/v1.1.0...v1.2.0) (2026-08-27)
 
 
