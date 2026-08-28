@@ -14,6 +14,17 @@ type Case struct {
 	// in the corpus: a case that only exercises a primitive compares the server
 	// against itself and proves nothing.
 	Exercises string
+
+	// Needs is an optional ECL probe. When the server answers it with nothing, the
+	// case is SKIPPED rather than failed.
+	//
+	// Most of the corpus names concepts every SNOMED CT edition has. Reference
+	// sets are not like that — the public server this was developed against
+	// serves the Australian edition, and its reference sets are not in the
+	// International release. Without this guard, pointing `make oracle` at a
+	// different server would report edition differences as divergences, which is
+	// the one thing a differential test must never do.
+	Needs string
 }
 
 // Corpus is the set of expressions the differential test runs.
@@ -177,6 +188,67 @@ var Corpus = []Case{
 	{
 		Expr:      "<< 74281007 : [1..1] R 363698007 = << 22298006",
 		Exercises: "reverse CARDINALITY — needs InboundRelationshipsProvider, so this case is expected to report unsupported rather than diverge",
+	},
+
+	// ── Reference sets ───────────────────────────────────────────────────────
+	// Guarded with Needs: these name a reference set of one edition. `^ X` on its
+	// own is a passthrough and proves nothing, so every case composes it.
+	{
+		Expr:      "(^ 142341000036103) MINUS (^ 142341000036103 : 363698007 = *)",
+		Exercises: "refset membership as an operand of exclusion, against a refinement of itself",
+		Needs:     "^ 142341000036103",
+	},
+	{
+		Expr:      "^ 142341000036103 : 363698007 = 74281007",
+		Exercises: "refining refset members",
+		Needs:     "^ 142341000036103",
+	},
+	{
+		Expr:      "(^ 1164231000168107) OR (^ 1200161000168100)",
+		Exercises: "union of two refsets, which the provider answers as one query per call",
+		Needs:     "(^ 1164231000168107) OR (^ 1200161000168100)",
+	},
+	{
+		// The hierarchy is deliberately a small one. `<< 404684003` looks like the
+		// natural choice and expands to 129,829 concepts, far past the cap — the
+		// harness reported it as a corpus defect, which is what that check is for.
+		Expr:      "(^ 142341000036103) AND (<< 271807003)",
+		Exercises: "refset membership intersected with a hierarchy, neither side dominating",
+		Needs:     "^ 142341000036103",
+	},
+
+	// ── History supplements ──────────────────────────────────────────────────
+	// These are the highest-value cases in the corpus. The profile is resolved
+	// PROVIDER-side by contract, so the harness maps MIN/MOD/MAX to association
+	// reference sets itself, mirroring what ecl/providertest/fixture.go recommends
+	// to implementors. The server resolves `{{ +HISTORY-MOD }}` with its own
+	// mapping. Agreement therefore checks this project's recommendation against a
+	// real terminology server, and the three profiles must produce three different
+	// answers or the comparison is not discriminating.
+	//
+	// The direction is what makes them worth having: the input concepts are the
+	// association TARGETS and the result is the INACTIVE concepts pointing at them.
+	// Reversing that made `{{ +HISTORY }}` a silent no-op for every realistic
+	// input, which this project shipped once.
+	{
+		Expr:      "22298006 {{ +HISTORY-MIN }}",
+		Exercises: "the narrowest history profile — SAME AS only",
+	},
+	{
+		Expr:      "22298006 {{ +HISTORY-MOD }}",
+		Exercises: "the middle profile, which must differ from both MIN and MAX",
+	},
+	{
+		Expr:      "22298006 {{ +HISTORY-MAX }}",
+		Exercises: "every association reference set, discovered from the terminology rather than hardcoded",
+	},
+	{
+		Expr:      "(<< 22298006) {{ +HISTORY-MAX }}",
+		Exercises: "a history supplement over a set rather than a single concept",
+	},
+	{
+		Expr:      "(22298006 {{ +HISTORY-MAX }}) MINUS 22298006",
+		Exercises: "the supplement as an operand, which isolates the historical concepts",
 	},
 
 	// ── Nesting ──────────────────────────────────────────────────────────────

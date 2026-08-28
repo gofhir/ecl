@@ -49,9 +49,7 @@ var (
 //	                          word-prefix semantics, per-row negation or the
 //	                          type/language/acceptability axes combined
 //	FilterConcepts            module and effectiveTime are not exposed per concept
-//	RefsetMembers             expressible, but the corpus does not need it
-//	RefsetsContainingMembers  no inverse-membership operation
-//	HistoricalAssociations    needs the association refsets, not exposed
+//	RefsetsContainingMembers  the server rejects the ^R operator
 //	ResolveIdentifier         needs alternate identifier refsets
 //	MatchDialect              acceptability is not exposed per description
 //	RefsetMembersFiltered     member fields are not exposed
@@ -289,19 +287,111 @@ func (p *Provider) FilterConcepts(context.Context, ecl.Set, ecl.ConceptFilterOpt
 	return nil, fmt.Errorf("%w: FilterConcepts (module and effectiveTime are not exposed per concept)", ErrNotAnswerable)
 }
 
-// RefsetMembers is not answerable; see the table on Provider.
-func (p *Provider) RefsetMembers(context.Context, []string) (ecl.Set, error) {
-	return nil, fmt.Errorf("%w: RefsetMembers", ErrNotAnswerable)
+// RefsetMembers is the "^" operator, which ECL expresses directly.
+//
+// Several reference sets become a disjunction of "^" terms rather than one "^"
+// over a parenthesised disjunction: the obvious `^ (a OR b)` is refused by
+// Ontoserver with HTTP 422, and so is `^ (a)` for a single one.
+func (p *Provider) RefsetMembers(ctx context.Context, refsetIDs []string) (ecl.Set, error) {
+	if len(refsetIDs) == 0 {
+		return ecl.NewSet(), nil
+	}
+	ids := append([]string(nil), refsetIDs...)
+	sort.Strings(ids)
+
+	terms := make([]string, 0, len(ids))
+	for _, id := range ids {
+		terms = append(terms, "^ "+id)
+	}
+	return p.expand(ctx, strings.Join(terms, " OR "))
 }
 
 // RefsetsContainingMembers is not answerable; see the table on Provider.
 func (p *Provider) RefsetsContainingMembers(context.Context, []string) (ecl.Set, error) {
-	return nil, fmt.Errorf("%w: RefsetsContainingMembers (no inverse-membership operation)", ErrNotAnswerable)
+	return nil, fmt.Errorf("%w: RefsetsContainingMembers (the server rejects the ^R operator)", ErrNotAnswerable)
 }
 
-// HistoricalAssociations is not answerable; see the table on Provider.
-func (p *Provider) HistoricalAssociations(context.Context, ecl.Set, string) (ecl.Set, error) {
-	return nil, fmt.Errorf("%w: HistoricalAssociations (the association refsets are not exposed)", ErrNotAnswerable)
+// historyAssociationParent is the parent of every historical association
+// reference set. Expanding its descendants is how the MAX profile discovers the
+// full list, rather than hardcoding one: an edition may carry association refsets
+// this file has never heard of, and the International release has added two since
+// the profiles were specified (PARTIALLY EQUIVALENT TO, POSSIBLY REPLACED BY).
+const historyAssociationParent = "900000000000522004"
+
+// historyRefsetsForProfile mirrors the mapping in
+// ecl/providertest/fixture.go — this project's recommendation to provider
+// implementors, since the profile is resolved provider-side by contract.
+//
+// Duplicating it here is deliberate and is the point of the exercise: the server
+// resolves `{{ +HISTORY-MOD }}` with ITS OWN mapping, so a corpus case comparing
+// the two checks the recommendation against a real terminology server rather than
+// against itself. If the fixture's list changes, this must change with it — and if
+// they ever disagree, the differential test says so.
+//
+// An empty result means the MAX profile: every association reference set.
+func historyRefsetsForProfile(profile string) []string {
+	switch profile {
+	case "MIN", "HISTORY-MIN":
+		return []string{"900000000000527005"} // SAME AS
+	case "MOD", "HISTORY-MOD":
+		return []string{
+			"900000000000527005", // SAME AS
+			"900000000000526001", // REPLACED BY
+			"900000000000528000", // WAS A
+			"900000000000530003", // ALTERNATIVE
+		}
+	default:
+		return nil // MAX, empty, or unknown
+	}
+}
+
+// HistoricalAssociations returns the INACTIVE concepts that were replaced by the
+// given ones, which the specification defines as
+//
+//	^ 900000000000527005 {{ M targetComponentId = (X) }}
+//
+// per association reference set of the profile. The direction matters and is the
+// opposite of what one might assume: the input concepts are the association
+// TARGETS, and the result is the historical concepts pointing at them. A provider
+// that expands active concepts to their replacements instead makes
+// `{{ +HISTORY }}` a silent no-op for every realistic input, which is a bug this
+// project shipped once.
+func (p *Provider) HistoricalAssociations(ctx context.Context, conceptIDs ecl.Set, profile string) (ecl.Set, error) {
+	if conceptIDs == nil || conceptIDs.Len() == 0 {
+		return ecl.NewSet(), nil
+	}
+
+	refsets := historyRefsetsForProfile(profile)
+	if len(refsets) == 0 {
+		all, err := p.expand(ctx, "< "+historyAssociationParent)
+		if err != nil {
+			return nil, err
+		}
+		refsets = sorted(all)
+	}
+
+	targets := disjunction(sorted(conceptIDs))
+	out := ecl.NewSet()
+	for _, refset := range refsets {
+		got, err := p.expand(ctx, "^ "+refset+" {{ M targetComponentId = ("+targets+") }}")
+		if err != nil {
+			// Named, because at least one server cannot answer this form for
+			// every association reference set and the failure is otherwise
+			// indistinguishable from a general outage. Measured on
+			// r4.ontoserver.csiro.au: 1186924009 |PARTIALLY EQUIVALENT TO| and
+			// 1186921001 |POSSIBLY REPLACED BY| — the two most recently added —
+			// answer HTTP 500 with a NullPointerException, while the same server
+			// evaluates `{{ +HISTORY-MAX }}` itself without trouble.
+			//
+			// Dropping the failed reference set and carrying on would be worse
+			// than reporting: the result would silently omit whatever it holds,
+			// and the differential test would then compare a partial answer
+			// against a complete one and blame the evaluator.
+			return nil, fmt.Errorf("association reference set %s: %w", refset, err)
+		}
+		out = out.Union(got)
+	}
+	return out, nil
 }
 
 // ResolveIdentifier is not answerable; see the table on Provider.

@@ -37,6 +37,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -378,12 +379,30 @@ func (c *Client) post(ctx context.Context, path string, body []byte, into any) e
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// A batch Bundle answers 200 with per-entry statuses, and $expand answers 200
-	// or an OperationOutcome with a 4xx. Anything else is not something to parse.
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("%w: reading HTTP %d: %w", ErrUnreachable, resp.StatusCode, err)
+	}
+
+	// A 5xx is not automatically "the server is down". A terminology server can
+	// fail on one particular query while answering everything else, and it says so
+	// in an OperationOutcome — measured: a member filter over certain association
+	// reference sets returns 500 with a NullPointerException while the rest of the
+	// corpus runs fine. Classifying that as unreachable would tell the reader to
+	// check the network when the finding is a server defect on specific content, so
+	// a 5xx that carries diagnostics is reported as a rejection.
 	if resp.StatusCode >= 500 {
+		var out struct {
+			ResourceType string  `json:"resourceType"`
+			Issue        []issue `json:"issue"`
+		}
+		if json.Unmarshal(raw, &out) == nil && out.ResourceType == "OperationOutcome" {
+			return fmt.Errorf("%w: HTTP %d: %s", ErrServerRejected, resp.StatusCode, diagnostics(out.Issue))
+		}
 		return fmt.Errorf("%w: HTTP %d from %s", ErrUnreachable, resp.StatusCode, c.baseURL+path)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(into); err != nil {
+
+	if err := json.Unmarshal(raw, into); err != nil {
 		return fmt.Errorf("%w: decoding HTTP %d: %w", ErrServerRejected, resp.StatusCode, err)
 	}
 	return nil
