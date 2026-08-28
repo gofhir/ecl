@@ -557,27 +557,37 @@ func joinPath(prefix, segment string) string {
 // it as a group would let `a = x, a = y` break an in-group maximum of 1 that says
 // nothing about ungrouped attributes.
 //
-// # What the specification leaves open, and the choice made here
+// # The minimum, and why it applies only where the attribute is
 //
-// The text says how many times an attribute "can be" assigned a value in a group.
-// That settles the MAXIMUM. It does not say whether a MINIMUM applies to every
-// group of the concept or only to groups where the attribute appears, and the two
+// The specification text settles the MAXIMUM — how many times an attribute "can
+// be" assigned a value in a group — and does not say whether a MINIMUM applies to
+// every group of the concept or only to groups where the attribute appears. The
 // readings differ sharply: under "every group", an in-group cardinality of 1..1 on
 // one attribute makes any group without that attribute a violation.
 //
-// This enforces the minimum only WITHIN GROUPS THAT CONTAIN THE ATTRIBUTE. The
-// reason is asymmetry of harm. Under that reading a real constraint may go
-// unreported; under the other, an expression whose groups are legitimately
-// heterogeneous — a finding with a site group and a separate "due to" group — is
-// accused of violating a rule about an attribute it never put there. This package
-// has already had to remove one accusation of exactly that shape, where a bare
-// precoordinated concept was flagged for a missing mandatory attribute.
+// The reference implementation settles it. SNOMED International's Snowstorm
+// generates an ECL attribute rule from each MRCM row, rendering the concept
+// cardinality as a GROUP cardinality and the in-group cardinality as the attribute
+// cardinality INSIDE that group. From its own tests
+// (MRCMDomainTemplatesAndRuleGeneratorTest):
 //
-// The consequence, stated so nobody discovers it by surprise: an in-group
-// cardinality of 1..1 behaves like 0..1 here, and a minimum above 1 means "a group
-// that uses this attribute needs at least that many distinct values". If you have
-// MRCM content that depends on the other reading, that is a bug report worth
-// making — this is a decision under an ambiguity, not a conclusion.
+//	<< 404684003 |Clinical finding|: [0..*] { [0..1] 255234002 |After| = ... }
+//
+// Under ECL — the language this repository implements — `[0..*]` on the group
+// means zero or more MATCHING groups, so a concept whose groups do not contain the
+// attribute satisfies the rule trivially. The inner `[0..1]` constrains only the
+// groups that participate. An in-group minimum therefore never demands the
+// attribute in a group that does not use it, which is what this enforces.
+//
+// The consequence, stated so nobody meets it by surprise: an in-group cardinality
+// of 1..1 behaves like 0..1, and a minimum above 1 means "a group that uses this
+// attribute needs at least that many distinct values".
+//
+// It is also the safe direction independently of the evidence. Under the other
+// reading, an expression whose groups are legitimately heterogeneous — a finding
+// with a site group and a separate "due to" group — is accused of violating a rule
+// about an attribute it never put there, and this package has already had to
+// remove one accusation of exactly that shape.
 func (v *validator) validateInGroupCardinality(focusID string, expr *scg.Expression, pathPrefix string) error {
 	for gi, group := range expr.Refinements {
 		if !group.Grouped {

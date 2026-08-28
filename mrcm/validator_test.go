@@ -827,16 +827,19 @@ func TestValidate_InGroupCardinality_ZeroValueIsUnset(t *testing.T) {
 }
 
 // TestValidate_InGroupCardinality_MinimumAppliesWhereTheAttributeIs pins the
-// choice made under an ambiguity in the specification.
+// reading of the minimum.
 //
-// The text says how many times an attribute "can be" assigned a value in a group,
-// which settles the maximum and leaves the minimum open: it does not say whether a
-// minimum applies to EVERY group of the concept or only to groups where the
-// attribute appears. This enforces the latter, because the former accuses an
-// expression whose groups are legitimately heterogeneous.
+// The specification text settles the maximum and leaves the minimum open: it does
+// not say whether a minimum applies to EVERY group of the concept or only to
+// groups where the attribute appears. SNOMED International's Snowstorm settles it
+// by rendering each MRCM row as an ECL rule of the form
 //
-// If that decision is ever revisited, this test is the one to change, and changing
-// it should be deliberate rather than a side effect.
+//	<< 404684003 |Clinical finding|: [0..*] { [0..1] 255234002 |After| = ... }
+//
+// where the in-group cardinality is the attribute cardinality inside a group whose
+// own cardinality is 0..*. Under ECL that means zero or more MATCHING groups, so a
+// concept with no such group satisfies it and the inner minimum constrains only
+// the groups that participate. The third subtest is that property.
 func TestValidate_InGroupCardinality_MinimumAppliesWhereTheAttributeIs(t *testing.T) {
 	// "a group using this attribute needs two distinct values"
 	model := &Model{
