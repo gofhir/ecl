@@ -324,8 +324,8 @@ That is where every semantic bug found so far actually lived.
 
 ```
 $ make oracle
-34 agreed (0 of them vacuously, on the empty set), 4 skipped, of 38 cases;
-97 HTTP requests in 38s
+35 agreed (0 of them vacuously, on the empty set), 4 skipped, of 39 cases;
+102 HTTP requests in 40s
 ```
 
 It covers set algebra, refinements, cardinality, negation, attribute groups,

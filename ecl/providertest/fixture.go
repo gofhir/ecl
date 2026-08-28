@@ -623,6 +623,9 @@ func historyRefsetsForProfile(profile string) []string {
 		// MOVED TO, which is 900000000000524003 and belongs to MAX only).
 		// Confirmed against the terminology: `< 900000000000522004` lists all
 		// eleven association reference sets with their names.
+		//
+		// internal/oracle mirrors this list so the differential test can check it
+		// against a real terminology server. The copy is manual: change both.
 		return []string{
 			"900000000000527005", // SAME AS
 			"900000000000526001", // REPLACED BY

@@ -243,8 +243,16 @@ var Corpus = []Case{
 		Exercises: "every association reference set, discovered from the terminology rather than hardcoded",
 	},
 	{
+		// On MOD rather than MAX, and that matters: MAX is blocked by a server
+		// defect, so a set-valued case written only against MAX would leave the
+		// multi-target member filter never executed in a passing run. Measured,
+		// this one sends 135 targets through four reference sets.
+		Expr:      "(<< 22298006) {{ +HISTORY-MOD }}",
+		Exercises: "a history supplement over a SET, which is the only case that sends more than one target to the member filter",
+	},
+	{
 		Expr:      "(<< 22298006) {{ +HISTORY-MAX }}",
-		Exercises: "a history supplement over a set rather than a single concept",
+		Exercises: "the same over the widest profile",
 	},
 	{
 		Expr:      "(22298006 {{ +HISTORY-MAX }}) MINUS 22298006",

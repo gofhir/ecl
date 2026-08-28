@@ -325,8 +325,14 @@ const historyAssociationParent = "900000000000522004"
 // Duplicating it here is deliberate and is the point of the exercise: the server
 // resolves `{{ +HISTORY-MOD }}` with ITS OWN mapping, so a corpus case comparing
 // the two checks the recommendation against a real terminology server rather than
-// against itself. If the fixture's list changes, this must change with it — and if
-// they ever disagree, the differential test says so.
+// against itself.
+//
+// The coupling is MANUAL, and nothing enforces it. The differential test compares
+// THIS list against the server; the fixture's list takes no part in the run, so
+// editing one and not the other goes unnoticed until someone reads both. Said
+// plainly because the first draft of this comment claimed the test would catch
+// it, which is not true and is the kind of false reassurance that stops people
+// checking.
 //
 // An empty result means the MAX profile: every association reference set.
 func historyRefsetsForProfile(profile string) []string {
@@ -368,6 +374,17 @@ func (p *Provider) HistoricalAssociations(ctx context.Context, conceptIDs ecl.Se
 			return nil, err
 		}
 		refsets = sorted(all)
+
+		// Discovering nothing is not the same as there being nothing. A server
+		// whose edition lacks the association reference set metadata would
+		// otherwise make this return the empty set, and the differential test
+		// would read that as "this concept has no historical associations" and
+		// compare it against the server's real answer — reporting a divergence
+		// whose cause is a missing lookup, not the evaluator.
+		if len(refsets) == 0 {
+			return nil, fmt.Errorf("%w: no association reference sets found under %s, so the %s profile cannot be resolved",
+				ErrNotAnswerable, historyAssociationParent, profile)
+		}
 	}
 
 	targets := disjunction(sorted(conceptIDs))
