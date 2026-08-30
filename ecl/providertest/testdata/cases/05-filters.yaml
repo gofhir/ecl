@@ -306,3 +306,40 @@ cases:
   - name: acceptability in an alias set pairs with the alias it follows
     expression: '<< 138875005 {{ D dialect = (en-us (900000000000549004) en-gb) }}'
     expectedIds: ["22298006"]
+
+  # ── Description id ────────────────────────────────────────────────────────
+  # `{{ D id = ... }}` comes from the optional ecl.DescriptionIDProvider. It is a
+  # capability rather than a DescriptionFilterOpts field because a new field is
+  # silently ignored by every existing provider, and the id constraint would then
+  # vanish -- returning every concept matching the OTHER clauses, which is a WIDER
+  # answer, not a smaller one.
+  - name: description id selects the concept that carries it
+    expression: '<< 138875005 {{ D id = 751000000102 }}'
+    expectedIds: ["22298006"]
+
+  - name: description id set is any-of
+    expression: '<< 138875005 {{ D id = (751000000102 751000000104) }}'
+    expectedIds: ["22298006", "73211009"]
+
+  # The pair that proves the constraint is per description ROW. 751000000103 is
+  # the id of the SPANISH description of 22298006, so pairing it with `language =
+  # es` matches and pairing it with `language = en` does not -- even though
+  # 22298006 does have an English description, and does have that id, just not on
+  # the same row.
+  - name: description id and a sibling clause must hold on the same row
+    expression: '<< 138875005 {{ D id = 751000000103, language = es }}'
+    expectedIds: ["22298006"]
+
+  - name: description id and a sibling clause on different rows do not match
+    expression: '<< 138875005 {{ D id = 751000000103, language = en }}'
+    expectedIds: []
+
+  # "!=" is row-level too: 22298006 qualifies through its Spanish description,
+  # whose id differs. Subtracting the concepts that have the id would remove it.
+  - name: negated description id is per row, not set subtraction
+    expression: '<< 138875005 {{ D id != 751000000102 }}'
+    expectedIds: ["11687002", "22298006", "404684003", "64572001", "73211009", "95566004"]
+
+  - name: an id nothing carries matches nothing
+    expression: '<< 138875005 {{ D id = 999999999999 }}'
+    expectedIds: []

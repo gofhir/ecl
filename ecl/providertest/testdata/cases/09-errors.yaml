@@ -68,12 +68,13 @@ cases:
     expression: "<< 404684003 {{ D dialect = en-nz }}"
     expectError: true
 
-  # The parser now models these, but DescriptionFilterOpts cannot carry them to
-  # the provider. Reporting beats building Opts that silently drop part of the
-  # constraint -- which is how the description id filter used to widen a query to
-  # every descendant.
-  - name: description id filter is reported as unsupported
-    expression: "< 404684003 {{ D id = 123456789012 }}"
+  # The description id filter itself is supported through the optional
+  # ecl.DescriptionIDProvider, which the reference fixture implements -- see
+  # 05-filters.yaml. What stays unsupported is COMBINING it with a negated sibling
+  # clause: both negations are per description row, one call cannot carry both,
+  # and guessing which applies would answer a question nobody asked.
+  - name: a description id filter with a negated sibling clause is reported as unsupported
+    expression: '<< 138875005 {{ D id != 751000000102, term != "x" }}'
     expectError: true
 
   # A POSITIVE term set is supported — it decomposes into a union, see

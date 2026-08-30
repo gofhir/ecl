@@ -22,6 +22,8 @@ import "context"
 //     this", so a negated description filter returns ErrUnsupportedFeature.
 //   - A dialect ALIAS is not a concept reference, and resolving it to a language
 //     reference set is terminology data no parser can compute.
+//   - DescriptionFilterOpts has no field for a description's own SCTID, and
+//     adding one would make the constraint vanish for every existing provider.
 //
 // Note what is NOT here. A filter value SET — `{{ D term = ("a" "b") }}`,
 // `{{ C effectiveTime = ("20240131" "20230731") }}` — has any-of semantics, so it
@@ -158,4 +160,43 @@ type NegatedDescriptionFilterOpts struct {
 // would widen the query to every dialect.
 type DialectAliasResolver interface {
 	ResolveDialectAliases(ctx context.Context, aliases []string) (map[string][]string, error)
+}
+
+// DescriptionIDProvider evaluates a description filter that constrains the
+// description's own SCTID.
+//
+// Implement it to enable `{{ D id = 12345 }}` and `{{ D id != 12345 }}`, which
+// the evaluator otherwise reports as unsupported.
+//
+// It is a capability rather than a field on DescriptionFilterOpts for the reason
+// every other one here exists: a new field is silently ignored by every provider
+// written against the current contract, so the id constraint would simply vanish
+// and the filter would return every concept satisfying the OTHER clauses. That is
+// not a smaller answer, it is a WIDER one — the failure mode this package refuses
+// everywhere — and it is exactly what the description id filter used to do before
+// it was rejected outright.
+//
+// The constraint is per description ROW, like negation: the same description must
+// carry one of the listed ids AND satisfy Opts. A concept whose FSN has the id and
+// whose synonym has the term does not match `{{ D id = X, term = "y" }}`.
+type DescriptionIDProvider interface {
+	MatchDescriptionByID(ctx context.Context, filter DescriptionIDFilterOpts) (Set, error)
+}
+
+// DescriptionIDFilterOpts carries a description id constraint alongside the rest
+// of the description filter.
+type DescriptionIDFilterOpts struct {
+	// Opts holds the sibling clauses — term, type, language and the rest — which
+	// the SAME description row must also satisfy.
+	Opts DescriptionFilterOpts
+
+	// DescriptionIDs are the description SCTIDs to match, with any-of semantics.
+	// Never empty when the evaluator calls this.
+	DescriptionIDs []string
+
+	// Negate inverts the id comparison: match a description whose id is NOT among
+	// DescriptionIDs. It does not invert Opts, whose clauses stay positive —
+	// negating those needs NegatingDescriptionProvider, and the evaluator reports
+	// the combination rather than guessing which of the two should win.
+	Negate bool
 }

@@ -65,11 +65,14 @@ parents:
   "11687002":  ["73211009"]
   "95566004":  ["64572001"]
 
+# Description ids are declared on a few rows only, for `{{ D id = ... }}`. A row
+# without one can satisfy "!=" and never "=", the same as a real terminology where
+# the filter names an id nothing carries.
 descriptions:
-  - {concept: "404684003", language: "en", typeId: "900000000000003001", value: "Clinical finding"}
-  - {concept: "22298006",  language: "en", typeId: "900000000000003001", value: "Myocardial infarction"}
-  - {concept: "22298006",  language: "es", typeId: "900000000000013009", value: "Infarto de miocardio"}
-  - {concept: "73211009",  language: "en", typeId: "900000000000003001", value: "Diabetes mellitus"}
+  - {id: "751000000101", concept: "404684003", language: "en", typeId: "900000000000003001", value: "Clinical finding"}
+  - {id: "751000000102", concept: "22298006",  language: "en", typeId: "900000000000003001", value: "Myocardial infarction"}
+  - {id: "751000000103", concept: "22298006",  language: "es", typeId: "900000000000013009", value: "Infarto de miocardio"}
+  - {id: "751000000104", concept: "73211009",  language: "en", typeId: "900000000000003001", value: "Diabetes mellitus"}
   - {concept: "11687002",  language: "en", typeId: "900000000000003001", value: "Type 1 diabetes mellitus"}
   # Carries a literal double quote so a term filter can exercise the \" escape.
   - {concept: "11687002",  language: "en", typeId: "900000000000013009", value: 'Type 1 "brittle" diabetes'}
