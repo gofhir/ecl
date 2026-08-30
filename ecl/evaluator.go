@@ -1434,6 +1434,20 @@ func matchDescriptionFilters(ctx context.Context, descFilters []ast.Filter, prov
 		return nil, err
 	}
 
+	idFilter := descriptionIDFilterOf(descFilters)
+	idProvider, canMatchIDs := provider.(DescriptionIDProvider)
+	switch {
+	case idFilter != nil && !canMatchIDs:
+		return nil, fmt.Errorf("%w: the description id filter requires a provider implementing ecl.DescriptionIDProvider; a description id cannot be carried by DescriptionFilterOpts, and passing it as a field every provider ignores would WIDEN the query to every concept matching the other clauses",
+			ErrUnsupportedFeature)
+	case idFilter != nil && negated:
+		// Both negations are per description ROW, and one call cannot carry both:
+		// DescriptionIDFilterOpts.Negate inverts the id comparison only. Guessing
+		// which one applies would answer a question nobody asked.
+		return nil, fmt.Errorf("%w: a description id filter combined with a negated %s clause needs both negations on one call, which neither capability expresses; use one or the other",
+			ErrUnsupportedFeature, kind)
+	}
+
 	opts, matchesNothing, err := buildDescriptionFilterOpts(ctx, descFilters, provider)
 	if err != nil {
 		return nil, err
@@ -1441,6 +1455,28 @@ func matchDescriptionFilters(ctx context.Context, descFilters []ast.Filter, prov
 	if matchesNothing {
 		// A clause named no concept, so nothing can match.
 		return NewSet(), nil
+	}
+
+	if idFilter != nil {
+		// Still one call per term: the id constraint composes with a term set the
+		// same way every sibling clause does.
+		out := NewSet()
+		for i, callOpts := range termCalls(descFilters, opts) {
+			matches, err := idProvider.MatchDescriptionByID(ctx, DescriptionIDFilterOpts{
+				Opts:           callOpts,
+				DescriptionIDs: idFilter.IDs,
+				Negate:         idFilter.Op == "!=",
+			})
+			if err != nil {
+				return nil, fmt.Errorf("%w: MatchDescriptionByID: %w", ErrProvider, err)
+			}
+			if i == 0 {
+				out = nonNil(matches)
+				continue
+			}
+			out = out.Union(nonNil(matches))
+		}
+		return out, nil
 	}
 
 	if negated {
@@ -1567,18 +1603,16 @@ func negatedDescriptionFilter(filters []ast.Filter) (string, bool) {
 }
 
 // unsupportedDescriptionFilter reports the description filter forms that
-// DescriptionFilterOpts cannot express.
+// DescriptionFilterOpts cannot express and no capability covers.
 //
-// The parser now models all of them, so the alternative would be to build Opts
-// that silently drop part of the constraint — which is how a description-id
-// filter used to widen a query to every descendant. Expressing them needs new
-// Opts fields, i.e. a provider contract change.
+// The parser models every form, so the alternative would be to build Opts that
+// silently drop part of the constraint — which is how a description-id filter
+// used to widen a query to every descendant, before it was rejected and then
+// given ecl.DescriptionIDProvider.
 func unsupportedDescriptionFilter(filters []ast.Filter) error {
 	for _, f := range filters {
-		switch x := f.(type) {
-		case *ast.DescriptionIDFilter:
-			return fmt.Errorf("%w: description id filter needs a DescriptionFilterOpts field to pass the ids to the provider", ErrUnsupportedFeature)
-		case *ast.TermFilter:
+		x, ok := f.(*ast.TermFilter)
+		if ok {
 			// A POSITIVE term set is any-of, so it decomposes into one provider
 			// call per term, unioned — see termCalls. A NEGATED one does not: it
 			// selects concepts having a description whose term satisfies neither
@@ -1986,4 +2020,15 @@ func bottomOfSet(ctx context.Context, baseSet Set, provider DataProvider) (Set, 
 		return nil, iterErr
 	}
 	return out, nil
+}
+
+// descriptionIDFilterOf returns the description id clause of a filter list, or
+// nil. The grammar allows at most one per constraint.
+func descriptionIDFilterOf(filters []ast.Filter) *ast.DescriptionIDFilter {
+	for _, f := range filters {
+		if x, ok := f.(*ast.DescriptionIDFilter); ok && len(x.IDs) > 0 {
+			return x
+		}
+	}
+	return nil
 }

@@ -48,6 +48,11 @@ type FixtureConcept struct {
 
 // FixtureDescription is one description (designation) row.
 type FixtureDescription struct {
+	// ID is the description's own SCTID, for `{{ D id = ... }}`. Optional: a
+	// description without one simply cannot be selected by that filter, which is
+	// the same as a real terminology where the filter names an id nothing has.
+	ID string `yaml:"id"`
+
 	Concept       string `yaml:"concept"`
 	Language      string `yaml:"language"`
 	TypeID        string `yaml:"typeId"`
@@ -906,6 +911,40 @@ func (p *inMemoryProvider) ResolveDialectAliases(_ context.Context, aliases []st
 				out[alias] = append([]string(nil), ids...)
 				break
 			}
+		}
+	}
+	return out, nil
+}
+
+// MatchDescriptionByID implements ecl.DescriptionIDProvider.
+//
+// The id constraint is per description ROW, not per concept: the SAME description
+// must carry one of the ids AND satisfy the sibling clauses. Checking the two
+// against different descriptions of the same concept would make
+// `{{ D id = X, term = "y" }}` match a concept whose FSN has the id and whose
+// synonym has the term, which is a different question from the one asked.
+func (p *inMemoryProvider) MatchDescriptionByID(_ context.Context, filter ecl.DescriptionIDFilterOpts) (ecl.Set, error) {
+	opts := filter.Opts
+	needle := strings.ToLower(opts.Term)
+
+	wanted := make(map[string]bool, len(filter.DescriptionIDs))
+	for _, id := range filter.DescriptionIDs {
+		wanted[id] = true
+	}
+
+	out := ecl.NewSet()
+	for conceptID, descs := range p.descByConcept {
+		for _, d := range descs {
+			// A description with no id declared can satisfy "!=" — its id is not
+			// among the listed ones — but never "=".
+			if wanted[d.ID] == filter.Negate {
+				continue
+			}
+			if !descriptionMatches(d, opts, needle) {
+				continue
+			}
+			out = out.Union(ecl.NewSetFromSlice([]string{conceptID}))
+			break
 		}
 	}
 	return out, nil

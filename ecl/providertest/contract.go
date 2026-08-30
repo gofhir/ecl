@@ -64,6 +64,7 @@ func VerifyContract(t *testing.T, newProvider func() ecl.DataProvider) {
 		{"InboundRelationshipsAgreesWithTargets", checkInboundAgreesWithTargets},
 		{"NegatedDescriptionIsNotSetSubtraction", checkNegatedDescriptionIsRowLevel},
 		{"DialectAliasResolvesToRealRefsets", checkDialectAliasResolves},
+		{"DescriptionIDIsApplied", checkDescriptionIDIsMatchable},
 	}
 
 	for _, c := range checks {
@@ -718,5 +719,69 @@ func checkDialectAliasResolves(ctx context.Context, t *testing.T, p ecl.DataProv
 	}
 	if _, present := got[nonsense]; present {
 		t.Errorf("the provider resolved %q, an alias no SNOMED CT edition defines; an unknown alias must be absent from the result so the evaluator can report it instead of matching every dialect", nonsense)
+	}
+}
+
+// checkDescriptionIDIsMatchable covers DescriptionIDProvider, as far as a
+// data-independent check can.
+//
+// It verifies one property: an id no description carries matches nothing. That is
+// small, and it is the direction that matters — a description id filter which
+// matches something it should not is WIDER than what was asked, and widening
+// silently is the failure this capability exists to avoid. It was worth having a
+// field for the ids only if the ids are actually applied.
+//
+// # What this deliberately does NOT check
+//
+// The property that really matters is that the id and the sibling clauses hold on
+// the SAME description row: `{{ D id = X, language = es }}` must not match a
+// concept whose FSN carries the id and whose synonym is Spanish. Checking that
+// needs a real description id, and DataProvider has no method that enumerates
+// them — there is no way to ask "give me an id you know". Guessing from a
+// hardcoded list would test the guess, not the provider.
+//
+// Rather than add a method to the contract for the benefit of a test, the row-level
+// property is covered where a real id IS available: the bundled conformance suite,
+// whose 05-filters.yaml pairs a Spanish description's id with `language = es` and
+// then with `language = en` and requires the second to be empty. Run
+// VerifyFixture for that; this check cannot stand in for it, and says so rather
+// than implying coverage it does not have.
+func checkDescriptionIDIsMatchable(ctx context.Context, t *testing.T, p ecl.DataProvider) {
+	byID, ok := p.(ecl.DescriptionIDProvider)
+	if !ok {
+		t.Skip("the provider does not implement ecl.DescriptionIDProvider; `{{ D id = ... }}` will report ErrUnsupportedFeature")
+	}
+
+	// Not a plausible description id in any edition: fifteen digits and no valid
+	// check digit, so a provider that knows it is not answering from data.
+	const absent = "999999999999999"
+
+	got, err := byID.MatchDescriptionByID(ctx, ecl.DescriptionIDFilterOpts{DescriptionIDs: []string{absent}})
+	if err != nil {
+		t.Fatalf("MatchDescriptionByID: %v", err)
+	}
+	if s := nonNilSet(got); s.Len() > 0 {
+		t.Errorf("an id no description carries matched %d concept(s), so the id constraint is not being applied;\n"+
+			"a description id filter that matches more than it should is wider than what was asked, which is exactly\n"+
+			"what carrying the ids in a capability rather than an ignored Opts field is meant to prevent", s.Len())
+	}
+
+	// The negated form of the same id: every concept with any description should
+	// come back, since none of them carries it. This is the other direction, and
+	// it catches a Negate flag that is read but never applied.
+	negated, err := byID.MatchDescriptionByID(ctx, ecl.DescriptionIDFilterOpts{
+		DescriptionIDs: []string{absent},
+		Negate:         true,
+	})
+	if err != nil {
+		t.Fatalf("MatchDescriptionByID negated: %v", err)
+	}
+	all, err := p.MatchDescription(ctx, ecl.DescriptionFilterOpts{})
+	if err != nil {
+		t.Skipf("MatchDescription reported: %v", err)
+	}
+	if want, got := nonNilSet(all).Len(), nonNilSet(negated).Len(); want > 0 && got != want {
+		t.Errorf("`id != %s` matched %d concept(s) but %d have descriptions at all;\n"+
+			"no description carries that id, so every one of them satisfies the negation", absent, got, want)
 	}
 }
