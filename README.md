@@ -399,7 +399,7 @@ fuzzes on every pull request and uploads any crasher, which is committed under
 `ecl.Parse` is the one that was actually broken: twelve seconds after the target
 was written it found `* {{ D term = "C:\temp" }}` — 26 bytes, an invalid escape
 someone types by accident — which grew the heap past 5 GB without bound. The other
-two were clean when measured, at 26.5M and 5.0M executions, which is the reason to
+two were clean when measured, at 26.5M and 7.6M executions, which is the reason to
 have the targets rather than the reason not to: that was one afternoon's
 measurement, and these are the property.
 
