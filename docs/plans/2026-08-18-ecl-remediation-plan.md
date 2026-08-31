@@ -109,15 +109,34 @@ Lo que sigue pendiente y **no** lo resuelve una capacidad:
   valor del conjunto. Bajo `!=` el conjunto de `effectiveTime` significa "ninguno de estos",
   y se intersecta. Sigue sin soportarse la forma negada del conjunto de términos: una sola
   fila de descripción tiene que fallar todos los valores, y eso no se descompone.
+- ~~**`{{ D id }}`**~~ — **cerrada (2026-08-30)** con la capacidad `DescriptionIDProvider`. Es por
+  fila: el id y las cláusulas hermanas tienen que cumplirse en la misma descripción.
+- ~~**La proyección `^[field]`**~~ — **cerrada (2026-08-30)** con `RefsetFieldProjector`. La
+  limitación estaba mal diagnosticada acá: se anotó como "necesita un tipo de retorno distinto de
+  `Set`", y eso solo es cierto de `^[a,b]` y `^[*]`, que son tabulares. Un campo con id de componente
+  —que es lo que usa el ejemplo oficial— cabe en un `Set`. De paso apareció que `^[*]` se evaluaba
+  en silencio como `^`.
 - **Opciones funcionales en `Evaluate`** (`WithMaxDepth`, `WithCache`), que son aditivas y quedan
-  disponibles cuando se necesiten.
+  disponibles cuando se necesiten. Nunca hicieron falta.
 
-**Tabla de aceptación: 13 de 13 filas pasan.** El dialecto por alias, que era la única pendiente, se
-cerró con `DialectAliasResolver`.
+**Tabla de aceptación: 13 de 13 filas pasan.**
 
-**Métricas:** 44 → **136** casos de conformidad, todos ejecutados por CI (antes 8). Cobertura de `ecl`
-61.8 % → 76.9 %; `providertest` (antes `internal/conformance`) 41.8 % → 81.7 %. `golangci-lint` en 0 issues y `-race` limpio
-en todos los commits. Ningún cambio rompe la API: los campos viejos siguen poblados y deprecados.
+**Cerrado después del plan** (nada de esto estaba en él): parser cuadrático → lineal con entrada
+acotada y fuzzing, `InGroupCardinality` del MRCM más el conteo por valores distintos, renderer de SCG
+con propiedad de ida y vuelta, el corpus oficial del IHTSDO en CI, el oráculo diferencial contra un
+servidor real, y los dos defectos de proceso del release (`include-component-in-tag` mal configurado
+y `ECL.g4` sin procedencia).
+
+**Métricas al cierre del plan:** 44 → **123** casos de conformidad, todos ejecutados por CI (antes 8).
+Cobertura de `ecl` 61.8 % → 76.9 %; `providertest` (antes `internal/conformance`) 41.8 % → 81.7 %.
+`golangci-lint` en 0 issues y `-race` limpio en todos los commits. Ningún cambio rompe la API: los
+campos viejos siguen poblados y deprecados.
+
+**Estado al 2026-08-31**, tras el trabajo posterior al plan: **153** casos de conformidad, más 121
+ejemplos oficiales del IHTSDO que parsean y 39 casos de oráculo diferencial contra un servidor real.
+Cobertura: `ecl` 77 %, `providertest` 82 %, `mrcm` 95 %, `scg` 92 %, `sctid` 97 %, `cmd` 57 %. Siete
+capacidades opcionales. Publicado hasta v1.6.0. Los números de arriba se dejan como quedaron el día
+que el plan se cerró, para que se pueda leer qué aportó el plan y qué vino después.
 
 **Cambios de comportamiento a agrupar en las notas del v1.2.0** (cuatro): errores del lexer y anclaje
 `EOF` (Task 2), negación de filtros de descripción (Task 7), eje `active` en `AllConcepts` (Task 9),

@@ -12,14 +12,27 @@ import (
 	"github.com/gofhir/ecl/ecl/ast"
 )
 
-// ErrUnsupportedFeature marks an ECL construct the evaluator recognizes but
-// cannot evaluate correctly yet. Callers can classify it and answer 422 or 501
-// instead of serving a wrong result set:
+// ErrUnsupportedFeature marks an ECL construct the evaluator recognizes and will
+// not answer. Callers can classify it and reply 422 or 501 instead of serving a
+// wrong result set:
 //
 //	if errors.Is(err, ecl.ErrUnsupportedFeature) { /* not implemented */ }
 //
-// It is returned rather than a silently incorrect set whenever the semantics
-// cannot be expressed through the current DataProvider contract.
+// It is returned rather than a silently incorrect set, which is the whole point.
+// Three different situations produce it, and they are not equally permanent:
+//
+//   - The provider lacks an optional CAPABILITY the construct needs. Implement it
+//     and the construct works; see capabilities.go. Most of them are this.
+//   - The construct has no meaning to answer. A reverse attribute inside an
+//     attribute group and a projection naming several member fields are here:
+//     the reasons are written where the error is raised, and no amount of
+//     provider work changes them.
+//   - Two per-row negations would have to travel on one call, and neither
+//     capability expresses that. Combining a description id filter with a negated
+//     term clause is the example.
+//
+// The error text says which, so a caller can tell "implement this interface" from
+// "this expression will never work".
 var ErrUnsupportedFeature = errors.New("unsupported ECL feature")
 
 // ErrProvider wraps a failure that came from the DataProvider rather than from
@@ -39,12 +52,13 @@ var ErrProvider = errors.New("data provider error")
 //   - Refinements (ungrouped/grouped) with cardinality [min..max]
 //   - Reverse attribute (R flag) including wildcard and concrete values
 //   - DotExpression (attribute navigation)
-//   - Filter constraints: term, type, language, dialect, active, module,
-//     definitionStatus, effectiveTime. Concept filters ({{ C ... }}) support
-//     the negated (!=) operator per clause; negated DESCRIPTION filters
-//     ({{ D ... }}) return ErrUnsupportedFeature, because their semantics is a
-//     per-description-row negation that the DataProvider contract cannot yet
-//     express — see ErrUnsupportedFeature.
+//   - Filter constraints: term, type, language, dialect (both dialectId and the
+//     alias form), description id, active, module, definitionStatus,
+//     effectiveTime. Negation is per clause. A negated CONCEPT filter
+//     ({{ C ... != ... }}) always works; a negated DESCRIPTION filter needs a
+//     provider implementing NegatingDescriptionProvider, because its semantics is
+//     a per-description-row negation that set arithmetic cannot express — see
+//     capabilities.go.
 //   - Member field filters
 //   - Concrete value comparisons: integer, decimal, string, boolean
 //   - HistorySupplement with MIN/MOD/MAX profiles
