@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.5.0](https://github.com/gofhir/ecl/compare/v1.4.0...v1.5.0) (2026-08-31)
+
+
+### Features
+
+* **ecl:** support the description id filter via a capability ([21bfaf7](https://github.com/gofhir/ecl/commit/21bfaf7c1dd7ae36d6ce5fe173f6e858a1789fd3))
+* **ecl:** support the description id filter via a capability ([a534171](https://github.com/gofhir/ecl/commit/a5341714a0e2569b431f4dc1d8e1abf3ed858983))
+* **ecl:** support the memberOf field projection via a capability ([2e94afc](https://github.com/gofhir/ecl/commit/2e94afcb44e243ed0d942eb2df7a630a8b523783))
+* **ecl:** support the memberOf field projection via a capability ([40cba5d](https://github.com/gofhir/ecl/commit/40cba5d1f76a6d40b481f628c5e22bff88e5bc60))
+
+
+### Bug Fixes
+
+* **ecl:** a member filter's clauses must hold on ONE member row ([4148d46](https://github.com/gofhir/ecl/commit/4148d46a96a60ef66522f30ada0cb6477c2a150c))
+
 ## [1.4.0](https://github.com/gofhir/ecl/compare/v1.3.0...v1.4.0) (2026-08-28)
 
 
