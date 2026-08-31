@@ -5,7 +5,7 @@
 [![Release](https://img.shields.io/github/v/release/gofhir/ecl)](https://github.com/gofhir/ecl/releases)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-Embeddable parser and evaluator for the SNOMED CT **Expression Constraint Language (ECL) v2.2** in pure Go. Comes with parsers for **SNOMED Compositional Grammar (SCG)** and a **Machine Readable Concept Model (MRCM)** validator, plus a `gofhir-ecl` CLI and a 149-case conformance suite.
+Embeddable parser and evaluator for the SNOMED CT **Expression Constraint Language (ECL) v2.2** in pure Go. Comes with parsers for **SNOMED Compositional Grammar (SCG)** and a **Machine Readable Concept Model (MRCM)** validator, plus a `gofhir-ecl` CLI and a 153-case conformance suite.
 
 ```go
 // The path repeats "ecl" because the module is github.com/gofhir/ecl and the
@@ -29,7 +29,7 @@ ECL is the standard query language for SNOMED CT. Until now, evaluating it from 
 - ✅ **SCG** parser + validator
 - ✅ **MRCM** loader + validator (uses ECL evaluator internally) — domain, range, grouped, and both cardinalities including **per relationship group**
 - ✅ **SCTID** Verhoeff checksum + partition validation
-- ✅ **149/149** bundled conformance cases pass, all executed by CI
+- ✅ **153/153** bundled conformance cases pass, all executed by CI
 - ✅ **121/121** of SNOMED International's [official ECL examples](ecl/testdata/official-examples/) parse — the one test suite this project did not write
 - ✅ **Fuzzed parser** with bounded input, so an expression from a URL cannot stall the process
 - 📦 Latest release: see [GitHub Releases](https://github.com/gofhir/ecl/releases)
@@ -45,6 +45,7 @@ bad data:
 | `{{ D term != … }}`, `{{ D language != … }}`, `{{ D type != … }}`, **unless** the provider implements `NegatingDescriptionProvider` | Negating a description filter is a per-ROW operation: a concept with both an FSN and a Spanish synonym satisfies `language != es` through its FSN, so set subtraction is wrong. Negated **concept** filters (`{{ C … != … }}`) always work. |
 | `{{ D dialect = en-gb }}` (alias form), **unless** the provider implements `DialectAliasResolver` | Mapping a dialect alias to a language reference set's SCTID is terminology data — only the international English aliases are universal, and the same alias can name different refsets in different editions. With the capability this works; `{{ D dialectId = 900000000000508004 }}` always does. |
 | `^[a,b]` and `^[*]` — a projection naming several fields, or every field | Those are a table; a `Set` is one column of concept ids. Naming a SINGLE field works, given a `RefsetFieldProjector`. |
+| A `{{ M … }}` member filter with more than one clause, **unless** the provider implements `RefsetFieldProjector` | The clauses must hold on ONE member row, and `RefsetMembersFiltered` takes one clause at a time — so composing them here would accept a concept whose *different* rows satisfy different clauses. A single clause always works. |
 | A **negated** term filter with a set of terms — `{{ D term != ("a" "b") }}` | One description row has to fail every value, so it cannot be decomposed: intersecting per-term negations would accept a concept with one row failing the first term and a different row failing the second. The positive set form works. |
 | A cardinality or `!=` on a reverse (`R`) attribute, **unless** the provider implements `InboundRelationshipsProvider` | `RelationshipTargets` returns a `Set`, so it loses the inbound count and the per-type total. With the capability these work. |
 | A reverse (`R`) attribute **inside an attribute group** — `{ R attr = value }` | Braces assert that the clauses share one relationship group *of the focus concept*, and a reverse relationship belongs to the source, so the focus has no group to constrain. Write it outside the braces. See the note below. |
@@ -129,7 +130,7 @@ answers well; the evaluator falls back or reports the forms it cannot handle.
 | `NegatingDescriptionProvider` | `{{ D term != … }}`, `{{ D language != … }}`, `{{ D type != … }}`, whose negation is per description ROW and cannot be emulated with set arithmetic. |
 | `DialectAliasResolver` | `{{ D dialect = en-gb }}`, the alias form, whose alias-to-reference-set mapping is terminology data rather than something a parser can compute. |
 | `DescriptionIDProvider` | `{{ D id = … }}`, which constrains a description's own SCTID — per row, so the id and the sibling clauses must hold on the same description. |
-| `RefsetFieldProjector` | `^ [targetComponentId] X`, which returns a member field instead of the members. Only the provider knows which fields hold a component id, so it is the one that refuses the others. |
+| `RefsetFieldProjector` | `^ [targetComponentId] X`, which returns a member field instead of the members — and a `{{ M … }}` filter with **more than one clause**, whose clauses must hold on one member row. Only the provider knows which fields hold a component id, so it is the one that refuses the others. |
 
 The reference provider in [`ecl/providertest/fixture.go`](ecl/providertest/fixture.go)
 implements all seven; read it for a worked example. `providertest.VerifyContract`
@@ -180,7 +181,7 @@ history profiles nest. A check your data cannot exercise is **skipped with a
 reason**, not failed, so read the output: a provider that skips most of the suite
 has not been verified.
 
-`providertest.VerifyFixture(t)` is the other half. It runs the 149 bundled cases
+`providertest.VerifyFixture(t)` is the other half. It runs the 153 bundled cases
 against the bundled fixture, so it verifies the **evaluator** rather than your
 provider: 107 of them pin concrete concept IDs, which a correct provider carrying
 different data cannot satisfy. Use it to check this library, not your storage.
@@ -289,7 +290,7 @@ The fixture is a YAML file describing concepts, parents, descriptions, relations
 
 ```bash
 $ gofhir-ecl conformance
-149 passed, 0 failed, 0 skipped, 149 total
+153 passed, 0 failed, 0 skipped, 153 total
 
 $ gofhir-ecl conformance -filter '^memberOf'
 PASS  ECL v2.2 features (Top, Bottom, AltIdentifier, ^R, MemberOf) :: memberOf refset
@@ -308,7 +309,7 @@ apart:
 |---|---|---|
 | [`ecl/grammar/ECL.g4`](ecl/grammar/ECL.g4) | The syntax accepted is the published grammar. It is SNOMED International's file, carrying one local fix for an upstream typo that stops the grammar generating (documented in its header). CI regenerates the parser from it and diffs byte for byte. | SNOMED International |
 | [`ecl/testdata/official-examples/`](ecl/testdata/official-examples/) | The 121 expressions upstream publishes as **valid ECL** all parse. `TestParse_OfficialExamples` walks the tree; a failure is this project's defect by construction, since upstream declares them valid. | SNOMED International |
-| [`ecl/providertest/testdata/`](ecl/providertest/testdata/) | 149 expressions **evaluate** to specific concept sets against a bundled fixture. | This project |
+| [`ecl/providertest/testdata/`](ecl/providertest/testdata/) | 153 expressions **evaluate** to specific concept sets against a bundled fixture. | This project |
 
 The third row was the honest weak spot: no official corpus states what an
 expression should *return* — the specification gives prose and examples without
@@ -385,7 +386,7 @@ checked before parsing starts. They exist because ANTLR offers no way to interru
 a parse in progress: a `context` deadline would let a caller stop *waiting* while
 the goroutine kept burning CPU. Nesting depth is the one axis that stayed
 superlinear, so it is capped rather than fixed — at depth 100 a parse costs 0.5 ms,
-and the deepest expression among the 121 official examples and 149 conformance
+and the deepest expression among the 121 official examples and 153 conformance
 cases nests **4** levels. Over the limit you get a `*ecl.ParseError`, the same type
 as a syntax error.
 
@@ -406,7 +407,7 @@ measurement, and these are the property.
 
 ## Conformance suite
 
-The bundled suite lives in [`ecl/providertest/testdata/`](ecl/providertest/testdata/) and is **embedded in the binary**, so `gofhir-ecl conformance` works from any directory, including after `go install`. It currently covers 149 cases across 9 areas of the spec, including a suite of expressions that must be REJECTED.
+The bundled suite lives in [`ecl/providertest/testdata/`](ecl/providertest/testdata/) and is **embedded in the binary**, so `gofhir-ecl conformance` works from any directory, including after `go install`. It currently covers 153 cases across 9 areas of the spec, including a suite of expressions that must be REJECTED.
 
 | Area | Cases | Spec section |
 |---|---|---|
@@ -414,7 +415,7 @@ The bundled suite lives in [`ecl/providertest/testdata/`](ecl/providertest/testd
 | Compound expressions | 4 | 5.2 |
 | Primitives | 4 | 5.0 |
 | Refinements (disjunction, groups, cardinality, `!=`, dot, reverse) | 31 | 5.3 |
-| Filters (term, type, language, dialect and dialectId, description id, module, definitionStatus, active, effectiveTime, memberField) | 59 | 5.4 |
+| Filters (term, type, language, dialect and dialectId, description id, module, definitionStatus, active, effectiveTime, memberField) | 63 | 5.4 |
 | History supplements (MIN/MOD/MAX) | 6 | 5.5 |
 | Concrete values | 4 | 5.3.4 |
 | v2.2 (Top, Bottom, AltIdentifier, `^R`, memberOf projection) | 11 | v2.2 |

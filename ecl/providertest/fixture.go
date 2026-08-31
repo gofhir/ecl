@@ -98,8 +98,17 @@ type FixtureDialectMember struct {
 // FixtureMemberField captures a per-member custom field used by member
 // filter constraints ({{ M field = ... }}).
 type FixtureMemberField struct {
-	Refset    string `yaml:"refset"`
-	Member    string `yaml:"member"`
+	Refset string `yaml:"refset"`
+	Member string `yaml:"member"`
+
+	// Row groups the fields belonging to ONE reference set member row. A
+	// reference set may hold several rows for the same member — a complex map has
+	// one per map group — and a `{{ M ... }}` filter with several clauses asks for
+	// a single row satisfying all of them.
+	//
+	// Empty means the member has one row, which is every simple reference set.
+	Row string `yaml:"row"`
+
 	FieldName string `yaml:"fieldName"`
 	Value     string `yaml:"value"`
 }
@@ -1010,7 +1019,8 @@ func (p *inMemoryProvider) ProjectRefsetField(_ context.Context, opts ecl.Refset
 	return out, nil
 }
 
-// memberRow is one reference set member with the fields declared for it.
+// memberRow is ONE reference set member row with the fields declared for it. A
+// member with several rows produces several of these.
 type memberRow struct {
 	member string
 	fields map[string]string
@@ -1051,41 +1061,51 @@ func (r memberRow) matches(filters []ecl.MemberFilterOpts) bool {
 // to drift apart, and the copy was already wrong: it named concepts the fixture
 // does not have.
 func (p *inMemoryProvider) memberRows(refsetID string) []memberRow {
-	byMember := map[string]memberRow{}
-	get := func(member string) memberRow {
-		row, ok := byMember[member]
-		if !ok {
-			row = memberRow{member: member, fields: map[string]string{}}
-			byMember[member] = row
+	// Keyed by member AND row, so a member with several rows produces several.
+	// Keying by member alone — which the first version did — silently merged the
+	// rows of a complex map into one, and a `{{ M ... }}` filter with several
+	// clauses would then match a member whose different rows satisfy different
+	// clauses. That is the exact bug this whole path exists to avoid, so the
+	// fixture must be able to express the shape that exposes it.
+	type key struct{ member, row string }
+	fields := map[key]map[string]string{}
+	get := func(k key) map[string]string {
+		if fields[k] == nil {
+			fields[k] = map[string]string{}
 		}
-		return row
+		return fields[k]
 	}
 
 	for _, member := range p.spec.Refsets[refsetID] {
-		get(member)
+		get(key{member: member})
 	}
 	for _, mf := range p.spec.MemberFields {
 		if mf.Refset == refsetID {
-			get(mf.Member).fields[mf.FieldName] = mf.Value
+			get(key{member: mf.Member, row: mf.Row})[mf.FieldName] = mf.Value
 		}
 	}
 	for _, h := range p.spec.HistoricalAssociations {
 		if h.Refset == refsetID {
-			get(h.Source).fields["targetComponentId"] = h.Target
+			get(key{member: h.Source})["targetComponentId"] = h.Target
 		}
 	}
 
-	// Sorted, so the result is built in a stable order. The Set does not care,
-	// but a fixture that iterates a map is a fixture whose bugs come and go.
-	members := make([]string, 0, len(byMember))
-	for member := range byMember {
-		members = append(members, member)
+	// Sorted, so rows are built in a stable order. The Set does not care, but a
+	// fixture that iterates a map is a fixture whose bugs come and go.
+	keys := make([]key, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
 	}
-	sort.Strings(members)
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].member != keys[j].member {
+			return keys[i].member < keys[j].member
+		}
+		return keys[i].row < keys[j].row
+	})
 
-	rows := make([]memberRow, 0, len(members))
-	for _, member := range members {
-		rows = append(rows, byMember[member])
+	rows := make([]memberRow, 0, len(keys))
+	for _, k := range keys {
+		rows = append(rows, memberRow{member: k.member, fields: fields[k]})
 	}
 	return rows
 }

@@ -1120,32 +1120,30 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 	result := base
 
 	if len(memberFilters) > 0 {
-		for _, mf := range memberFilters {
-			field, ok := mf.(*ast.MemberFieldFilter)
-			if !ok {
-				continue
-			}
-			opts, err := oneMemberFilterOpts(ctx, field, provider)
-			if err != nil {
-				return nil, err
-			}
-			// Get the refset IDs from the base operand if it's a MemberOf.
-			var refsetIDs []string
-			if mo, ok := e.Operand.(*ast.MemberOf); ok {
-				refsetIDSet, innerErr := Evaluate(ctx, mo.Operand, provider)
-				if innerErr != nil {
-					return nil, fmt.Errorf("evaluating member filter refset: %w", innerErr)
-				}
-				refsetIDs = toIDSlice(refsetIDSet)
-			} else {
-				refsetIDs = toIDSlice(base)
-			}
-			filtered, innerErr := provider.RefsetMembersFiltered(ctx, refsetIDs, opts)
-			if innerErr != nil {
-				return nil, fmt.Errorf("%w: RefsetMembersFiltered: %w", ErrProvider, innerErr)
-			}
-			result = result.Intersect(filtered)
+		clauses, err := memberFilterOptsOf(ctx, memberFilters, provider)
+		if err != nil {
+			return nil, err
 		}
+
+		// The reference sets, resolved once. Taking them from the memberOf's own
+		// operand rather than from base matters: base is already the MEMBERS, and
+		// a member is not a reference set.
+		var refsetIDs []string
+		if mo, ok := e.Operand.(*ast.MemberOf); ok {
+			refsetIDSet, innerErr := Evaluate(ctx, mo.Operand, provider)
+			if innerErr != nil {
+				return nil, fmt.Errorf("evaluating member filter refset: %w", innerErr)
+			}
+			refsetIDs = toIDSlice(refsetIDSet)
+		} else {
+			refsetIDs = toIDSlice(base)
+		}
+
+		matched, err := matchMemberFilters(ctx, refsetIDs, clauses, provider)
+		if err != nil {
+			return nil, err
+		}
+		result = result.Intersect(matched)
 	}
 
 	// Description filters — build a single DescriptionFilterOpts from all
@@ -2152,4 +2150,61 @@ func oneMemberFilterOpts(ctx context.Context, field *ast.MemberFieldFilter, prov
 		Op:        field.Op,
 		ValueSet:  valueSet,
 	}, nil
+}
+
+// matchMemberFilters resolves the `{{ M ... }}` clauses of one constraint to the
+// members that satisfy them.
+//
+// # Why more than one clause needs a capability
+//
+// RefsetMembersFiltered takes ONE MemberFilterOpts, so several clauses can only
+// be composed by calling it once each and intersecting the concept sets. That is
+// not what the expression asks. A reference set can hold several rows for the
+// same member — a complex map has one per map group — and intersecting per clause
+// accepts a concept whose FIRST row satisfies one clause and whose SECOND
+// satisfies another, when the expression asks for a single row satisfying all of
+// them.
+//
+// The specification's own examples are exactly this shape:
+//
+//	^ 447562003 |ICD-10 complex map| {{ M mapGroup = #2, mapPriority = #1, mapTarget = "J45.9" }}
+//
+// The three clauses are there to pick ONE row. Answered per clause, the query
+// returns every concept that has a row in group 2, and a row at priority 1, and a
+// row mapping to J45.9 — which is a wider set, and silently so.
+//
+// RefsetFieldProjector takes every clause on one call, so a provider implementing
+// it can answer exactly; projecting referencedComponentId returns the members
+// themselves. Without it, the multi-clause form is reported rather than
+// approximated. A single clause has no such problem and still uses
+// RefsetMembersFiltered, so nothing changes for it.
+func matchMemberFilters(ctx context.Context, refsetIDs []string, clauses []MemberFilterOpts, provider DataProvider) (Set, error) {
+	switch len(clauses) {
+	case 0:
+		return nil, fmt.Errorf("%w: member filter names no field", ErrUnsupportedFeature)
+	case 1:
+		filtered, err := provider.RefsetMembersFiltered(ctx, refsetIDs, clauses[0])
+		if err != nil {
+			return nil, fmt.Errorf("%w: RefsetMembersFiltered: %w", ErrProvider, err)
+		}
+		return nonNil(filtered), nil
+	}
+
+	projector, ok := provider.(RefsetFieldProjector)
+	if !ok {
+		return nil, fmt.Errorf("%w: a member filter with %d clauses requires a provider implementing ecl.RefsetFieldProjector; the clauses must hold on ONE member row, and RefsetMembersFiltered takes one clause at a time, so composing them here would accept a concept whose different rows satisfy different clauses",
+			ErrUnsupportedFeature, len(clauses))
+	}
+	matched, err := projector.ProjectRefsetField(ctx, RefsetProjectionOpts{
+		RefsetIDs: refsetIDs,
+		Field:     "referencedComponentId",
+		Filters:   clauses,
+	})
+	if err != nil {
+		if errors.Is(err, ErrUnsupportedFeature) {
+			return nil, fmt.Errorf("ProjectRefsetField: %w", err)
+		}
+		return nil, fmt.Errorf("%w: ProjectRefsetField: %w", ErrProvider, err)
+	}
+	return nonNil(matched), nil
 }
