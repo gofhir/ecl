@@ -221,6 +221,14 @@ jobs:
       - name: Fuzz the SCG parser
         run: go test ./scg/ -run '^$' -fuzz FuzzParse -fuzztime 30s
 
+      # The round-trip property is a separate target because -fuzz takes one at a
+      # time, and it is the stronger of the two: it catches an asymmetry between
+      # parsing and rendering, which is the class that produced a 26-byte
+      # heap-exhausting input in the ECL parser. It found two on the day it was
+      # written.
+      - name: Fuzz the SCG parse/render round trip
+        run: go test ./scg/ -run '^$' -fuzz FuzzParseRenderParse -fuzztime 30s
+
       # This one runs the loader AND the validator: a model that parses but then
       # breaks Validate is the worse bug, because it surfaces far from its cause.
       - name: Fuzz the MRCM loader

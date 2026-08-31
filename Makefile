@@ -53,6 +53,7 @@ FUZZTIME ?= 60s
 fuzz:
 	go test ./ecl/ -run '^$$' -fuzz FuzzParse -fuzztime $(FUZZTIME)
 	go test ./scg/ -run '^$$' -fuzz FuzzParse -fuzztime $(FUZZTIME)
+	go test ./scg/ -run '^$$' -fuzz FuzzParseRenderParse -fuzztime $(FUZZTIME)
 	go test ./mrcm/ -run '^$$' -fuzz FuzzLoadFromBytes -fuzztime $(FUZZTIME)
 
 # ORACLE_URL is the terminology server the differential test compares against.
