@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.6.0](https://github.com/gofhir/ecl/compare/v1.5.0...v1.6.0) (2026-08-31)
+
+
+### Features
+
+* **scg:** render expressions back to text, and fuzz the round trip ([bde07c9](https://github.com/gofhir/ecl/commit/bde07c93fe62b0bc4bd792a2581744adc0580968))
+* **scg:** render expressions back to text, and fuzz the round trip ([6ca1d86](https://github.com/gofhir/ecl/commit/6ca1d86b67c2f0813ba702110c8229b478378467))
+
+
+### Bug Fixes
+
+* **ci:** anchor the -fuzz patterns ([f88e443](https://github.com/gofhir/ecl/commit/f88e4430ad4b797519b6e3fe9ad4bdf37cb515ab))
+
 ## [1.5.0](https://github.com/gofhir/ecl/compare/v1.4.0...v1.5.0) (2026-08-31)
 
 
