@@ -26,7 +26,7 @@ ECL is the standard query language for SNOMED CT. Until now, evaluating it from 
 
 - ✅ **ECL v2.2 evaluator** — hierarchy operators, compound (`AND`/`OR`/`MINUS`), refinements with conjunction **and disjunction**, attribute groups with cardinality, reverse `R`, dot notation, concrete values (integer/decimal/string/boolean), history supplements with MIN/MOD/MAX, Top/Bottom, MemberOf, RefsetContainingAny (`^R`), AltIdentifier
 - ✅ **Filters** — term (word-prefix and `wild`), description type, language, `dialectId`, active, module, effectiveTime, definitionStatus, memberField
-- ✅ **SCG** parser + validator
+- ✅ **SCG** parser, renderer and validator — `Parse` and `String` round-trip, checked by a fuzz target
 - ✅ **MRCM** loader + validator (uses ECL evaluator internally) — domain, range, grouped, and both cardinalities including **per relationship group**
 - ✅ **SCTID** Verhoeff checksum + partition validation
 - ✅ **153/153** bundled conformance cases pass, all executed by CI
@@ -391,7 +391,7 @@ cases nests **4** levels. Over the limit you get a `*ecl.ParseError`, the same t
 as a syntax error.
 
 **Fuzzed.** Every entry point that takes untrusted input has a target: both
-parsers and the MRCM loader. Each asserts that no input panics, that a nil result
+parsers, the SCG parse/render round trip, and the MRCM loader. Each asserts that no input panics, that a nil result
 never comes back with a nil error, and that nothing runs away; the MRCM one also
 runs the validator, because a model that *parses* but then breaks `Validate` is
 the worse bug — it surfaces far from its cause. Run them with `make fuzz`; CI

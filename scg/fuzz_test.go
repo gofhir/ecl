@@ -1,6 +1,7 @@
 package scg_test
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -109,4 +110,62 @@ var scgSeeds = []string{
 	"=== 414545008|Ischemic heart disease|+251061000|Myocardial necrosis|:{116676008|Associated morphology|=55641003|Infarct|,363698007|Finding site|=74281007|Myocardium structure|}",
 	"<<< 73211009|Diabetes mellitus|:{363698007|Finding site|=113331007|Structure of endocrine system|}",
 	"=== 40172005|Cardiac complication|+57054005|Acute myocardial infarction|:{42752001|Due to|=(63739005|Coronary occlusion|:{363698007|Finding site|=50018008|Left coronary artery structure|,116676008|Associated morphology|=50173008|Complete obstruction|})},{263502005|Clinical course|=424124008|Sudden onset AND/OR short duration|},{363698007|Finding site|=74281007|Myocardium structure|,116676008|Associated morphology|=55470003|Acute infarct|}",
+}
+
+// FuzzParseRenderParse asserts that rendering an expression and parsing the result
+// gives back an equal expression.
+//
+// This is a stronger property than FuzzParse's, and it is worth stating exactly
+// what it does and does not catch.
+//
+// It CATCHES an asymmetry between the two halves: a value the renderer emits
+// without escaping that the parser then reads as something else, a form the
+// renderer produces that the parser rejects, a parser that is not deterministic.
+// The escaping half is the one that matters — the equivalent bug in this
+// repository's ECL parser was a 26-byte input that grew the heap without bound —
+// and writing this property immediately found one: nested expressions were
+// rendered with their definition status, and `( === X )` does not parse, because
+// the grammar allows a definition status on the top-level expression only.
+//
+// It does NOT catch the parser silently dropping part of its input. That loss is
+// invisible on the second pass too, so the two agree. This compares the parser
+// with itself; only a corpus of expressions with known meaning can compare it with
+// the specification, which is what the bundled cases are for.
+func FuzzParseRenderParse(f *testing.F) {
+	for _, seed := range scgSeeds {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, input string) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("rendering panicked on %d bytes of input: %v\n%q", len(input), r, input)
+			}
+		}()
+
+		first, err := scg.Parse(input)
+		if err != nil || first == nil {
+			return // rejected input has nothing to round-trip
+		}
+
+		rendered := first.String()
+
+		start := time.Now()
+		second, err := scg.Parse(rendered)
+		if err != nil {
+			t.Fatalf("the rendering of a valid expression does not parse:\n  input:    %q\n  rendered: %q\n  error:    %v",
+				input, rendered, err)
+		}
+		if !reflect.DeepEqual(first, second) {
+			t.Fatalf("rendering and reparsing changed the expression:\n  input:    %q\n  rendered: %q\n  before:   %#v\n  after:    %#v",
+				input, rendered, first, second)
+		}
+
+		// Rendering is a pure string operation over an already-parsed tree, so it
+		// has no business being slow. A limit far above any real expression, to
+		// catch a new pathological shape rather than to measure anything.
+		if elapsed := time.Since(start); elapsed > 5*time.Second {
+			t.Errorf("reparsing a rendering took %s:\n%q", elapsed.Round(time.Millisecond), rendered)
+		}
+	})
 }
