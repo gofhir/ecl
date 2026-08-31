@@ -263,6 +263,27 @@ type closure struct {
 }
 
 // inMemoryProvider implements ecl.DataProvider against fixture data.
+// The reference provider implements DataProvider and every optional capability,
+// which is what makes it a worked example and what lets the bundled suite exercise
+// the paths those capabilities unlock.
+//
+// Asserted at compile time because the failure is otherwise SILENT: rename a
+// method or change a signature and the provider quietly stops satisfying the
+// interface, VerifyContract skips that check with "the provider does not implement
+// …", the suite stays green, and the README goes on claiming all seven. Nothing
+// enforced the claim until this block existed.
+var (
+	_ ecl.DataProvider = (*inMemoryProvider)(nil)
+
+	_ ecl.BatchPropertiesProvider      = (*inMemoryProvider)(nil)
+	_ ecl.BatchConcreteValuesProvider  = (*inMemoryProvider)(nil)
+	_ ecl.InboundRelationshipsProvider = (*inMemoryProvider)(nil)
+	_ ecl.NegatingDescriptionProvider  = (*inMemoryProvider)(nil)
+	_ ecl.DialectAliasResolver         = (*inMemoryProvider)(nil)
+	_ ecl.DescriptionIDProvider        = (*inMemoryProvider)(nil)
+	_ ecl.RefsetFieldProjector         = (*inMemoryProvider)(nil)
+)
+
 type inMemoryProvider struct {
 	spec            *FixtureSpec
 	concepts        map[string]FixtureConcept

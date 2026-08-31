@@ -534,13 +534,19 @@ func (v *astBuilder) VisitWildcard(_ *grammar.WildcardContext) any {
 //   - termfilter             → *ast.TermFilter
 //   - typefilter             → *ast.TypeFilter
 //   - languagefilter         → *ast.LanguageFilter
-//   - dialectfilter          → *ast.DialectFilter (best-effort — see evaluator)
+//   - dialectfilter          → *ast.DialectFilter, both the dialectId and the
+//     alias form; the alias needs ecl.DialectAliasResolver to evaluate
+//   - descriptionidfilter    → *ast.DescriptionIDFilter, evaluated through
+//     ecl.DescriptionIDProvider
 //   - activefilter           → *ast.ActiveFilter
 //   - modulefilter           → *ast.ModuleFilter
 //   - effectivetimefilter    → *ast.EffectiveTimeFilter
 //
-// descriptionidfilter and acceptabilityfilter sub-rules are currently not
-// emitted — they require additional AST types and are deferred.
+// Every sub-rule of the constraint is emitted. This comment used to say that
+// descriptionidfilter and acceptabilityfilter were deferred; the first has been
+// emitted since v1.2.0 and evaluated since v1.5.0, and there is no
+// acceptabilityfilter rule to defer — acceptabilityset appears only inside a
+// dialect filter, where buildAcceptabilities handles it.
 func (v *astBuilder) buildDescriptionFilterClauses(fc grammar.IDescriptionfilterconstraintContext) []ast.Filter {
 	if fc == nil {
 		return nil
