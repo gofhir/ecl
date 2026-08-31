@@ -65,6 +65,7 @@ func VerifyContract(t *testing.T, newProvider func() ecl.DataProvider) {
 		{"NegatedDescriptionIsNotSetSubtraction", checkNegatedDescriptionIsRowLevel},
 		{"DialectAliasResolvesToRealRefsets", checkDialectAliasResolves},
 		{"DescriptionIDIsApplied", checkDescriptionIDIsMatchable},
+		{"ProjectedMembersMatchRefsetMembers", checkRefsetFieldProjection},
 	}
 
 	for _, c := range checks {
@@ -784,4 +785,95 @@ func checkDescriptionIDIsMatchable(ctx context.Context, t *testing.T, p ecl.Data
 		t.Errorf("`id != %s` matched %d concept(s) but %d have descriptions at all;\n"+
 			"no description carries that id, so every one of them satisfies the negation", absent, got, want)
 	}
+}
+
+// checkRefsetFieldProjection covers RefsetFieldProjector.
+//
+// One property, and it is the one that makes the capability worth having:
+// projecting referencedComponentId must return exactly what RefsetMembers
+// returns. That column IS the member, so the two are the same question asked two
+// ways, and an implementation where they disagree has either a projection that
+// reads the wrong column or a membership that misses rows.
+//
+// It found a real defect in the reference fixture: association reference set rows
+// were reachable through the projection and not through RefsetMembers, so
+// `^ [referencedComponentId] X` returned a member that `^ X` did not.
+//
+// The other fields cannot be checked without knowing the reference set's
+// descriptor, which DataProvider does not expose. Refusing a field is checked
+// only for its ERROR SHAPE, since that is data-independent: a provider that
+// cannot express a field must wrap ErrUnsupportedFeature, so a caller mapping
+// sentinels to HTTP answers does not report an unhealthy backend for an
+// expression that will never work.
+func checkRefsetFieldProjection(ctx context.Context, t *testing.T, p ecl.DataProvider) {
+	projector, ok := p.(ecl.RefsetFieldProjector)
+	if !ok {
+		t.Skip("the provider does not implement ecl.RefsetFieldProjector; `^ [field] X` will report ErrUnsupportedFeature")
+	}
+
+	refsets := discoverRefsets(ctx, t, p)
+	if len(refsets) == 0 {
+		t.Skip("no reference set with members could be discovered, so a projection has nothing to return")
+	}
+
+	for _, refsetID := range refsets {
+		members, err := p.RefsetMembers(ctx, []string{refsetID})
+		if err != nil {
+			t.Fatalf("RefsetMembers: %v", err)
+		}
+		projected, err := projector.ProjectRefsetField(ctx, ecl.RefsetProjectionOpts{
+			RefsetIDs: []string{refsetID},
+			Field:     "referencedComponentId",
+		})
+		if err != nil {
+			t.Fatalf("ProjectRefsetField(referencedComponentId): %v", err)
+		}
+
+		want, got := nonNilSet(members), nonNilSet(projected)
+		if want.Len() != got.Len() || want.Minus(got).Len() > 0 {
+			t.Errorf("reference set %s: RefsetMembers returned %d concept(s) and projecting referencedComponentId returned %d;\n"+
+				"that column is the member itself, so the two must agree — one of them is reading or missing rows",
+				refsetID, want.Len(), got.Len())
+		}
+	}
+
+	// A field no reference set descriptor defines. The shape of the refusal is
+	// what matters, not that it refuses: an empty Set would read as "no members
+	// matched" and be taken for an answer.
+	_, err := projector.ProjectRefsetField(ctx, ecl.RefsetProjectionOpts{
+		RefsetIDs: []string{refsets[0]},
+		Field:     "zzNotAField",
+	})
+	switch {
+	case err == nil:
+		t.Errorf("projecting a field no reference set defines returned no error; an unusable field must be refused, because an empty Set reads as \"no members matched\" and a caller takes that for an answer")
+	case !errors.Is(err, ecl.ErrUnsupportedFeature):
+		t.Errorf("projecting an unusable field returned %v, which does not wrap ecl.ErrUnsupportedFeature;\n"+
+			"a caller mapping sentinels to HTTP answers would report an unhealthy backend for an expression that will never work", err)
+	}
+}
+
+// discoverRefsets finds reference sets that have members, by asking which ones
+// contain the concepts the provider knows. There is no method that enumerates
+// reference sets, so this works with what the interface offers and returns
+// nothing when the provider cannot answer.
+func discoverRefsets(ctx context.Context, t *testing.T, p ecl.DataProvider) []string {
+	t.Helper()
+
+	all, err := p.AllConcepts(ctx)
+	if err != nil {
+		return nil
+	}
+	concepts := nonNilSet(all).Slice()
+	if len(concepts) > 200 {
+		concepts = concepts[:200] // a sample is enough to find a reference set
+	}
+
+	found, err := p.RefsetsContainingMembers(ctx, concepts)
+	if err != nil {
+		return nil
+	}
+	out := nonNilSet(found).Slice()
+	sort.Strings(out)
+	return out
 }

@@ -343,3 +343,30 @@ cases:
   - name: an id nothing carries matches nothing
     expression: '<< 138875005 {{ D id = 999999999999 }}'
     expectedIds: []
+
+  # ── Member filters over several clauses ───────────────────────────────────
+  # A reference set may hold SEVERAL rows for one member -- a complex map has one
+  # per map group -- and a member filter with several clauses asks for a single
+  # row satisfying all of them. 95566004 has a row in map group 2 and a row
+  # mapping to I10, and no row with both.
+  #
+  # Answered one clause at a time and intersected, which is all
+  # RefsetMembersFiltered can express, the third case below returns 95566004:
+  # the concept has a row in group 2, and a row mapping to I10. That is a WIDER
+  # answer than the expression asks for, and silently so. It is why several
+  # clauses go to ecl.RefsetFieldProjector, which takes them all on one call.
+  - name: one clause selects the member that has a matching row
+    expression: '^ 447562003 {{ M mapGroup = "2" }}'
+    expectedIds: ["95566004"]
+
+  - name: another clause, matching a different row of the same member
+    expression: '^ 447562003 {{ M mapTarget = "I10" }}'
+    expectedIds: ["95566004"]
+
+  - name: two clauses satisfied by DIFFERENT rows do not match
+    expression: '^ 447562003 {{ M mapGroup = "2", mapTarget = "I10" }}'
+    expectedIds: []
+
+  - name: two clauses satisfied by the same row match
+    expression: '^ 447562003 {{ M mapGroup = "2", mapTarget = "I15.9" }}'
+    expectedIds: ["95566004"]

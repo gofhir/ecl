@@ -36,3 +36,28 @@ cases:
   - name: altIdentifier - unknown scheme returns empty
     expression: "ICD10#E11"
     expectedIds: []
+
+  # ── memberOf field projection ─────────────────────────────────────────────
+  # `^ [field] X` returns a member field instead of the members, through the
+  # optional ecl.RefsetFieldProjector. The pair below is what makes it worth
+  # having: the members of the SAME AS association reference set are the INACTIVE
+  # concepts, and the field points at what replaced them, so the projection
+  # answers a different question from listing the members.
+  - name: projecting referencedComponentId equals the plain memberOf
+    expression: "^ [referencedComponentId] 900000000000527005"
+    expectedIds: ["11111111"]
+
+  - name: projecting targetComponentId returns the replacements, not the members
+    expression: "^ [targetComponentId] 900000000000527005"
+    expectedIds: ["22298006"]
+
+  # A member filter on a projection restricts which member ROWS are projected. It
+  # names referencedComponentId while the result is targetComponentId, so applying
+  # it to the result instead would compare the wrong column and return nothing.
+  - name: a member filter selects which rows are projected
+    expression: "^ [targetComponentId] 900000000000527005 {{ M referencedComponentId = 11111111 }}"
+    expectedIds: ["22298006"]
+
+  - name: a member filter matching no row projects nothing
+    expression: "^ [targetComponentId] 900000000000527005 {{ M referencedComponentId = 22222222 }}"
+    expectedIds: []

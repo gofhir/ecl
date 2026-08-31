@@ -24,6 +24,8 @@ import "context"
 //     reference set is terminology data no parser can compute.
 //   - DescriptionFilterOpts has no field for a description's own SCTID, and
 //     adding one would make the constraint vanish for every existing provider.
+//   - A reference set member has columns other than the member itself, and which
+//     of them hold a component id depends on the reference set descriptor.
 //
 // Note what is NOT here. A filter value SET — `{{ D term = ("a" "b") }}`,
 // `{{ C effectiveTime = ("20240131" "20230731") }}` — has any-of semantics, so it
@@ -199,4 +201,58 @@ type DescriptionIDFilterOpts struct {
 	// negating those needs NegatingDescriptionProvider, and the evaluator reports
 	// the combination rather than guessing which of the two should win.
 	Negate bool
+}
+
+// RefsetFieldProjector returns the values of ONE reference set member field.
+//
+// Implement it to enable the projection form of the memberOf operator:
+//
+//	^ [targetComponentId] 900000000000527005 |SAME AS association reference set|
+//
+// which is how the specification's own examples ask "what replaced this inactive
+// concept?" — the members are the historical concepts, and the answer wanted is
+// the field pointing at their replacements, not the members themselves.
+//
+// # One field, and it must hold concept ids
+//
+// `^[a,b]` names several fields and is inherently TABULAR: two columns cannot be
+// a Set, and picking one or unioning them would answer a different question. The
+// evaluator reports that form rather than choosing, and so does `^[*]`.
+//
+// A field holding something other than a component id — mapTarget, mapAdvice,
+// mapPriority — cannot be a Set of concept ids either. The evaluator cannot know
+// which fields those are, since it depends on the reference set's descriptor, so
+// the implementation is the one that must refuse.
+//
+// Refuse by returning an error that WRAPS ErrUnsupportedFeature, naming the
+// field. That is not decoration: the evaluator passes such an error through
+// without adding ErrProvider, so a caller mapping sentinels to HTTP answers says
+// 501 for an expression that will never work rather than 503 for a backend that
+// is perfectly healthy. Returning the empty Set instead would be worse than
+// either — it reads as "no members matched", and a caller would take it for an
+// answer.
+//
+// # The member filter travels with the projection
+//
+// A `{{ M ... }}` constraint on the same expression restricts which member ROWS
+// are projected, so it arrives in Filters rather than being applied afterwards.
+// Applying it afterwards would filter the projected VALUES, which are a different
+// column of a different row — the whole point of the example above is that the
+// filter names referencedComponentId while the result is targetComponentId.
+type RefsetFieldProjector interface {
+	ProjectRefsetField(ctx context.Context, opts RefsetProjectionOpts) (Set, error)
+}
+
+// RefsetProjectionOpts describes a reference set field projection.
+type RefsetProjectionOpts struct {
+	// RefsetIDs are the reference sets whose members to project, with any-of
+	// semantics.
+	RefsetIDs []string
+
+	// Field is the member field to return, e.g. "targetComponentId". Never empty.
+	Field string
+
+	// Filters are the `{{ M ... }}` clauses that must ALL hold on the same member
+	// row as the projected field. Empty when the expression has none.
+	Filters []MemberFilterOpts
 }
