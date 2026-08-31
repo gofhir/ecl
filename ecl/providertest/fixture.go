@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -151,16 +152,30 @@ func NewInMemoryProvider(spec *FixtureSpec) ecl.DataProvider {
 		}
 		p.relsBySource[r.Source] = append(p.relsBySource[r.Source], rel)
 	}
-	for refsetID, members := range spec.Refsets {
-		set := make(map[string]struct{}, len(members))
-		for _, m := range members {
-			set[m] = struct{}{}
-			if p.refsetsByMember[m] == nil {
-				p.refsetsByMember[m] = make(map[string]struct{})
-			}
-			p.refsetsByMember[m][refsetID] = struct{}{}
+	addMember := func(refsetID, member string) {
+		if p.refsetMembers[refsetID] == nil {
+			p.refsetMembers[refsetID] = make(map[string]struct{})
 		}
-		p.refsetMembers[refsetID] = set
+		p.refsetMembers[refsetID][member] = struct{}{}
+		if p.refsetsByMember[member] == nil {
+			p.refsetsByMember[member] = make(map[string]struct{})
+		}
+		p.refsetsByMember[member][refsetID] = struct{}{}
+	}
+	for refsetID, members := range spec.Refsets {
+		for _, m := range members {
+			addMember(refsetID, m)
+		}
+	}
+	// An association declared under historicalAssociations IS a reference set
+	// member, and its source is the referencedComponentId. Without this,
+	// `^ 900000000000527005` returned nothing while
+	// `^ [referencedComponentId] 900000000000527005` returned the member — and
+	// those two are the same question, since referencedComponentId is the default
+	// projection. Declaring the rows a second time under refsets would have left
+	// two copies to drift apart instead.
+	for _, h := range spec.HistoricalAssociations {
+		addMember(h.Refset, h.Source)
 	}
 
 	// Build transitive closure from direct parents.
@@ -948,4 +963,129 @@ func (p *inMemoryProvider) MatchDescriptionByID(_ context.Context, filter ecl.De
 		}
 	}
 	return out, nil
+}
+
+// componentIDFields are the member fields that hold a component id, and so can
+// be returned as a Set of concept ids.
+//
+// Every reference set has referencedComponentId as its first column, and
+// association reference sets add targetComponentId. Any other field — mapTarget, mapAdvice,
+// mapPriority — holds a value that is not a concept, and projecting it would
+// produce a Set of things that are not concept ids.
+var componentIDFields = map[string]bool{
+	"referencedComponentId": true,
+	"targetComponentId":     true,
+}
+
+// ProjectRefsetField implements ecl.RefsetFieldProjector.
+//
+// Filters are applied to the member ROW, then the requested field of the rows
+// that survive is returned. That ordering is the whole point: the filter and the
+// projection are different columns of the same row, so filtering the projected
+// values afterwards would compare the wrong column.
+//
+// A field this fixture cannot express as a concept id is an ERROR rather than an
+// empty result. Empty would read as "no members matched", and a caller would take
+// that for an answer.
+func (p *inMemoryProvider) ProjectRefsetField(_ context.Context, opts ecl.RefsetProjectionOpts) (ecl.Set, error) {
+	if !componentIDFields[opts.Field] {
+		// Wrapping the sentinel is what the capability asks for: the evaluator
+		// passes it through without adding ErrProvider, so this reads as "the
+		// expression cannot be answered" rather than "the backend is unwell".
+		return nil, fmt.Errorf("%w: member field %q does not hold a component id, so it cannot be projected into a Set of concept ids",
+			ecl.ErrUnsupportedFeature, opts.Field)
+	}
+
+	out := ecl.NewSet()
+	for _, refsetID := range opts.RefsetIDs {
+		for _, row := range p.memberRows(refsetID) {
+			if !row.matches(opts.Filters) {
+				continue
+			}
+			if value := row.field(opts.Field); value != "" {
+				out = out.Union(ecl.NewSetFromSlice([]string{value}))
+			}
+		}
+	}
+	return out, nil
+}
+
+// memberRow is one reference set member with the fields declared for it.
+type memberRow struct {
+	member string
+	fields map[string]string
+}
+
+// field returns one column of the row. The referencedComponentId column is the
+// member itself — every reference set's first column, not an extra field someone
+// has to declare.
+func (r memberRow) field(name string) string {
+	if name == "referencedComponentId" {
+		return r.member
+	}
+	return r.fields[name]
+}
+
+// matches reports whether every filter holds on this row.
+func (r memberRow) matches(filters []ecl.MemberFilterOpts) bool {
+	for _, f := range filters {
+		matched := f.ValueSet != nil && f.ValueSet.Contains(r.field(f.FieldName))
+		if f.Op == "!=" {
+			matched = !matched
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+// memberRows assembles the members of one reference set from whichever fixture
+// section declares them.
+//
+// Association reference sets are declared under historicalAssociations, not under
+// refsets: the source is the member and the target is its targetComponentId. That
+// is where the projection form is actually useful, so reading it from there keeps
+// ONE source of truth. Declaring the same rows a second time under refsets and
+// memberFields — which is what the first attempt at this did — leaves two copies
+// to drift apart, and the copy was already wrong: it named concepts the fixture
+// does not have.
+func (p *inMemoryProvider) memberRows(refsetID string) []memberRow {
+	byMember := map[string]memberRow{}
+	get := func(member string) memberRow {
+		row, ok := byMember[member]
+		if !ok {
+			row = memberRow{member: member, fields: map[string]string{}}
+			byMember[member] = row
+		}
+		return row
+	}
+
+	for _, member := range p.spec.Refsets[refsetID] {
+		get(member)
+	}
+	for _, mf := range p.spec.MemberFields {
+		if mf.Refset == refsetID {
+			get(mf.Member).fields[mf.FieldName] = mf.Value
+		}
+	}
+	for _, h := range p.spec.HistoricalAssociations {
+		if h.Refset == refsetID {
+			get(h.Source).fields["targetComponentId"] = h.Target
+		}
+	}
+
+	// Sorted, so the result is built in a stable order. The Set does not care,
+	// but a fixture that iterates a map is a fixture whose bugs come and go.
+	members := make([]string, 0, len(byMember))
+	for member := range byMember {
+		members = append(members, member)
+	}
+	sort.Strings(members)
+
+	rows := make([]memberRow, 0, len(members))
+	for _, member := range members {
+		rows = append(rows, byMember[member])
+	}
+	return rows
 }

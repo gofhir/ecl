@@ -111,3 +111,21 @@ cases:
     expression: "* : [2..*] { R 363698007 = 22298006 }"
     expectError: true
 
+
+  # A projection naming several fields is a TABLE, and a projection of every field
+  # more so. A Set is one column of concept ids, so picking one field or unioning
+  # them would answer a different question. `^[*]` used to be the worst of the
+  # three: it left no trace in the AST and was evaluated as a plain `^`.
+  - name: a multi-field projection is reported as unsupported
+    expression: "^ [mapTarget,mapGroup] 900000000000497000"
+    expectError: true
+
+  - name: the wildcard projection is reported as unsupported
+    expression: "^ [*] 900000000000497000"
+    expectError: true
+
+  # Only the PROVIDER knows which member fields hold a component id, so it is the
+  # one that refuses -- wrapping ErrUnsupportedFeature, not ErrProvider.
+  - name: projecting a field that is not a component id is reported as unsupported
+    expression: "^ [mapTarget] 900000000000497000"
+    expectError: true

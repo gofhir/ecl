@@ -192,22 +192,8 @@ func evaluateNode(ctx context.Context, expr ast.Expression, provider DataProvide
 
 	case *ast.MemberOf:
 		// The operand evaluates to a set of refset IDs; we then fetch the
-		// union of members across those refsets.
-		//
-		// Field projections (^ [field1,field2]) cannot be expressed through
-		// the Set return type because Set carries only concept IDs, not
-		// per-field values. Reject explicitly rather than silently dropping
-		// the projection. Use a MemberFieldFilter inside a {{ M ... }}
-		// constraint when you need per-field filtering.
-		if len(e.Fields) > 0 {
-			return nil, fmt.Errorf("%w: MemberOf field projection ^[%s]; Set carries concept IDs only, so use a {{ M ... }} member filter instead",
-				ErrUnsupportedFeature, strings.Join(e.Fields, ","))
-		}
-		refsetIDs, err := Evaluate(ctx, e.Operand, provider)
-		if err != nil {
-			return nil, fmt.Errorf("evaluating %T: %w", expr, err)
-		}
-		return provider.RefsetMembers(ctx, toIDSlice(refsetIDs))
+		// union of members across those refsets, or project one of their fields.
+		return evaluateMemberOf(ctx, e, nil, provider)
 
 	// ── Refinements (Phase 3.3, 3.4) ─────────────────────────────────────
 
@@ -1099,14 +1085,37 @@ func matchConcreteValue(cv *ConcreteValue, c attrClause) bool {
 //  3. delegating to provider.MatchDescription / provider.FilterConcepts,
 //  4. intersecting the results with the base set.
 //
-// Member filters are not yet supported (they require refset field projection,
-// which is deferred to a later phase).
+// A member filter over a PROJECTION is the exception to step 4: it restricts
+// which member rows are projected rather than which results survive, so it is
+// handed to evaluateMemberOf and the operand is evaluated once, there. See
+// projectedMemberOf.
 func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvider) (Set, error) {
-	base, err := Evaluate(ctx, e.Operand, provider)
-	if err != nil {
-		return nil, fmt.Errorf("evaluating Filtered operand: %w", err)
-	}
 	descFilters, conceptFilters, memberFilters := categorizeFilters(e.Filters)
+
+	// A projecting memberOf must see the member filters, so its operand is NOT
+	// evaluated by the generic path above: `^ [targetComponentId] X {{ M
+	// referencedComponentId = Y }}` filters one column and returns another, and
+	// intersecting the returned column with a filter on a different column
+	// answers nothing anybody asked.
+	var base Set
+	if mo := projectedMemberOf(e.Operand); mo != nil {
+		opts, err := memberFilterOptsOf(ctx, memberFilters, provider)
+		if err != nil {
+			return nil, err
+		}
+		if base, err = evaluateMemberOf(ctx, mo, opts, provider); err != nil {
+			return nil, err
+		}
+		// Consumed by the projection. Everything below then treats the projected
+		// values as an ordinary set of concept ids, which is what they are:
+		// description and concept filters still apply to them.
+		memberFilters = nil
+	} else {
+		var err error
+		if base, err = Evaluate(ctx, e.Operand, provider); err != nil {
+			return nil, fmt.Errorf("evaluating Filtered operand: %w", err)
+		}
+	}
 
 	result := base
 
@@ -1116,27 +1125,9 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 			if !ok {
 				continue
 			}
-			// A member field may hold a literal (a map target, an order, a flag)
-			// rather than a concept reference, so a literal must NOT go through
-			// Evaluate: there is nothing to resolve, and the type switch there
-			// rejects it with "unsupported AST node type: *ast.StringValue".
-			// That made every `{{ M mapTarget = "..." }}` fail at runtime even
-			// though the README lists memberField as supported.
-			var valueSet Set
-			if field.Value != nil {
-				if lit, ok := literalText(field.Value); ok {
-					valueSet = NewSetFromSlice([]string{lit})
-				} else {
-					valueSet, err = Evaluate(ctx, field.Value, provider)
-					if err != nil {
-						return nil, fmt.Errorf("evaluating member filter value: %w", err)
-					}
-				}
-			}
-			opts := MemberFilterOpts{
-				FieldName: field.FieldName,
-				Op:        field.Op,
-				ValueSet:  valueSet,
+			opts, err := oneMemberFilterOpts(ctx, field, provider)
+			if err != nil {
+				return nil, err
 			}
 			// Get the refset IDs from the base operand if it's a MemberOf.
 			var refsetIDs []string
@@ -2031,4 +2022,134 @@ func descriptionIDFilterOf(filters []ast.Filter) *ast.DescriptionIDFilter {
 		}
 	}
 	return nil
+}
+
+// evaluateMemberOf answers the memberOf operator, with or without a field
+// projection.
+//
+// The filters argument carries the `{{ M ... }}` clauses of the surrounding constraint, when
+// there is one. They belong HERE rather than being applied to the result: they
+// restrict which member ROWS are projected, and for a projection the result is a
+// different column of those rows. `^ [targetComponentId] X {{ M
+// referencedComponentId = Y }}` filters on one field and returns another, so
+// filtering the returned values would compare the wrong column.
+func evaluateMemberOf(ctx context.Context, e *ast.MemberOf, filters []MemberFilterOpts, provider DataProvider) (Set, error) {
+	refsetIDSet, err := Evaluate(ctx, e.Operand, provider)
+	if err != nil {
+		return nil, fmt.Errorf("evaluating *ast.MemberOf: %w", err)
+	}
+	refsetIDs := toIDSlice(refsetIDSet)
+
+	if err := checkProjectionSupport(e); err != nil {
+		return nil, err
+	}
+
+	if len(e.Fields) == 1 {
+		projector, ok := provider.(RefsetFieldProjector)
+		if !ok {
+			return nil, fmt.Errorf("%w: the memberOf field projection ^[%s] requires a provider implementing ecl.RefsetFieldProjector; the members and the projected field are different columns of the same row, so it cannot be composed from the member set",
+				ErrUnsupportedFeature, e.Fields[0])
+		}
+		projected, err := projector.ProjectRefsetField(ctx, RefsetProjectionOpts{
+			RefsetIDs: refsetIDs,
+			Field:     e.Fields[0],
+			Filters:   filters,
+		})
+		if err != nil {
+			// A provider refusing a FIELD is a capability limit, not a backend
+			// failure: only the provider knows which member fields hold component
+			// ids, so "mapTarget cannot be a Set of concept ids" has to come from
+			// there. Wrapping that in ErrProvider as well would make a CLI answer
+			// 503 for an expression that will never work, however healthy the
+			// backend is.
+			if errors.Is(err, ErrUnsupportedFeature) {
+				return nil, fmt.Errorf("ProjectRefsetField: %w", err)
+			}
+			return nil, fmt.Errorf("%w: ProjectRefsetField: %w", ErrProvider, err)
+		}
+		return nonNil(projected), nil
+	}
+
+	members, err := provider.RefsetMembers(ctx, refsetIDs)
+	if err != nil {
+		return nil, fmt.Errorf("%w: RefsetMembers: %w", ErrProvider, err)
+	}
+	return nonNil(members), nil
+}
+
+// checkProjectionSupport reports the projection forms that cannot be a Set.
+//
+// Both are tabular rather than merely unimplemented: `^[a,b]` asks for two
+// columns and `^[*]` for every column, and a Set is one column of concept ids.
+// Picking one of the fields, or unioning them, would answer a different question
+// — which is what `^[*]` used to do, silently, by leaving no trace in the AST at
+// all and being evaluated as a plain `^`.
+func checkProjectionSupport(e *ast.MemberOf) error {
+	switch {
+	case e.AllFields:
+		return fmt.Errorf("%w: the memberOf wildcard projection ^[*] asks for every member field, which a Set of concept ids cannot carry; name a single field, or use a {{ M ... }} member filter",
+			ErrUnsupportedFeature)
+	case len(e.Fields) > 1:
+		return fmt.Errorf("%w: the memberOf projection ^[%s] names %d fields, which is a table rather than a set of concept ids; name a single field",
+			ErrUnsupportedFeature, strings.Join(e.Fields, ","), len(e.Fields))
+	}
+	return nil
+}
+
+// projectedMemberOf returns the operand when it is a memberOf carrying a field
+// projection, and nil otherwise. Only a projection needs the special routing; a
+// plain `^` composes with a member filter the ordinary way.
+func projectedMemberOf(operand ast.Expression) *ast.MemberOf {
+	mo, ok := operand.(*ast.MemberOf)
+	if !ok {
+		return nil
+	}
+	if len(mo.Fields) == 0 && !mo.AllFields {
+		return nil
+	}
+	return mo
+}
+
+// memberFilterOptsOf converts every member filter clause of a constraint.
+func memberFilterOptsOf(ctx context.Context, filters []ast.Filter, provider DataProvider) ([]MemberFilterOpts, error) {
+	out := make([]MemberFilterOpts, 0, len(filters))
+	for _, f := range filters {
+		field, ok := f.(*ast.MemberFieldFilter)
+		if !ok {
+			continue
+		}
+		opts, err := oneMemberFilterOpts(ctx, field, provider)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, opts)
+	}
+	return out, nil
+}
+
+// oneMemberFilterOpts converts a single member filter clause.
+//
+// A member field may hold a literal (a map target, an order, a flag) rather than
+// a concept reference, so a literal must NOT go through Evaluate: there is
+// nothing to resolve, and the type switch there rejects it with "unsupported AST
+// node type: *ast.StringValue". That made every `{{ M mapTarget = "..." }}` fail
+// at runtime even though the README listed memberField as supported.
+func oneMemberFilterOpts(ctx context.Context, field *ast.MemberFieldFilter, provider DataProvider) (MemberFilterOpts, error) {
+	var valueSet Set
+	if field.Value != nil {
+		if lit, ok := literalText(field.Value); ok {
+			valueSet = NewSetFromSlice([]string{lit})
+		} else {
+			resolved, err := Evaluate(ctx, field.Value, provider)
+			if err != nil {
+				return MemberFilterOpts{}, fmt.Errorf("evaluating member filter value: %w", err)
+			}
+			valueSet = resolved
+		}
+	}
+	return MemberFilterOpts{
+		FieldName: field.FieldName,
+		Op:        field.Op,
+		ValueSet:  valueSet,
+	}, nil
 }

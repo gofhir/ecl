@@ -51,6 +51,12 @@ concepts:
   - {id: "900000000000548007", display: "Preferred"}
   - {id: "900000000000549004", display: "Acceptable"}
   # Map refset, for {{ M ... }} member filters
+  # The association reference sets, which must exist as concepts: a refset id is
+  # resolved like any other concept reference, so one that is absent makes
+  # `^ 900000000000527005` return nothing before the refset is ever consulted.
+  - {id: "900000000000527005", display: "SAME AS association reference set"}
+  - {id: "900000000000528000", display: "REPLACED BY association reference set"}
+  - {id: "900000000000523009", display: "POSSIBLY EQUIVALENT TO association reference set"}
   - {id: "900000000000497000", display: "CTV3 simple map reference set"}
   # Module SCTIDs referenced by the metadata above
   - {id: "900000000000207008", display: "SNOMED CT core module"}

@@ -411,6 +411,12 @@ func (v *astBuilder) VisitSubexpressionconstraint(ctx *grammar.Subexpressioncons
 					mo.Fields = append(mo.Fields, fn.GetText())
 				}
 			}
+			// `^[*]` asks for every member field. Recorded separately: with only
+			// a Fields slice it left no trace at all, so the evaluator could not
+			// tell it from a plain `^` and answered the default projection.
+			if memberCtx.Wildcard() != nil {
+				mo.AllFields = true
+			}
 			focusExpr = mo
 		} else if refOp.RefsetContainingAny() != nil {
 			focusExpr = &ast.RefsetContainingAny{Operand: focusExpr}

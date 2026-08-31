@@ -414,12 +414,36 @@ func TestEvaluate_NegatedDialectIsOwnedByTheProvider(t *testing.T) {
 }
 
 // TestEvaluate_MemberOfProjectionIsClassifiable covers the field-projection
-// rejection carrying the sentinel, so the CLI maps it to the documented exit code
-// rather than to a generic failure.
+// rejections carrying the sentinel, so the CLI maps them to the documented exit
+// code rather than to a generic failure.
+//
+// The two refusals come from different places and both must classify the same
+// way. A projection naming several fields is tabular and the EVALUATOR rejects
+// it. A projection naming one field that does not hold a component id can only be
+// judged by the PROVIDER, which knows the reference set descriptor — and its
+// error must not additionally be an ErrProvider, or a caller mapping sentinels to
+// HTTP answers would say 503 for an expression that will never work.
 func TestEvaluate_MemberOfProjectionIsClassifiable(t *testing.T) {
-	_, err := evalFixtureErr(t, "^ [mapTarget] 900000000000497000")
-	require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
-	require.Contains(t, err.Error(), "^[mapTarget]", "the field list must not be rendered as a Go slice")
+	t.Run("several fields, rejected by the evaluator", func(t *testing.T) {
+		_, err := evalFixtureErr(t, "^ [mapTarget,mapGroup] 900000000000497000")
+		require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
+		require.Contains(t, err.Error(), "^[mapTarget,mapGroup]",
+			"the field list must not be rendered as a Go slice")
+	})
+
+	t.Run("a field that is not a component id, refused by the provider", func(t *testing.T) {
+		_, err := evalFixtureErr(t, "^ [mapTarget] 900000000000497000")
+		require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
+		require.NotErrorIs(t, err, ecl.ErrProvider,
+			"a provider that cannot express a field is a capability limit, not an unhealthy backend")
+		require.Contains(t, err.Error(), "mapTarget")
+	})
+
+	t.Run("the wildcard projection", func(t *testing.T) {
+		_, err := evalFixtureErr(t, "^ [*] 900000000000497000")
+		require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
+		require.Contains(t, err.Error(), "^[*]")
+	})
 }
 
 // TestEvaluate_ReverseCardinalityCountsSourceConcepts pins the counting rule to

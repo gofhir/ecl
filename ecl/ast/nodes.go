@@ -62,7 +62,17 @@ type Nested struct{ Inner Expression }
 // MemberOf represents the ^ (member of) refset operator.
 type MemberOf struct {
 	Operand Expression
-	Fields  []string // optional field names from ^[field1,field2]
+
+	// Fields are the member fields named by `^[field1,field2]`. Empty when the
+	// operator carries no projection, which selects referencedComponentId.
+	Fields []string
+
+	// AllFields records the wildcard projection `^[*]`, which asks for every
+	// member field. It is separate from Fields because an empty Fields slice
+	// would otherwise be indistinguishable from a plain `^` — and `^[*] X` was
+	// silently evaluated as `^ X`, answering a narrower question than the one
+	// asked without saying so.
+	AllFields bool
 }
 
 // --- RefsetContainingAny ---.
