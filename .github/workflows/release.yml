@@ -19,7 +19,7 @@ jobs:
       # bump-minor-pre-major and bump-patch-for-minor-pre-major among them --
       # never applied. That is how the jump to v1.0.0 happened without anyone
       # deciding on it.
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: release
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
