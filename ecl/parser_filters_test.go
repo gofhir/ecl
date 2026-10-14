@@ -121,27 +121,35 @@ func TestParse_DescriptionIDFilterIsModeled(t *testing.T) {
 }
 
 // TestParse_FilterBlocksNestInSourceOrder covers the shape the evaluator relies
-// on: one Filtered per D or C block, carrying its family, nested so the block
-// written first is innermost — and all M blocks in one Filtered over the
-// MemberOf. Flattening every block into one node is what lost both the block
-// boundaries and the D/C/M scope.
+// on: one Filtered per block, carrying its family, nested so the block written
+// first is innermost — the M blocks innermost of all, over the MemberOf.
+// Flattening every block into one node is what lost both the block boundaries
+// and the D/C/M scope.
 func TestParse_FilterBlocksNestInSourceOrder(t *testing.T) {
-	tree, err := Parse(`^ 447562003 {{ M mapGroup = "2" }} {{ C active = true }} {{ D term = "heart" }} {{ active = false }}`)
+	tree, err := Parse(`^ 447562003 {{ M mapGroup = "2" }} {{ M mapTarget = "I10" }} {{ C active = true }} {{ D term = "heart" }} {{ active = false }}`)
 	require.NoError(t, err)
 
-	var families []ast.FilterFamily
+	var (
+		families []ast.FilterFamily
+		member   []string
+	)
 	for {
 		f, ok := tree.(*ast.Filtered)
 		if !ok {
 			break
 		}
 		families = append(families, f.Family)
+		if f.Family == ast.FamilyMember {
+			require.Len(t, f.Filters, 1, "one M block per node")
+			member = append(member, f.Filters[0].(*ast.MemberFieldFilter).FieldName)
+		}
 		tree = f.Operand
 	}
 	// Outermost first: the last block written wraps the others. The
 	// unprefixed block is a description filter, as the grammar makes D optional.
 	require.Equal(t, []ast.FilterFamily{
-		ast.FamilyDescription, ast.FamilyDescription, ast.FamilyConcept, ast.FamilyMember,
+		ast.FamilyDescription, ast.FamilyDescription, ast.FamilyConcept, ast.FamilyMember, ast.FamilyMember,
 	}, families)
+	require.Equal(t, []string{"mapTarget", "mapGroup"}, member, "M blocks in source order, the first innermost")
 	require.IsType(t, &ast.MemberOf{}, tree, "the M blocks sit directly over the MemberOf they filter")
 }

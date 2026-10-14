@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -1163,8 +1164,12 @@ func matchConcreteValue(cv *ConcreteValue, c attrClause) bool {
 // A member filter over a PROJECTION is the exception to step 4: it restricts
 // which member rows are projected rather than which results survive, so it is
 // handed to evaluateMemberOf and the operand is evaluated once, there. See
-// projectedMemberOf.
+// projectedMemberOf. Several `{{ M … }}` blocks over one operand go to
+// evaluateMemberBlocks.
 func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvider) (Set, error) {
+	if blocks, mo := memberBlocks(e); len(blocks) > 1 {
+		return evaluateMemberBlocks(ctx, blocks, mo, provider)
+	}
 	descFilters, conceptFilters, memberFilters, err := categorizeFilters(e.Filters, e.Family)
 	if err != nil {
 		return nil, err
@@ -1175,11 +1180,12 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 	// referencedComponentId = Y }}` filters one column and returns another, and
 	// intersecting the returned column with a filter on a different column
 	// answers nothing anybody asked.
-	if len(memberFilters) > 0 && e.Family == ast.FamilyMember && memberOfOperand(e.Operand) == nil {
+	if len(memberFilters) > 0 && memberOfOperand(e.Operand) == nil {
 		// The grammar admits `{{ M … }}` after a focus with no `^`, where there
-		// are no member rows to filter. Reading the focus concepts as reference
-		// sets, as the generic path would, answers a question nobody wrote.
-		return nil, fmt.Errorf("%w: a member filter needs a memberOf (^) operand, whose member rows it filters", ErrUnsupportedFeature)
+		// are no member rows to filter, and a hand-built tree may nest member
+		// clauses of Family "" over each other. Reading the focus concepts as
+		// reference sets answers a question nobody wrote.
+		return nil, errMemberFilterNeedsMemberOf
 	}
 	clauses, noRows, err := memberFilterOptsOf(ctx, memberFilters, provider)
 	if err != nil {
@@ -1208,7 +1214,7 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 		// The rows decide, so `^ R`'s own member set would be fetched only to be
 		// replaced; membersMatching resolves the reference sets, and their
 		// errors, itself.
-		matched, err := membersMatching(ctx, e.Operand, nil, clauses, provider)
+		matched, err := membersMatching(ctx, e.Operand, clauses, provider)
 		if err != nil {
 			return nil, err
 		}
@@ -1235,7 +1241,7 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 	// Every clause may have constrained nothing — excluding a module set that
 	// names none — and then the members stand as they are.
 	if len(clauses) > 0 {
-		matched, err := membersMatching(ctx, e.Operand, base, clauses, provider)
+		matched, err := membersMatching(ctx, e.Operand, clauses, provider)
 		if err != nil {
 			return nil, err
 		}
@@ -1583,6 +1589,140 @@ func rowActiveDefault(clauses []MemberFilterOpts, provider DataProvider) ([]Memb
 		MemberFilterOpts{FieldName: MemberColumnActive, Op: "=", ValueSet: NewSetFromSlice([]string{"1"})}), true
 }
 
+var errMemberFilterNeedsMemberOf = fmt.Errorf("%w: a member filter needs a memberOf (^) operand, whose member rows it filters", ErrUnsupportedFeature)
+
+// memberBlocks returns the `{{ M … }}` blocks nested over one operand,
+// innermost first, and that operand. It returns no block for a node that is
+// not a member block, and none for a chain with a node that also holds
+// description or concept clauses, which only a hand-built tree has: such a
+// node is left to evaluateFiltered, which reads its clauses by family.
+func memberBlocks(e *ast.Filtered) (blocks [][]ast.Filter, operand ast.Expression) {
+	var outerFirst [][]ast.Filter
+	for {
+		if !onlyMemberClauses(e) {
+			return nil, nil
+		}
+		outerFirst = append(outerFirst, e.Filters)
+		inner, ok := e.Operand.(*ast.Filtered)
+		if !ok || inner.Family != ast.FamilyMember {
+			break
+		}
+		e = inner
+	}
+	slices.Reverse(outerFirst)
+	return outerFirst, e.Operand
+}
+
+// onlyMemberClauses reports whether e is a member block holding member
+// clauses only.
+func onlyMemberClauses(e *ast.Filtered) bool {
+	if e.Family != ast.FamilyMember {
+		return false
+	}
+	desc, concept, _, err := categorizeFilters(e.Filters, e.Family)
+	return err == nil && len(desc) == 0 && len(concept) == 0
+}
+
+// evaluateMemberBlocks answers several `{{ M … }}` blocks over one operand
+// (H2m). Over a plain `^ R` each block is satisfied on its own member row, so
+// a member passes when each block holds on some row of it: the blocks'
+// members intersect. Over a field projection the result is a column of ONE
+// row, so every block holds on that row, as one block would.
+//
+// Every block is validated before any is sent, so a refusal does not depend
+// on block order, and the reference sets and their members are fetched once
+// for all blocks. Otherwise each block is what evaluateFiltered makes of it.
+func evaluateMemberBlocks(ctx context.Context, blocks [][]ast.Filter, operand ast.Expression, provider DataProvider) (Set, error) {
+	if projectedMemberOf(operand) != nil {
+		return evaluateFiltered(ctx, &ast.Filtered{Operand: operand, Filters: slices.Concat(blocks...), Family: ast.FamilyMember}, provider)
+	}
+	mo := memberOfOperand(operand)
+	if mo == nil {
+		return nil, errMemberFilterNeedsMemberOf
+	}
+	type block struct {
+		clauses    []MemberFilterOpts
+		rowsDecide bool
+	}
+	perBlock := make([]block, len(blocks))
+	noRows := false
+	for i, b := range blocks {
+		clauses, none, err := memberFilterOptsOf(ctx, b, provider)
+		if err != nil {
+			return nil, err
+		}
+		perBlock[i].clauses, noRows = clauses, noRows || none
+	}
+	if !noRows {
+		// The rows' own default too, so a block that needs several clauses on
+		// one row is refused here, before any block is sent; with no row to
+		// match, nothing is sent, as for one block.
+		for i := range perBlock {
+			if len(perBlock[i].clauses) > 0 {
+				perBlock[i].clauses, perBlock[i].rowsDecide = rowActiveDefault(perBlock[i].clauses, provider)
+			}
+			if err := checkMemberRowSupport(perBlock[i].clauses, provider); err != nil {
+				return nil, err
+			}
+		}
+	}
+	refsetIDSet, err := Evaluate(ctx, mo.Operand, provider)
+	if err != nil {
+		return nil, fmt.Errorf("evaluating member filter refset: %w", err)
+	}
+	if noRows {
+		// After the operand, so its errors still surface, as for one block.
+		return NewSet(), nil
+	}
+	refsetIDs := toIDSlice(refsetIDSet)
+
+	// `^ R`'s own members, the active rows: what a block that constrains
+	// nothing leaves, and what a block whose rows do not decide intersects.
+	var members Set
+	activeMembers := func() (Set, error) {
+		if members == nil {
+			m, err := provider.RefsetMembers(ctx, refsetIDs)
+			if err != nil {
+				return nil, providerError(ctx, "RefsetMembers", err)
+			}
+			members = nonNil(m)
+		}
+		return members, nil
+	}
+
+	var result Set
+	for i, blk := range perBlock {
+		var (
+			matched Set
+			err     error
+		)
+		if len(blk.clauses) == 0 {
+			matched, err = activeMembers()
+		} else {
+			matched, err = matchMemberFilters(ctx, refsetIDs, blk.clauses, provider)
+			if err == nil && !blk.rowsDecide && matched.Len() > 0 {
+				var m Set
+				if m, err = activeMembers(); err == nil {
+					matched = matched.Intersect(m)
+				}
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+		if i == 0 {
+			result = matched
+		} else {
+			result = result.Intersect(matched)
+		}
+		if result.Len() == 0 {
+			// Every block was validated above; the rest cannot add a member.
+			break
+		}
+	}
+	return result, nil
+}
+
 // memberOfOperand returns the memberOf a member filter's operand is, looking
 // through parentheses: `(^ R) {{ M … }}` filters R's member rows like `^ R`.
 // It returns nil for an operand with no member rows.
@@ -1633,20 +1773,19 @@ func hasNonDialectClause(filters []ast.Filter) bool {
 // membersMatching returns the members of the filtered reference sets that
 // satisfy the member filter clauses.
 //
-// The reference sets are taken from the memberOf's own operand rather than from
-// base: base is already the MEMBERS, and a member is not a reference set.
-func membersMatching(ctx context.Context, operand ast.Expression, base Set, clauses []MemberFilterOpts, provider DataProvider) (Set, error) {
-	var refsetIDs []string
-	if mo := memberOfOperand(operand); mo != nil {
-		refsetIDSet, err := Evaluate(ctx, mo.Operand, provider)
-		if err != nil {
-			return nil, fmt.Errorf("evaluating member filter refset: %w", err)
-		}
-		refsetIDs = toIDSlice(refsetIDSet)
-	} else {
-		refsetIDs = toIDSlice(base)
+// The reference sets are taken from the memberOf's own operand, never from
+// the members: a member is not a reference set. A member filter whose operand
+// has no memberOf is refused by evaluateFiltered before it gets here.
+func membersMatching(ctx context.Context, operand ast.Expression, clauses []MemberFilterOpts, provider DataProvider) (Set, error) {
+	mo := memberOfOperand(operand)
+	if mo == nil {
+		return nil, errMemberFilterNeedsMemberOf
 	}
-	return matchMemberFilters(ctx, refsetIDs, clauses, provider)
+	refsetIDSet, err := Evaluate(ctx, mo.Operand, provider)
+	if err != nil {
+		return nil, fmt.Errorf("evaluating member filter refset: %w", err)
+	}
+	return matchMemberFilters(ctx, toIDSlice(refsetIDSet), clauses, provider)
 }
 
 // conceptFilterClause is a single concept filter clause with its own polarity,
@@ -3098,9 +3237,8 @@ func memberFilterOptsOf(ctx context.Context, filters []ast.Filter, provider Data
 				return nil, false, fmt.Errorf("%w: active, moduleId and effectiveTime in a member filter are columns of the member row, which need a provider implementing ecl.MemberRowColumnsProvider", ErrUnsupportedFeature)
 			}
 			if a, ok := x.(*ast.ActiveFilter); ok && !a.Any {
-				// `active != *` sends both values: no row holds both. The M
-				// blocks of an expression share one node (H2m), so opposite
-				// values in two blocks read the same way until that is fixed.
+				// Opposite values in one block: no row holds both. Separate
+				// blocks are separate nodes, which may hold on different rows.
 				// Noted, not returned: the clauses after it must still be
 				// validated, or a refusal would depend on clause order.
 				contradicts = contradicts || actives[!a.Value]
@@ -3252,6 +3390,20 @@ func oneMemberFilterOpts(ctx context.Context, field *ast.MemberFieldFilter, prov
 	}, nil
 }
 
+// checkMemberRowSupport refuses a member block that needs several clauses on
+// one row from a provider that cannot take them; see matchMemberFilters.
+func checkMemberRowSupport(clauses []MemberFilterOpts, provider DataProvider) error {
+	if _, ok := provider.(RefsetFieldProjector); !ok && len(clauses) > 1 {
+		return errOneRowNeedsProjector(len(clauses))
+	}
+	return nil
+}
+
+func errOneRowNeedsProjector(clauses int) error {
+	return fmt.Errorf("%w: a member filter block with %d clauses requires a provider implementing ecl.RefsetFieldProjector; the clauses of a block must hold on ONE member row, and RefsetMembersFiltered takes one clause at a time, so composing them here would accept a concept whose different rows satisfy different clauses",
+		ErrUnsupportedFeature, clauses)
+}
+
 // matchMemberFilters resolves the `{{ M ... }}` clauses of one constraint to the
 // members that satisfy them.
 //
@@ -3292,8 +3444,7 @@ func matchMemberFilters(ctx context.Context, refsetIDs []string, clauses []Membe
 
 	projector, ok := provider.(RefsetFieldProjector)
 	if !ok {
-		return nil, fmt.Errorf("%w: a member filter with %d clauses requires a provider implementing ecl.RefsetFieldProjector; the clauses must hold on ONE member row, and RefsetMembersFiltered takes one clause at a time, so composing them here would accept a concept whose different rows satisfy different clauses",
-			ErrUnsupportedFeature, len(clauses))
+		return nil, errOneRowNeedsProjector(len(clauses))
 	}
 	matched, err := projector.ProjectRefsetField(ctx, RefsetProjectionOpts{
 		RefsetIDs: refsetIDs,

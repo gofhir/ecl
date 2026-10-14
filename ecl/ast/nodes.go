@@ -222,11 +222,12 @@ type BooleanValue struct{ Value bool }
 
 // Filtered represents an expression constraint with one or more filter constraints.
 //
-// The parser emits one Filtered per `{{ D … }}` or `{{ C … }}` block, nested in
-// source order, because each block is satisfied on its own: two description
-// blocks may be satisfied by different descriptions, while the clauses of one
-// block must hold on the same one. All `{{ M … }}` blocks of an expression share
-// one innermost Filtered, directly over the MemberOf they filter.
+// The parser emits one Filtered per filter block, nested in source order,
+// because each block is satisfied on its own: two description blocks may be
+// satisfied by different descriptions, and two `{{ M … }}` blocks by different
+// member rows, while the clauses of one block must hold on the same one. The
+// `{{ M … }}` blocks are innermost, directly over the MemberOf they filter;
+// over a field projection they all hold on the projected row.
 type Filtered struct {
 	Operand Expression
 	Filters []Filter

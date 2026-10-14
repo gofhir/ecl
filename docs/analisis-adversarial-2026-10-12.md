@@ -491,7 +491,7 @@ El parser emite un `ast.Filtered` por bloque `{{ D … }}` o `{{ C … }}`, anid
 - **Formas que ahora se informan como `ErrUnsupportedFeature`** en lugar de evaluarse más amplias de lo escrito:
   - en descripciones, `moduleId !=`, dos cláusulas `effectiveTime` en un bloque y un conjunto de `effectiveTime` con `!=`. Un conjunto positivo se responde con una llamada por valor.
 - **Corregido de paso:** la ruta negada de filtros de descripción consultaba sólo el primer valor de un conjunto de términos; `active = *` se leía como `active = true` (ahora `ActiveFilter.Any`: una descripción en cualquier estado, ninguna restricción en conceptos, y en miembros las filas activas e inactivas por igual); un operando sin tipos en un conjunto de `typeId` anulaba los demás.
-- **Pendiente, H2m:** los bloques `{{ M … }}` separados siguen exigiendo una misma fila, porque comparten un nodo sobre el `MemberOf`. Corregirlo toca la proyección `^ [campo]`, donde varios bloques no tienen una semántica clara. Queda como fallo esperado estricto.
+- **Pendiente, H2m:** los bloques `{{ M … }}` separados siguen exigiendo una misma fila, porque comparten un nodo sobre el `MemberOf`. Corregirlo toca la proyección `^ [campo]`, donde varios bloques no tienen una semántica clara. Queda como fallo esperado estricto. (Corregido en §11.10.)
 - **H3 se extiende a las cláusulas de metadatos:** `active` y `dialectId` en un mismo bloque se resuelven con dos llamadas y pueden satisfacerse en descripciones distintas.
 
 H4, H5 y H6 no cambian.
@@ -503,7 +503,7 @@ H4, H5 y H6 no cambian.
 - **Límite nuevo:** un bloque que combina un conjunto de términos con uno de `effectiveTime` se rechaza si el producto supera 256 llamadas al provider. Un conjunto de términos solo sigue sin límite propio.
 - **H6 queda corregido.** El loader de MRCM rechaza datos después del modelo y cualquier `ruleStrengthId` distinto de las dos fuerzas que el validador conoce; `Validate` aplica la misma regla a un modelo construido en Go. `null` sigue abierto como decisión de política.
 
-Quedan abiertos H2 (dos cláusulas `term` en un bloque), H2m y H3, que comparten la necesidad de una capacidad que resuelva un bloque completo sobre una sola descripción o fila, además de H7 y H8.
+Quedan abiertos H2 (dos cláusulas `term` en un bloque), H2m y H3, que comparten la necesidad de una capacidad que resuelva un bloque completo sobre una sola descripción o fila, además de H7 y H8. (H2 y H3 se corrigen en §11.9; H2m, en §11.10, sin capacidad nueva.)
 
 ### 11.9 Bloque de descripción completo: `DescriptionRowMatcher`
 
@@ -518,7 +518,15 @@ Capacidad opcional nueva. El evaluador envía el bloque `{{ D … }}` entero, co
 - La conformance corre en las dos rutas: con la capacidad y, con `providertest.WithoutRowMatcher`, sin ella. Una cláusula se interpreta igual en ambas mediante un normalizador común.
 - **Cambio en el provider de referencia:** `MatchDialect` lee ahora las membresías por descripción, como la ruta nueva. Una membresía cuyo concepto no tiene descripción en ese idioma ya no coincide con nada, porque una fila RF2 de refset de idioma siempre nombra una descripción.
 
-Queda abierto H2m: los bloques `{{ M … }}` separados siguen compartiendo una fila. Necesita una capacidad análoga para filas de miembro.
+En ese momento quedaba abierto H2m, corregido en §11.10.
+
+### 11.10 Bloques de miembro separados (H2m)
+
+- **H2m queda corregido sin capacidad nueva.** El parser emite un `Filtered` por bloque `{{ M … }}`, anidados en orden de aparición directamente sobre el `MemberOf`, como ya hacía con D y C. Sobre un `^ R` simple, cada bloque se responde por su cuenta con lo que el contrato ya tiene, igual que un bloque solo: una cláusula va a `RefsetMembersFiltered`, y varias van a `ProjectRefsetField` con sus `Filters`. Con `MemberRowColumnsProvider` y `RefsetFieldProjector`, el bloque recibe además `active = 1` sobre la misma fila, así que también va a `ProjectRefsetField`. Luego se intersectan los miembros de los bloques. Todos los bloques se validan antes de enviar ninguno, y los refsets y sus miembros se piden una sola vez. `^ 447562003 {{ M mapGroup = "2" }} {{ M mapTarget = "I10" }}` devuelve `95566004`, que cumple cada bloque en una fila distinta.
+- **Proyección:** sobre `^ [campo] R`, todos los bloques se cumplen sobre la fila proyectada, como si fueran uno. Una proyección devuelve una columna de una fila, así que "cada bloque en su fila" no deja una fila de la cual proyectar. Es la lectura elegida y queda documentada en `ast.Filtered`.
+- **Cambio de comportamiento:** `{{ M active = true }} {{ M active = false }}` ya no es una contradicción. Lo cumple un miembro con una fila activa y otra inactiva. Dentro de un mismo bloque sigue sin cumplirse.
+- **Árbol armado a mano:** un filtro de miembro cuyo operando no es un `^`, en cualquier familia (incluida `""`), se informa como `ErrUnsupportedFeature`. Antes, nodos `""` anidados leían los miembros del nodo interior como refsets y devolvían vacío sin avisar.
+- **Cambio en el AST:** quien recorra el árbol ve ahora un nodo por bloque M, en vez de uno compartido. En este repositorio sólo lo consumen el evaluador y `explain` del CLI; `gofhir/server` no importa `ecl/ast`.
 
 ## Apéndice A. Reproducción de los hallazgos
 
