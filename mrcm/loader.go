@@ -128,7 +128,7 @@ func LoadFromJSON(r io.Reader) (*Model, error) {
 		if !sctid.IsValid(jr.AttributeID) {
 			return nil, fmt.Errorf("mrcm: ranges[%d]: invalid attributeId %q", i, jr.AttributeID)
 		}
-		if err := validateRuleECL(jr.RangeECL); err != nil {
+		if err := validateRangeRule(jr.RangeECL); err != nil {
 			return nil, fmt.Errorf("mrcm: ranges[%d].rangeEcl: %w", i, err)
 		}
 		strength, err := ruleStrength(jr.RuleStrengthID)
@@ -228,6 +228,15 @@ func parseCardinality(s string) (Cardinality, error) {
 	}
 
 	return Cardinality{Min: minVal, Max: maxVal}, nil
+}
+
+// validateRangeRule checks a range rule, which is ECL or, for a concrete
+// attribute, the concrete form parseConcreteRange reads.
+func validateRangeRule(expr string) error {
+	if _, isConcrete, err := parseConcreteRange(expr); isConcrete {
+		return err
+	}
+	return validateRuleECL(expr)
 }
 
 // validateRuleECL checks that a rule's ECL constraint parses, so a malformed rule

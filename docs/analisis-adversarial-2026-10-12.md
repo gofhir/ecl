@@ -195,6 +195,8 @@ Un `ruleStrengthId` con SCTID válido pero ajeno a las dos fuerzas admitidas, po
 
 ### H7 — `Valid: true` de MRCM no implica validación completa de rangos
 
+(Corregido en §11.11.)
+
 **P1 de alcance de API/producto · Limitación explícita y reproducida.**
 
 Un modelo con rango conceptual `74281007` para el atributo `363698007` acepta `22298006 : 363698007 = #12` y devuelve `Valid:true`. El validador solo comprueba rango si `attr.Value.Concept != nil`. Los valores concretos y las expresiones anidadas no reciben esa comprobación externa.
@@ -427,7 +429,7 @@ La sección 9 pide casos de regresión que «fallan contra el commit revisado».
 
 Las relaciones metamórficas detectan H2, H2b y H4 sin ningún resultado escrito a mano. H1 y H3 no: un ámbito equivocado o una correlación perdida pueden ser perfectamente coherentes consigo mismos, así que sólo los detectan los casos escritos a mano.
 
-H7 y H8 no tienen pruebas.
+H7 y H8 no tienen pruebas. (H7 las tiene desde §11.11, en `mrcm/range_test.go`.)
 
 ### 11.2 H2b: los bloques separados tampoco son independientes
 
@@ -503,7 +505,7 @@ H4, H5 y H6 no cambian.
 - **Límite nuevo:** un bloque que combina un conjunto de términos con uno de `effectiveTime` se rechaza si el producto supera 256 llamadas al provider. Un conjunto de términos solo sigue sin límite propio.
 - **H6 queda corregido.** El loader de MRCM rechaza datos después del modelo y cualquier `ruleStrengthId` distinto de las dos fuerzas que el validador conoce; `Validate` aplica la misma regla a un modelo construido en Go. `null` sigue abierto como decisión de política.
 
-Quedan abiertos H2 (dos cláusulas `term` en un bloque), H2m y H3, que comparten la necesidad de una capacidad que resuelva un bloque completo sobre una sola descripción o fila, además de H7 y H8. (H2 y H3 se corrigen en §11.9; H2m, en §11.10, sin capacidad nueva.)
+Quedan abiertos H2 (dos cláusulas `term` en un bloque), H2m y H3, que comparten la necesidad de una capacidad que resuelva un bloque completo sobre una sola descripción o fila, además de H7 y H8. (H2 y H3 se corrigen en §11.9; H2m, en §11.10, sin capacidad nueva; H7, en §11.11.)
 
 ### 11.9 Bloque de descripción completo: `DescriptionRowMatcher`
 
@@ -527,6 +529,20 @@ En ese momento quedaba abierto H2m, corregido en §11.10.
 - **Cambio de comportamiento:** `{{ M active = true }} {{ M active = false }}` ya no es una contradicción. Lo cumple un miembro con una fila activa y otra inactiva. Dentro de un mismo bloque sigue sin cumplirse.
 - **Árbol armado a mano:** un filtro de miembro cuyo operando no es un `^`, en cualquier familia (incluida `""`), se informa como `ErrUnsupportedFeature`. Antes, nodos `""` anidados leían los miembros del nodo interior como refsets y devolvían vacío sin avisar.
 - **Cambio en el AST:** quien recorra el árbol ve ahora un nodo por bloque M, en vez de uno compartido. En este repositorio sólo lo consumen el evaluador y `explain` del CLI; `gofhir/server` no importa `ecl/ast`.
+
+### 11.11 Rangos de MRCM para todo tipo de valor (H7)
+
+- **H7 queda corregido.** El rango se comprueba para todo valor, no sólo para un concepto:
+  - Un valor concreto frente a un rango ECL de conceptos queda fuera de rango. `22298006 : 363698007 = #12` con rango `<< 74281007` da ahora `range_violation`.
+  - Un rango concreto se escribe en la forma `concreteValueReplacement` de la Template Syntax v1.1, que es la que usa el refset MRCM: `int(>#0..)`, `dec(#0.5..#10)`, `str("mg" "mL")`, `bool(true)`. Ahora se parsea y se comprueba con aritmética exacta. Una concesión respecto del ABNF: un conjunto `dec` acepta cotas enteras (`dec(>#0..)`), porque así viene en los refsets distribuidos. Un entero cuenta como decimal; un decimal no cuenta como entero.
+  - Un concepto o una expresión frente a un rango concreto queda fuera de rango.
+  - Una expresión anidada se juzga por sus conceptos foco, tal como está escrita y sin clasificar, frente a un rango armado con `*`, `<< X` y `< X` mediante `AND` y `OR`. Está en `<< X` si alguno de sus focos lo está. Está en `< X` si, además, está refinada, porque una expresión refinada queda estrictamente debajo de su foco. Cada lado de un `AND` puede cumplirlo un foco distinto.
+  - El loader acepta los rangos concretos y rechaza los mal escritos. Antes los validaba como ECL, así que rechazaba todos.
+- **Completitud explícita:** `Result.Complete` y `Result.Unchecked`. Una expresión anidada frente a cualquier otro rango ECL (un concepto solo, `MINUS`, refinamientos, `^`) no se puede decidir por sus focos, y se lista como `unchecked_range` en vez de declararse válida o inválida. `Valid` mantiene su significado (ninguna violación encontrada); la conformidad completa es `Valid && Complete`.
+- **Precedencia de filas:** las filas son alternativas. Basta una satisfecha. Una fila que no se puede decidir, incluida una regla rota (que sigue informándose como `invalid_rule`), impide declarar el valor fuera de rango y lo deja en `Unchecked`. Sólo hay `range_violation` cuando todas las filas se decidieron en contra, y se informa una vez por valor, no una por concepto foco.
+- **Antes**, un rango concreto frente a un valor conceptual fallaba al parsearse como ECL y se informaba como `invalid_rule`. Ahora es `range_violation`, y un rango concreto mal escrito sigue siendo `invalid_rule`.
+- **Compatibilidad:** los campos son nuevos y `gofhir/server` sólo lee `Issues`. Sí verá violaciones nuevas en valores concretos y anidados que antes pasaban sin comprobarse.
+- Sigue fuera de alcance `contentTypeId`: las filas de distintos contextos de contenido se tratan como alternativas.
 
 ## Apéndice A. Reproducción de los hallazgos
 

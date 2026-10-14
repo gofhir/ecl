@@ -504,6 +504,8 @@ func TestLoad_RejectsInvalidRuleECL(t *testing.T) {
 		"empty domainEcl":     `{"domains":[{"attributeId":"363698007","domainEcl":"","grouped":true}]}`,
 		"malformed domainEcl": `{"domains":[{"attributeId":"363698007","domainEcl":"<< invalid!!!","grouped":true}]}`,
 		"empty rangeEcl":      `{"ranges":[{"attributeId":"363698007","rangeEcl":""}]}`,
+		"malformed concrete":  `{"ranges":[{"attributeId":"1142135004","rangeEcl":"int(#1"}]}`,
+		"concrete domainEcl":  `{"domains":[{"attributeId":"363698007","domainEcl":"int","grouped":true}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := LoadFromBytes([]byte(doc))
@@ -511,8 +513,10 @@ func TestLoad_RejectsInvalidRuleECL(t *testing.T) {
 		})
 	}
 
-	// A well-formed model still loads.
-	_, err := LoadFromBytes([]byte(`{"domains":[{"attributeId":"363698007","domainEcl":"<< 404684003","grouped":true}]}`))
+	// A well-formed model still loads, concrete ranges included: the MRCM
+	// refset writes them in the Template Syntax form, not in ECL.
+	_, err := LoadFromBytes([]byte(`{"domains":[{"attributeId":"363698007","domainEcl":"<< 404684003","grouped":true}],` +
+		`"ranges":[{"attributeId":"1142135004","rangeEcl":"dec(>#0..)"},{"attributeId":"1142139005","rangeEcl":"int(#1..#10)"}]}`))
 	require.NoError(t, err)
 }
 

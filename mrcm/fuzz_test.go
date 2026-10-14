@@ -112,6 +112,10 @@ var mrcmSeeds = []string{
 		`"cardinality":"0..*","inGroupCardinality":"0..1","ruleStrengthId":"723597001"}],` +
 		`"ranges":[{"attributeId":"363698007","rangeEcl":"<< 442083009","ruleStrengthId":"723597001"}]}`,
 
+	// Concrete ranges, the Template Syntax form with its own small parser.
+	`{"ranges":[{"attributeId":"363698007","rangeEcl":"dec(>#0..#10 #20)"},` +
+		`{"attributeId":"363698007","rangeEcl":"str(\"mg\" \"mL\")"},{"attributeId":"363698007","rangeEcl":"bool"}]}`,
+
 	// Cardinality strings, the field with its own small parser.
 	`{"domains":[{"attributeId":"363698007","domainEcl":"*","cardinality":"1..1"}]}`,
 	`{"domains":[{"attributeId":"363698007","domainEcl":"*","cardinality":"0..0"}]}`,
