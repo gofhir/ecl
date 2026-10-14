@@ -469,13 +469,21 @@ func descriptionMatches(d FixtureDescription, opts ecl.DescriptionFilterOpts, ne
 	if len(opts.Languages) > 0 && !contains(opts.Languages, d.Language) {
 		return false
 	}
+	return metadataMatches(d, opts)
+}
+
+// metadataMatches checks the description dimensions that have no negated form
+// in the contract — active, module, effectiveTime. Both description matchers
+// call it, so a dimension added here is honored by both; keeping two copies is
+// how EffectiveTime came to be ignored by both.
+func metadataMatches(d FixtureDescription, opts ecl.DescriptionFilterOpts) bool {
 	if opts.Active != nil && isActive(d.Active) != *opts.Active {
 		return false
 	}
 	if len(opts.ModuleIDs) > 0 && !contains(opts.ModuleIDs, d.ModuleID) {
 		return false
 	}
-	return true
+	return effectiveTimeMatches(d.EffectiveTime, opts.EffectiveTime, opts.EffectiveTimeOp)
 }
 
 func termMatches(value, term, matchType, lowerTerm string) bool {
@@ -898,22 +906,17 @@ func descriptionMatchesNegated(d FixtureDescription, filter ecl.NegatedDescripti
 		}
 	}
 	// The dimensions with no polarity of their own keep the positive reading.
-	if opts.Active != nil && isActive(d.Active) != *opts.Active {
-		return false
-	}
-	if len(opts.ModuleIDs) > 0 && !contains(opts.ModuleIDs, d.ModuleID) {
-		return false
-	}
-	return true
+	return metadataMatches(d, opts)
 }
 
-// effectiveTimeMatches compares a concept's effectiveTime against a filter.
+// effectiveTimeMatches compares a component's effectiveTime against a filter;
+// the concept and description filters both use it.
 //
 // YYYYMMDD sorts chronologically as text, so the comparison is a plain string
-// comparison and needs no date parsing. A concept that declares no effectiveTime
+// comparison and needs no date parsing. A component that declares no effectiveTime
 // cannot satisfy any effectiveTime comparison, including "!=": the filter asks
-// about a value the concept does not have, and answering true would make
-// `effectiveTime != X` select concepts with no effectiveTime at all.
+// about a value the component does not have, and answering true would make
+// `effectiveTime != X` select components with no effectiveTime at all.
 func effectiveTimeMatches(have, want, op string) bool {
 	if want == "" {
 		return true // no filter on this dimension

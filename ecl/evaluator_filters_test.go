@@ -236,15 +236,17 @@ func TestEvaluate_DescriptionFilter_Language(t *testing.T) {
 }
 
 func TestEvaluate_DescriptionFilter_Language_MultiValue(t *testing.T) {
-	// Multi-value any-of: matches descriptions in either language.
-	// Without the fix, this would silently take only the first language.
+	// Multi-value any-of: matches descriptions in any language of the set.
+	// The set is space-separated: `(en OR es)` reads "OR" as a third language
+	// code. Only 22298006 has a Spanish description and nothing has a French
+	// one, so the two orders tell any-of apart from every shortcut: reading
+	// only the first value fails `(fr es)`, only the last fails `(es fr)`, and
+	// dropping the filter returns the whole `<< 404684003` set.
 	p := newFilterFixture()
-	got := evalECL(t, `<< 404684003 {{ language = (en OR es) }}`, p)
-	// All 5 concepts with descriptions match (every one has at least an en
-	// description; 22298006 also has es).
-	assert.ElementsMatch(t,
-		[]string{"22298006", "73211009", "64572001", "404684004", "404684003"},
-		got.Slice())
+	for _, set := range []string{"(es fr)", "(fr es)"} {
+		got := evalECL(t, `<< 404684003 {{ language = `+set+` }}`, p)
+		assert.ElementsMatch(t, []string{"22298006"}, got.Slice(), "language = %s", set)
+	}
 }
 
 func TestEvaluate_DescriptionFilter_Term_NoMatch(t *testing.T) {
