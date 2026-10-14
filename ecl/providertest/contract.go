@@ -68,6 +68,7 @@ func VerifyContract(t *testing.T, newProvider func() ecl.DataProvider) {
 		{"ProjectedMembersMatchRefsetMembers", checkRefsetFieldProjection},
 		{"MemberActiveColumnCoversEveryMember", checkMemberRowColumns},
 		{"DescriptionMetadataIsApplied", checkDescriptionMetadata},
+		{"DescriptionRowsAgreeWithMatchDescription", checkDescriptionRows},
 	}
 
 	for _, c := range checks {
@@ -938,18 +939,217 @@ func checkDescriptionMetadata(ctx context.Context, t *testing.T, p ecl.DataProvi
 		t.Skip("the provider does not implement ecl.DescriptionMetadataProvider; `{{ D active/moduleId/effectiveTime … }}` will report ErrUnsupportedFeature")
 	}
 	for name, opts := range map[string]ecl.DescriptionFilterOpts{
-		"moduleId 0":               {ModuleIDs: []string{"0"}},
+		probeModuleID:              {ModuleIDs: []string{"0"}},
 		"effectiveTime = 00000000": {EffectiveTime: "00000000", EffectiveTimeOp: "="},
 		"effectiveTime > 99991231": {EffectiveTime: "99991231", EffectiveTimeOp: ">"},
 	} {
 		got, err := p.MatchDescription(ctx, opts)
-		if err != nil {
+		switch {
+		case err != nil && name == probeModuleID:
+			// "0" is no SCTID, which a provider may refuse.
+			t.Logf("MatchDescription(%s) refused the probe: %v", name, err)
+			continue
+		case err != nil:
 			t.Fatalf("MatchDescription(%s): %v", name, err)
 		}
 		if n := nonNilSet(got).Len(); n > 0 {
 			t.Errorf("MatchDescription(%s), which no description can satisfy, returned %d concept(s); the provider is ignoring that field", name, n)
 		}
 	}
+}
+
+// checkDescriptionRows covers DescriptionRowMatcher, as far as a
+// data-independent check can:
+//
+//   - a filter with no condition asks for any description, so it returns what
+//     the active and the inactive halves of MatchDescription return together;
+//   - it finds every concept MatchDescription finds by type, the two active
+//     halves together are the empty filter, and Concepts scopes the answer;
+//   - a language no description has matches nothing, and its negation matches
+//     what the empty filter does;
+//   - two conditions on one row return no more than either alone, and two
+//     languages can hold on no row at all — which a provider answering each
+//     condition on a different row of the concept breaks for any concept with
+//     descriptions in both.
+func checkDescriptionRows(ctx context.Context, t *testing.T, p ecl.DataProvider) {
+	rows, ok := p.(ecl.DescriptionRowMatcher)
+	if !ok {
+		t.Skip("the provider does not implement ecl.DescriptionRowMatcher; two term clauses in one block, and term or metadata with dialect, report ErrUnsupportedFeature or are answered per dimension")
+	}
+	match := func(f ecl.DescriptionRowFilter) ecl.Set {
+		t.Helper()
+		got, err := rows.MatchDescriptionRows(ctx, f)
+		if err != nil {
+			t.Fatalf("MatchDescriptionRows: %v", err)
+		}
+		return nonNilSet(got)
+	}
+	anyDescription := match(ecl.DescriptionRowFilter{})
+
+	halves := ecl.NewSet()
+	for _, active := range []bool{true, false} {
+		v := active
+		got, err := p.MatchDescription(ctx, ecl.DescriptionFilterOpts{Active: &v})
+		if err != nil {
+			t.Fatalf("MatchDescription(active = %v): %v", active, err)
+		}
+		halves = halves.Union(nonNilSet(got))
+	}
+	if _, honorsActive := p.(ecl.DescriptionMetadataProvider); honorsActive && (anyDescription.Len() != halves.Len() || anyDescription.Minus(halves).Len() > 0) {
+		t.Errorf("an empty DescriptionRowFilter returns %d concept(s), MatchDescription's active halves %d; both are every concept with a description", anyDescription.Len(), halves.Len())
+	}
+
+	checkDescriptionRowsAnswer(ctx, t, p, match, anyDescription)
+
+	none := ecl.ValueCondition{Values: []string{"zz"}}
+	// A value no description can have, on each dimension: a provider that
+	// ignores the dimension answers every description instead.
+	impossible := map[string]ecl.DescriptionRowFilter{
+		"language zz":               {Languages: []ecl.ValueCondition{none}},
+		probeTypeID:                 {Types: []ecl.ValueCondition{{Values: []string{"0"}}}},
+		probeModuleID:               {Modules: []ecl.ValueCondition{{Values: []string{"0"}}}},
+		probeDescriptionID:          {IDs: []ecl.ValueCondition{{Values: []string{"0"}}}},
+		"effectiveTime = 00000000":  {EffectiveTimes: []ecl.TimeCondition{{Values: []string{"00000000"}, Op: "="}}},
+		"term with no word like it": {Terms: []ecl.TermCondition{{Terms: []ecl.SearchTermOpts{{Term: "zzzzzzzzzzzz"}}}}},
+		probeDialect:                {Dialects: []ecl.DialectCondition{{Entries: []ecl.DialectEntryOpts{{DialectIDs: []string{"0"}}}}}},
+	}
+	// The SCTID probes use "0", which a provider may refuse as invalid; that
+	// is not ignoring the dimension. The others carry nothing to validate.
+	sctidProbe := map[string]bool{probeTypeID: true, probeModuleID: true, probeDescriptionID: true, probeDialect: true}
+	for name, f := range impossible {
+		got, err := rows.MatchDescriptionRows(ctx, f)
+		switch {
+		case err != nil && sctidProbe[name]:
+			t.Logf("MatchDescriptionRows(%s) refused the probe: %v", name, err)
+			continue
+		case err != nil:
+			t.Errorf("MatchDescriptionRows(%s): %v", name, err)
+			continue
+		}
+		if n := nonNilSet(got).Len(); n > 0 {
+			t.Errorf("%s, which no description satisfies, returned %d concept(s); the provider is ignoring that condition", name, n)
+		}
+
+		// Negated, the same impossible condition holds on every row, so the
+		// answer is every concept with a description: a provider that ignores
+		// Negate answers the empty set instead. Dialects are left out — their
+		// negation needs a membership in another dialect, not any row.
+		negated, ok := negate(f)
+		if !ok {
+			continue
+		}
+		got, err = rows.MatchDescriptionRows(ctx, negated)
+		switch {
+		case err != nil && sctidProbe[name]:
+			t.Logf("MatchDescriptionRows(NOT %s) refused the probe: %v", name, err)
+			continue
+		case err != nil:
+			// The positive form was answered, so the negated one must be too.
+			t.Errorf("MatchDescriptionRows(NOT %s): %v", name, err)
+			continue
+		}
+		if n := nonNilSet(got).Len(); n != anyDescription.Len() {
+			t.Errorf("NOT (%s) returned %d concept(s), the empty filter %d; every description satisfies it, so the provider is ignoring Negate", name, n, anyDescription.Len())
+		}
+	}
+
+	// Active, against MatchDescription when the provider also declares it
+	// honors the field there: both read the same flag on the same rows.
+	if _, honorsActive := p.(ecl.DescriptionMetadataProvider); honorsActive {
+		for _, active := range []bool{true, false} {
+			v := active
+			want, err := p.MatchDescription(ctx, ecl.DescriptionFilterOpts{Active: &v})
+			if err != nil {
+				t.Fatalf("MatchDescription(active = %v): %v", active, err)
+			}
+			got := match(ecl.DescriptionRowFilter{Active: &v})
+			if w := nonNilSet(want); got.Len() != w.Len() || got.Minus(w).Len() > 0 {
+				t.Errorf("active = %v returns %d concept(s) through MatchDescriptionRows and %d through MatchDescription; the two must agree", active, got.Len(), w.Len())
+			}
+		}
+	}
+
+	// Two values of one column can hold on no single row, whatever the data:
+	// a provider answering each condition on a different description of the
+	// concept returns every concept with a description of each.
+	for name, f := range map[string]ecl.DescriptionRowFilter{
+		"language = en and language = es": {Languages: []ecl.ValueCondition{{Values: []string{"en"}}, {Values: []string{"es"}}}},
+		"type = FSN and type = synonym":   {Types: []ecl.ValueCondition{{Values: []string{typeFSN}}, {Values: []string{typeSynonym}}}},
+	} {
+		if got := match(f); got.Len() > 0 {
+			t.Errorf("%s on ONE row returned %d concept(s); no description has both, so the provider is answering the conditions on different rows", name, got.Len())
+		}
+	}
+}
+
+// checkDescriptionRowsAnswer is the half of checkDescriptionRows that a
+// provider answering nothing fails: without it every probe there passes on an
+// empty answer.
+func checkDescriptionRowsAnswer(ctx context.Context, t *testing.T, p ecl.DataProvider, match func(ecl.DescriptionRowFilter) ecl.Set, anyDescription ecl.Set) {
+	t.Helper()
+	// Not vacuous: every concept MatchDescription finds by type has a
+	// description, so the empty filter finds it too. A provider answering
+	// nothing would pass every probe below.
+	typed, err := p.MatchDescription(ctx, ecl.DescriptionFilterOpts{TypeIDs: []string{typeFSN, typeSynonym}})
+	if err != nil {
+		t.Fatalf("MatchDescription(type = FSN or synonym): %v", err)
+	}
+	if missing := nonNilSet(typed).Minus(anyDescription); missing.Len() > 0 {
+		t.Errorf("an empty DescriptionRowFilter misses %d concept(s) MatchDescription finds by type, %v; it asks for any description", missing.Len(), sample(missing, 3))
+	}
+
+	// Every row is active or not, so the two halves are the empty filter.
+	if halves := match(ecl.DescriptionRowFilter{Active: boolPtr(true)}).Union(match(ecl.DescriptionRowFilter{Active: boolPtr(false)})); halves.Len() != anyDescription.Len() || anyDescription.Minus(halves).Len() > 0 {
+		t.Errorf("active = true and active = false return %d concept(s) together, the empty filter %d; every description is one or the other", halves.Len(), anyDescription.Len())
+	}
+
+	// Concepts scopes the answer and nothing else, as the evaluator sends it
+	// on every operand but a wildcard: the whole set and a part of it.
+	for _, scope := range []ecl.Set{anyDescription, ecl.NewSetFromSlice(sample(anyDescription, anyDescription.Len()/2))} {
+		if got := match(ecl.DescriptionRowFilter{Concepts: scope}); got.Len() != scope.Len() || scope.Minus(got).Len() > 0 {
+			t.Errorf("Concepts of %d concept(s), each with a description, returned %d; the candidates scope the answer", scope.Len(), got.Len())
+		}
+	}
+}
+
+// The probe names of the description-row checks whose value is the SCTID "0".
+// The FSN and synonym description types.
+const typeFSN, typeSynonym = "900000000000003001", "900000000000013009"
+
+const (
+	probeTypeID        = "typeId 0"
+	probeModuleID      = "moduleId 0"
+	probeDescriptionID = "id 0"
+	probeDialect       = "dialect 0"
+)
+
+// negate returns f with its one condition negated, for the conditions whose
+// negation holds on every row when the condition holds on none.
+func negate(f ecl.DescriptionRowFilter) (ecl.DescriptionRowFilter, bool) {
+	flip := func(cs []ecl.ValueCondition) []ecl.ValueCondition {
+		out := append([]ecl.ValueCondition(nil), cs...)
+		for i := range out {
+			out[i].Negate = !out[i].Negate
+		}
+		return out
+	}
+	switch {
+	case len(f.Languages) > 0:
+		return ecl.DescriptionRowFilter{Languages: flip(f.Languages)}, true
+	case len(f.Types) > 0:
+		return ecl.DescriptionRowFilter{Types: flip(f.Types)}, true
+	case len(f.Modules) > 0:
+		return ecl.DescriptionRowFilter{Modules: flip(f.Modules)}, true
+	case len(f.IDs) > 0:
+		return ecl.DescriptionRowFilter{IDs: flip(f.IDs)}, true
+	case len(f.Terms) > 0:
+		t := append([]ecl.TermCondition(nil), f.Terms...)
+		for i := range t {
+			t[i].Negate = !t[i].Negate
+		}
+		return ecl.DescriptionRowFilter{Terms: t}, true
+	}
+	return f, false
 }
 
 // discoverRefsets finds reference sets that have members, by asking which ones

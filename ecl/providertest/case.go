@@ -44,6 +44,12 @@ type Case struct {
 	// Skip lets a case opt out of the run with a documented reason.
 	Skip string `yaml:"skip"`
 
+	// Requires names optional capabilities the case needs, by interface name
+	// ("DescriptionRowMatcher"). A provider without one of them passes the
+	// case by refusing the expression with ecl.ErrUnsupportedFeature, which is
+	// what the evaluator does for it, rather than by returning ExpectedIDs.
+	Requires []string `yaml:"requires"`
+
 	// SpecSection optionally pins the case to a spec subsection.
 	SpecSection string `yaml:"specSection"`
 }

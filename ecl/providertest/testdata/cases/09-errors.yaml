@@ -68,24 +68,6 @@ cases:
     expression: "<< 404684003 {{ D dialect = en-nz }}"
     expectError: true
 
-  # The description id filter itself is supported through the optional
-  # ecl.DescriptionIDProvider, which the reference fixture implements -- see
-  # 05-filters.yaml. What stays unsupported is COMBINING it with a negated sibling
-  # clause: both negations are per description row, one call cannot carry both,
-  # and guessing which applies would answer a question nobody asked.
-  - name: a description id filter with a negated sibling clause is reported as unsupported
-    expression: '<< 138875005 {{ D id != 751000000102, term != "x" }}'
-    expectError: true
-
-  # A POSITIVE term set is supported — it decomposes into a union, see
-  # 05-filters.yaml. A NEGATED one does not: it selects concepts having a
-  # description whose term satisfies NEITHER value, which one description row has
-  # to decide. Intersecting per-term negations would wrongly accept a concept with
-  # one row failing the first term and a different row failing the second.
-  - name: negated term filter set is reported as unsupported
-    expression: '<< 404684003 {{ D term != ("infarction" "diabetes") }}'
-    expectError: true
-
   # Braces assert that the clauses share ONE relationship group of the FOCUS
   # concept. A reverse relationship belongs to the source, so there is nothing of
   # the focus's to group and the construct is either redundant (a lone clause,

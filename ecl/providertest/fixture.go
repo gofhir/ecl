@@ -93,6 +93,16 @@ type FixtureDialectMember struct {
 	AcceptabilityID string `yaml:"acceptabilityId"`
 	ConceptID       string `yaml:"conceptId"`
 	Language        string `yaml:"language"`
+
+	// DescriptionID, when set, makes the membership that description's alone,
+	// as an RF2 language reference set row is. Without it the membership
+	// covers every description of ConceptID in Language — in every language
+	// when Language is empty — which cannot tell two descriptions apart.
+	//
+	// A membership counts only for descriptions it covers: one whose concept
+	// has no description in Language matches no dialect filter, since an RF2
+	// language reference set row always names a description.
+	DescriptionID string `yaml:"descriptionId"`
 }
 
 // FixtureMemberField captures a per-member custom field used by member
@@ -146,6 +156,7 @@ func NewInMemoryProvider(spec *FixtureSpec) ecl.DataProvider {
 		refsetsByMember: make(map[string]map[string]struct{}),
 		altIDs:          spec.AltIdentifiers,
 	}
+	p.dialects = indexDialects(spec.Dialects)
 
 	for _, c := range spec.Concepts {
 		p.concepts[c.ID] = c
@@ -287,12 +298,15 @@ var (
 	_ ecl.RefsetFieldProjector         = (*inMemoryProvider)(nil)
 	_ ecl.MemberRowColumnsProvider     = (*inMemoryProvider)(nil)
 	_ ecl.DescriptionMetadataProvider  = (*inMemoryProvider)(nil)
+	_ ecl.DescriptionRowMatcher        = (*inMemoryProvider)(nil)
 )
 
 type inMemoryProvider struct {
-	spec            *FixtureSpec
-	concepts        map[string]FixtureConcept
-	descByConcept   map[string][]FixtureDescription
+	spec          *FixtureSpec
+	concepts      map[string]FixtureConcept
+	descByConcept map[string][]FixtureDescription
+
+	dialects        dialectIndex
 	relsBySource    map[string][]ecl.Relationship
 	refsetMembers   map[string]map[string]struct{} // refsetID → set of memberIDs
 	refsetsByMember map[string]map[string]struct{} // memberID → set of refsetIDs
@@ -462,6 +476,148 @@ func (p *inMemoryProvider) MatchDescription(_ context.Context, opts ecl.Descript
 		}
 	}
 	return out, nil
+}
+
+// MatchDescriptionRows implements ecl.DescriptionRowMatcher: a concept matches
+// when one of its descriptions satisfies every condition of the block.
+func (p *inMemoryProvider) MatchDescriptionRows(_ context.Context, f ecl.DescriptionRowFilter) (ecl.Set, error) {
+	var members dialectIndex
+	if len(f.Dialects) > 0 {
+		members = p.dialects
+	}
+	// Each search term lowercased once for the filter, not once per row.
+	lowered := make([][]string, len(f.Terms))
+	for i, c := range f.Terms {
+		for _, t := range c.Terms {
+			lowered[i] = append(lowered[i], strings.ToLower(t.Term))
+		}
+	}
+	var out []string
+	try := func(conceptID string) {
+		for _, d := range p.descByConcept[conceptID] {
+			if rowMatches(d, f, lowered, members) {
+				out = append(out, conceptID)
+				return
+			}
+		}
+	}
+	if f.Concepts != nil {
+		f.Concepts.Iter(func(id string) bool { try(id); return true })
+	} else {
+		for conceptID := range p.descByConcept {
+			try(conceptID)
+		}
+	}
+	return ecl.NewSetFromSlice(out), nil
+}
+
+// dialectIndex holds the dialect memberships by what they name: a description,
+// a concept in one language, or a concept in every language.
+type dialectIndex struct {
+	byDescription, byConcept map[string][]FixtureDialectMember
+	byLanguage               map[conceptLanguage][]FixtureDialectMember
+}
+
+type conceptLanguage struct{ concept, language string }
+
+// indexDialects indexes the memberships once, when the provider is built: the
+// spec does not change after that.
+func indexDialects(members []FixtureDialectMember) dialectIndex {
+	idx := dialectIndex{
+		byDescription: map[string][]FixtureDialectMember{},
+		byConcept:     map[string][]FixtureDialectMember{},
+		byLanguage:    map[conceptLanguage][]FixtureDialectMember{},
+	}
+	for _, m := range members {
+		switch {
+		case m.DescriptionID != "":
+			idx.byDescription[m.DescriptionID] = append(idx.byDescription[m.DescriptionID], m)
+		case m.Language != "":
+			k := conceptLanguage{m.ConceptID, m.Language}
+			idx.byLanguage[k] = append(idx.byLanguage[k], m)
+		default:
+			// No language, as MatchDialect has always read it: every
+			// description of the concept.
+			idx.byConcept[m.ConceptID] = append(idx.byConcept[m.ConceptID], m)
+		}
+	}
+	return idx
+}
+
+// holds applies a DialectCondition to description d through its memberships:
+// those naming d, its concept in its language, and its concept in every
+// language. Positive, one membership must match an entry; negated, one must
+// not — the reading MatchDialect has.
+func (idx dialectIndex) holds(d FixtureDescription, c ecl.DialectCondition) bool {
+	for _, group := range [3][]FixtureDialectMember{idx.byDescription[d.ID], idx.byLanguage[conceptLanguage{d.Concept, d.Language}], idx.byConcept[d.Concept]} {
+		for _, m := range group {
+			if dialectRowMatches(m, c.Entries) != c.Negate {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// rowMatches reports whether one description satisfies every condition.
+func rowMatches(d FixtureDescription, f ecl.DescriptionRowFilter, lowered [][]string, members dialectIndex) bool {
+	if f.Active != nil && isActive(d.Active) != *f.Active {
+		return false
+	}
+	for i, c := range f.Terms {
+		hit := false
+		for j, t := range c.Terms {
+			if termMatches(d.Value, t.Term, t.MatchType, lowered[i][j]) {
+				hit = true
+				break
+			}
+		}
+		if hit == c.Negate {
+			return false
+		}
+	}
+	if !valueConditionsHold(f.Types, d.TypeID) || !valueConditionsHold(f.Languages, d.Language) ||
+		!valueConditionsHold(f.Modules, d.ModuleID) || !valueConditionsHold(f.IDs, d.ID) {
+		return false
+	}
+	for _, c := range f.EffectiveTimes {
+		if !timeConditionHolds(d.EffectiveTime, c) {
+			return false
+		}
+	}
+	for _, c := range f.Dialects {
+		if !members.holds(d, c) {
+			return false
+		}
+	}
+	return true
+}
+
+// valueConditionsHold applies ValueConditions to one value of a row; a row
+// without the value satisfies only the negated form.
+func valueConditionsHold(conds []ecl.ValueCondition, value string) bool {
+	for _, c := range conds {
+		if (value != "" && contains(c.Values, value)) == c.Negate {
+			return false
+		}
+	}
+	return true
+}
+
+// timeConditionHolds applies a TimeCondition to one effectiveTime.
+func timeConditionHolds(have string, c ecl.TimeCondition) bool {
+	if have == "" {
+		return false
+	}
+	if c.Op == "!=" {
+		return !contains(c.Values, have)
+	}
+	for _, v := range c.Values {
+		if effectiveTimeMatches(have, v, c.Op) {
+			return true
+		}
+	}
+	return false
 }
 
 func descriptionMatches(d FixtureDescription, opts ecl.DescriptionFilterOpts, needle string) bool {
@@ -765,24 +921,27 @@ func (p *inMemoryProvider) ResolveIdentifier(_ context.Context, scheme, code str
 // with a preferred term in en-gb and another in en-us satisfies
 // `dialectId != <en-gb refset>` through the en-us row. Ignoring the flag made the
 // negated form return exactly the same set as the positive one.
+// MatchDialect reads memberships per description, through the same index
+// MatchDescriptionRows uses, so a dialect-only block gets the same answer on
+// both paths: a membership naming a description, or a concept in a language,
+// counts for the descriptions it covers.
 func (p *inMemoryProvider) MatchDialect(_ context.Context, concepts ecl.Set, opts ecl.DialectFilterOpts) (ecl.Set, error) {
-	out := ecl.NewSet()
 	if concepts == nil {
-		return out, nil
+		return ecl.NewSet(), nil
 	}
+	members := p.dialects
+	cond := ecl.DialectCondition{Entries: opts.Dialects, Negate: opts.Negate}
+	var out []string
 	concepts.Iter(func(id string) bool {
-		for _, d := range p.spec.Dialects {
-			if d.ConceptID != id {
-				continue
-			}
-			if dialectRowMatches(d, opts.Dialects) != opts.Negate {
-				out = out.Union(ecl.NewSetFromSlice([]string{id}))
-				return true
+		for _, d := range p.descByConcept[id] {
+			if members.holds(d, cond) {
+				out = append(out, id)
+				break
 			}
 		}
 		return true
 	})
-	return out, nil
+	return ecl.NewSetFromSlice(out), nil
 }
 
 // dialectRowMatches reports whether one dialect membership row satisfies any entry

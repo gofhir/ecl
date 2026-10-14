@@ -46,10 +46,10 @@ bad data:
 | `{{ D dialect = en-gb }}` (alias form), **unless** the provider implements `DialectAliasResolver` | Mapping a dialect alias to a language reference set's SCTID is terminology data — only the international English aliases are universal, and the same alias can name different refsets in different editions. With the capability this works; `{{ D dialectId = 900000000000508004 }}` always does. |
 | `^[a,b]` and `^[*]` — a projection naming several fields, or every field | Those are a table; a `Set` is one column of concept ids. Naming a SINGLE field works, given a `RefsetFieldProjector`. |
 | A `{{ M … }}` member filter with more than one clause, **unless** the provider implements `RefsetFieldProjector` | The clauses must hold on ONE member row, and `RefsetMembersFiltered` takes one clause at a time — so composing them here would accept a concept whose *different* rows satisfy different clauses. A single clause always works. |
-| `{{ D active … }}`, `{{ D moduleId … }}`, `{{ D effectiveTime … }}` and their unprefixed forms, **unless** the provider implements `DescriptionMetadataProvider`; and `{{ D moduleId != … }}` in any case | A provider written before these were sent may ignore the fields and answer every description. A negated module has no carrier in `DescriptionFilterOpts`. Use `{{ C … }}` to filter the concept instead. |
+| `{{ D active … }}`, `{{ D moduleId … }}`, `{{ D effectiveTime … }}` and their unprefixed forms, **unless** the provider implements `DescriptionMetadataProvider`; and `{{ D moduleId != … }}` **unless** the provider implements `DescriptionRowMatcher` | A provider written before these were sent may ignore the fields and answer every description. A negated module has no carrier in `DescriptionFilterOpts`. Use `{{ C … }}` to filter the concept instead. |
 | A `{{ M … }}` filter whose focus has no `^` — `< R {{ M … }}` | The grammar admits it, but a member filter filters member rows, and the focus has none. Write `^ R {{ M … }}`. |
 | `{{ M active … }}`, `{{ M moduleId … }}`, `{{ M effectiveTime … }}`, **unless** the provider implements `MemberRowColumnsProvider`; and an ordered `effectiveTime` comparison in a member filter in any case | These are columns of the member ROW, not of the referenced concept. A provider must declare that it answers them, because one that does not would return no members rather than an error. `MemberFilterOpts` compares by equality, so `>=` on a member's effectiveTime has no carrier. |
-| A **negated** term filter with a set of terms — `{{ D term != ("a" "b") }}` | One description row has to fail every value, so it cannot be decomposed: intersecting per-term negations would accept a concept with one row failing the first term and a different row failing the second. The positive set form works. |
+| A **negated** term filter with a set of terms — `{{ D term != ("a" "b") }}`, **unless** the provider implements `DescriptionRowMatcher` | One description row has to fail every value, so it cannot be decomposed: intersecting per-term negations would accept a concept with one row failing the first term and a different row failing the second. The positive set form works. |
 | A cardinality or `!=` on a reverse (`R`) attribute, **unless** the provider implements `InboundRelationshipsProvider` | `RelationshipTargets` returns a `Set`, so it loses the inbound count and the per-type total. With the capability these work. |
 | A reverse (`R`) attribute **inside an attribute group** — `{ R attr = value }` | Braces assert that the clauses share one relationship group *of the focus concept*, and a reverse relationship belongs to the source, so the focus has no group to constrain. Write it outside the braces. See the note below. |
 | An MRCM in-group cardinality **minimum** across groups that do not use the attribute | Not a gap: an in-group minimum constrains only the groups that use the attribute, so `1..1` behaves like `0..1`. Checked against SNOMED International's Snowstorm, which renders the rule as `[0..*] { [0..1] attr = … }` — a group cardinality of `0..*` means a concept with no such group satisfies it. See `validateInGroupCardinality`. |
@@ -134,11 +134,12 @@ answers well; the evaluator falls back or reports the forms it cannot handle.
 | `DialectAliasResolver` | `{{ D dialect = en-gb }}`, the alias form, whose alias-to-reference-set mapping is terminology data rather than something a parser can compute. |
 | `DescriptionIDProvider` | `{{ D id = … }}`, which constrains a description's own SCTID — per row, so the id and the sibling clauses must hold on the same description. |
 | `RefsetFieldProjector` | `^ [targetComponentId] X`, which returns a member field instead of the members — and a `{{ M … }}` filter with **more than one clause**, whose clauses must hold on one member row. Only the provider knows which fields hold a component id, so it is the one that refuses the others. |
+| `DescriptionRowMatcher` | A whole `{{ D … }}` block on single description rows: two term clauses in one block, a term or `active` with a dialect, two negations in one block — every clause holding on ONE description. Without it those are refused, or answered per dimension. When implemented, every description block goes through it. |
 | `DescriptionMetadataProvider` | `{{ D active = … }}`, `{{ D moduleId = … }}`, `{{ D effectiveTime … }}` and the same filters with no prefix, which the grammar makes description filters. A declaration that `MatchDescription` honours `DescriptionFilterOpts.Active`, `ModuleIDs` and `EffectiveTime`: they were always in the contract, but were not sent until these filters were read as description filters. |
 | `MemberRowColumnsProvider` | `{{ M active = … }}`, `{{ M moduleId = … }}` and `{{ M effectiveTime = … }}`, sent to `RefsetMembersFiltered` as the member row's own RF2 columns (`active` as `"1"`/`"0"`). A declaration with no query of its own: a provider that has not made it would look those columns up as additional fields and answer the empty set. |
 
 The reference provider in [`ecl/providertest/fixture.go`](ecl/providertest/fixture.go)
-implements all nine; read it for a worked example. `providertest.VerifyContract`
+implements all ten; read it for a worked example. `providertest.VerifyContract`
 has a check per capability, asserting that it agrees with the required method it
 replaces — a batch that disagrees with its per-concept equivalent would silently
 decide every answer.
@@ -420,11 +421,11 @@ The bundled suite lives in [`ecl/providertest/testdata/`](ecl/providertest/testd
 | Compound expressions | 4 | 5.2 |
 | Primitives | 4 | 5.0 |
 | Refinements (disjunction, groups, cardinality, `!=`, dot, reverse) | 31 | 5.3 |
-| Filters (term, type, language, dialect and dialectId, description id, module, definitionStatus, active, effectiveTime, memberField) | 64 | 5.4 |
+| Filters (term, type, language, dialect and dialectId, description id, module, definitionStatus, active, effectiveTime, memberField) | 66 | 5.4 |
 | History supplements (MIN/MOD/MAX) | 6 | 5.5 |
 | Concrete values | 4 | 5.3.4 |
 | v2.2 (Top, Bottom, AltIdentifier, `^R`, memberOf projection) | 11 | v2.2 |
-| **Errors** — input that must be rejected, not truncated | 20 | grammar |
+| **Errors** — input that must be rejected, not truncated | 18 | grammar |
 
 Each suite is a YAML file with cases of the form:
 

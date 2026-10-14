@@ -28,8 +28,9 @@ import (
 //	     DescriptionFilterOpts still cannot carry several effectiveTime values
 //	     or a negated moduleId; those forms are reported unsupported.
 //	H2   repeated clauses inside ONE block are not a conjunction. Fixed for
-//	     type, language and moduleId, whose values are intersected; two term
-//	     clauses are reported unsupported, since one call carries one term.
+//	     type, language and moduleId, whose values are intersected. Two term
+//	     clauses are answered by ecl.DescriptionRowMatcher, and reported
+//	     unsupported by a provider without it, since one call carries one term.
 //	H2b  separate blocks were flattened into one predicate: the last term
 //	     overrode the earlier ones, languages pooled into an any-of, and a term
 //	     and a language from different blocks had to hold on one description.
@@ -38,7 +39,8 @@ import (
 //	     Filtered over their MemberOf: clauses of different M blocks must hold
 //	     on one member row.
 //	H3   term and dialect in one block may be satisfied by different
-//	     descriptions.
+//	     descriptions. Answered per row by ecl.DescriptionRowMatcher; the H3
+//	     markers stand for the per-dimension path a provider without it takes.
 //	H4   numeric literals lost precision (float64) or saturated on overflow.
 //	     Fixed: comparisons are exact (math/big on the literal as written), and
 //	     an integer or cardinality wider than int is a parse error.
@@ -76,9 +78,16 @@ const (
 	semStrength  = "1142139005"
 )
 
-// semanticsProvider is the smallest terminology that tells the readings apart.
-// Each fact is there for a case below; none is incidental.
+// semanticsProvider is the semantics fixture WITHOUT ecl.DescriptionRowMatcher,
+// so the description cases exercise the per-dimension path every provider has.
 func semanticsProvider() ecl.DataProvider {
+	return providertest.WithoutRowMatcher(semanticsRowsProvider())
+}
+
+// semanticsRowsProvider is the smallest terminology that tells the readings
+// apart, with every capability of the reference provider. Each fact is there
+// for a case below; none is incidental.
+func semanticsRowsProvider() ecl.DataProvider {
 	inactive := false
 	return providertest.NewInMemoryProvider(&providertest.FixtureSpec{
 		// The attribute is declared because an attribute name resolves like any
@@ -92,13 +101,11 @@ func semanticsProvider() ecl.DataProvider {
 			{ID: "200003010", Concept: semHeart, Language: "es", Value: "old", Active: &inactive},
 			{ID: "200004016", Concept: semOther, Language: "en", Value: "heart"},
 		},
-		// The fixture keys dialect membership by concept and language, so the
-		// en-GB membership of semHeart covers both Spanish descriptions, the
-		// inactive one included. That is coarser than RF2, where membership
-		// names a description: the H3 cases below tell term and dialect apart
-		// across LANGUAGES, but a fix that correlated them per language instead
-		// of per description would pass them. Closing that needs the fixture to
-		// accept a description ID on dialect members.
+		// Keyed by concept and language, so the en-GB membership of semHeart
+		// covers both Spanish descriptions, the inactive one included. The H3
+		// cases below tell term and dialect apart across LANGUAGES;
+		// TestSemantics_DialectMembershipIsPerDescription tells them apart
+		// within one, through FixtureDialectMember.DescriptionID.
 		Dialects: []providertest.FixtureDialectMember{
 			{ConceptID: semHeart, Language: "en", DialectID: semUS, AcceptabilityID: semPreferred},
 			{ConceptID: semHeart, Language: "es", DialectID: semGB, AcceptabilityID: semPreferred},
@@ -134,9 +141,28 @@ type semCase struct {
 }
 
 func TestSemantics_DescriptionFilters(t *testing.T) {
+	runSemCases(t, descriptionFilterCases())
+}
+
+// TestSemantics_DescriptionRows runs the same cases through
+// ecl.DescriptionRowMatcher, which answers a block on single description rows.
+// There every case must give the specified result, the ones still marked on
+// the per-dimension path included: H2 (two term clauses) and H3 (term or
+// metadata with dialect) are what the capability exists for.
+func TestSemantics_DescriptionRows(t *testing.T) {
+	p := semanticsRowsProvider()
+	for _, tc := range descriptionFilterCases() {
+		t.Run(tc.expr, func(t *testing.T) {
+			got := evalIDs(t, p, tc.expr)
+			require.Truef(t, equalIDs(tc.want, got), "%q returns %v; the specification requires %v", tc.expr, got, tc.want)
+		})
+	}
+}
+
+func descriptionFilterCases() []semCase {
 	both := []string{semHeart, semOther}
 	heart := []string{semHeart}
-	runSemCases(t, []semCase{
+	return []semCase{
 		// H1 — the D prefix scopes these to descriptions.
 		{expr: `* {{ D active = false }}`, want: heart},
 		{expr: `* {{ D moduleId = ` + semModule + ` }}`, want: heart},
@@ -206,7 +232,7 @@ func TestSemantics_DescriptionFilters(t *testing.T) {
 		{expr: `* {{ D term = "heart" }} {{ D dialectId = ` + semGB + ` }}`, want: both},
 		{expr: `* {{ D dialectId = ` + semGB + ` }} {{ D term = "heart" }}`, want: both},
 		{expr: `* {{ D term = "corazon" }} {{ D dialectId = ` + semUS + ` }}`, want: heart},
-	})
+	}
 }
 
 // TestSemantics_MemberFilterBlocks covers H2m on standard.yaml, whose complex
@@ -528,6 +554,112 @@ func TestSemantics_ModuleFilterNamingNothingConstrainsNothing(t *testing.T) {
 			require.Equal(t, evalIDs(t, p, tc.unfiltered), got.Slice())
 		})
 	}
+}
+
+// recordingRows records the candidates the row matcher is handed, and can
+// answer AllConcepts with nil, which breaks the contract.
+type recordingRows struct {
+	ecl.DataProvider
+	rows       ecl.DescriptionRowMatcher
+	nilAll     bool
+	candidates []ecl.Set
+}
+
+func (r *recordingRows) AllConcepts(ctx context.Context) (ecl.Set, error) {
+	if r.nilAll {
+		return nil, nil
+	}
+	return r.DataProvider.AllConcepts(ctx)
+}
+
+func (r *recordingRows) MatchDescriptionRows(ctx context.Context, f ecl.DescriptionRowFilter) (ecl.Set, error) {
+	r.candidates = append(r.candidates, f.Concepts)
+	return r.rows.MatchDescriptionRows(ctx, f)
+}
+
+// TestSemantics_DescriptionRowsEdges covers the row path's edges: a wildcard
+// operand, whose candidates are not shipped as an IN-list of the terminology;
+// an operand that breaks the contract with a nil Set, read as empty as
+// Evaluate reads it everywhere, without asking the provider; and a hand-built
+// clause naming no value, which both paths read the same way.
+func TestSemantics_DescriptionRowsEdges(t *testing.T) {
+	base := semanticsRowsProvider()
+	p := &recordingRows{DataProvider: base, rows: base.(ecl.DescriptionRowMatcher)}
+	got, err := evaluate(p, `* {{ D term = "heart" }}`)
+	require.NoError(t, err)
+	require.Equal(t, []string{semHeart, semOther}, got.Slice())
+	require.Len(t, p.candidates, 1)
+	require.Nil(t, p.candidates[0], "a wildcard operand is sent as nil, every concept")
+
+	p = &recordingRows{DataProvider: base, rows: base.(ecl.DescriptionRowMatcher)}
+	got, err = evaluate(p, `((*)) {{ D term = "heart" }}`)
+	require.NoError(t, err)
+	require.Equal(t, []string{semHeart, semOther}, got.Slice())
+	require.Len(t, p.candidates, 1)
+	require.Nil(t, p.candidates[0], "a parenthesized wildcard is still every concept")
+
+	p = &recordingRows{DataProvider: base, rows: base.(ecl.DescriptionRowMatcher), nilAll: true}
+	got, err = evaluate(p, `* {{ D term = "heart" }}`)
+	require.NoError(t, err)
+	require.Empty(t, got.Slice())
+	require.Empty(t, p.candidates, "no candidate, no provider call")
+
+	for _, path := range []ecl.DataProvider{semanticsRowsProvider(), semanticsProvider()} {
+		tree := mustParse(t, `* {{ D term = "heart", id = 200001011 }}`)
+		tree.(*ast.Filtered).Filters[1].(*ast.DescriptionIDFilter).IDs = nil
+		got, err := ecl.Evaluate(context.Background(), tree, path)
+		require.NoError(t, err)
+		require.Equal(t, []string{semHeart, semOther}, got.Slice(), "an id clause naming no id constrains nothing")
+	}
+}
+
+// TestSemantics_DescriptionRowsOnly covers the forms the per-dimension path
+// refuses (TestSemantics_UnrepresentableFiltersFailLoudly) and the row path
+// answers. A row without a module or a dialect membership satisfies only the
+// negated form.
+func TestSemantics_DescriptionRowsOnly(t *testing.T) {
+	both := []string{semHeart, semOther}
+	heart := []string{semHeart}
+	runSemCasesOn(t, semanticsRowsProvider(), []semCase{
+		// "corazon" is the only description in semModule; "old" is Spanish too.
+		{expr: `* {{ D moduleId != ` + semModule + `, language = es }}`, want: heart},
+		{expr: `* {{ D moduleId != ` + semModule + `, term = "corazon" }}`, want: nil},
+		// A range on one row: "corazon" is at semNewTime, after the month starts.
+		{expr: `* {{ D effectiveTime >= "20240101", effectiveTime <= "20241231" }}`, want: heart},
+		{expr: `* {{ D effectiveTime >= "20240201", effectiveTime <= "20241231" }}`, want: nil},
+		// A negated set: every value must fail on the same row.
+		{expr: `* {{ D effectiveTime != ("` + semOldTime + `" "` + semNewTime + `"), term = "corazon" }}`, want: nil},
+		{expr: `* {{ D effectiveTime != ("` + semOldTime + `" "20230101"), term = "corazon" }}`, want: heart},
+		// A row with no time is at no time, so it passes no comparison, "!="
+		// included, as on the per-dimension path; RF2 rows always have one.
+		{expr: `* {{ D effectiveTime != ("` + semOldTime + `" "` + semNewTime + `"), term = "old" }}`, want: nil},
+		// A negated dialect: semOther's only membership is en-GB.
+		{expr: `* {{ D dialectId != ` + semGB + ` }}`, want: heart},
+		{expr: `* {{ D term = "heart", dialectId != ` + semUS + ` }}`, want: []string{semOther}},
+		{expr: `* {{ D term = "heart" }}`, want: both},
+	})
+}
+
+// TestSemantics_DialectMembershipIsPerDescription covers two descriptions of
+// one concept in one language, only one of them in en-GB. Correlating term
+// and dialect by language would accept the other; ecl.DescriptionRowMatcher
+// correlates them by description.
+func TestSemantics_DialectMembershipIsPerDescription(t *testing.T) {
+	const concept, heartID, cardiacID = "22298006", "200001011", "200002017"
+	p := providertest.NewInMemoryProvider(&providertest.FixtureSpec{
+		Concepts: []providertest.FixtureConcept{{ID: concept}},
+		Descriptions: []providertest.FixtureDescription{
+			{ID: heartID, Concept: concept, Language: "en", Value: "heart"},
+			{ID: cardiacID, Concept: concept, Language: "en", Value: "cardiac"},
+		},
+		Dialects: []providertest.FixtureDialectMember{
+			{ConceptID: concept, Language: "en", DescriptionID: heartID, DialectID: semGB, AcceptabilityID: semPreferred},
+		},
+	})
+	runSemCasesOn(t, p, []semCase{
+		{expr: `* {{ D term = "heart", dialectId = ` + semGB + ` }}`, want: []string{concept}},
+		{expr: `* {{ D term = "cardiac", dialectId = ` + semGB + ` }}`, want: nil},
+	})
 }
 
 // TestSemantics_UnrepresentableFiltersFailLoudly covers the filter forms the

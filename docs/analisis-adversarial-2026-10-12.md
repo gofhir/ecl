@@ -505,6 +505,21 @@ H4, H5 y H6 no cambian.
 
 Quedan abiertos H2 (dos cláusulas `term` en un bloque), H2m y H3, que comparten la necesidad de una capacidad que resuelva un bloque completo sobre una sola descripción o fila, además de H7 y H8.
 
+### 11.9 Bloque de descripción completo: `DescriptionRowMatcher`
+
+Capacidad opcional nueva. El evaluador envía el bloque `{{ D … }}` entero, como condiciones que deben cumplirse todas sobre **una misma fila de descripción**: términos, tipos, idiomas, módulos, IDs, `effectiveTime`, `active` y membresías de dialecto, cada una con su propia negación. Cuando el provider la implementa, todo bloque de descripción pasa por ella y no se reparte en llamadas ni se intersecta a nivel de concepto.
+
+- **H2 queda corregido** para providers con la capacidad: dos cláusulas `term` en un bloque deben cumplirse en la misma descripción.
+- **H3 queda corregido** para providers con la capacidad: término, o `active`, y dialecto en un bloque se cumplen sobre la misma descripción. `FixtureDialectMember.DescriptionID` permite que la fixture asigne una membresía a una descripción concreta, en vez de a concepto e idioma.
+- También se responden formas que la ruta por dimensión rechaza: `moduleId !=`, varias cláusulas `effectiveTime`, un conjunto de términos negado y un filtro de ID con una cláusula negada al lado.
+- **Sin la capacidad** se mantiene la ruta anterior, y sus marcas H2 y H3 siguen registradas.
+- La negación de dialecto conserva la lectura que ya tenía `MatchDialect`: `dialectId != X` se cumple por una membresía en otro dialecto, y una descripción sin membresías no cumple ninguna de las dos formas.
+- Implementar la capacidad declara que se respetan **todas** las condiciones; `VerifyContract` lo comprueba con un valor imposible por dimensión y con pares que ninguna fila puede cumplir a la vez (dos idiomas, dos tipos).
+- La conformance corre en las dos rutas: con la capacidad y, con `providertest.WithoutRowMatcher`, sin ella. Una cláusula se interpreta igual en ambas mediante un normalizador común.
+- **Cambio en el provider de referencia:** `MatchDialect` lee ahora las membresías por descripción, como la ruta nueva. Una membresía cuyo concepto no tiene descripción en ese idioma ya no coincide con nada, porque una fila RF2 de refset de idioma siempre nombra una descripción.
+
+Queda abierto H2m: los bloques `{{ M … }}` separados siguen compartiendo una fila. Necesita una capacidad análoga para filas de miembro.
+
 ## Apéndice A. Reproducción de los hallazgos
 
 Guardar el siguiente programa fuera del paquete, por ejemplo en `/tmp/go-ecl-audit-probe.go`, y ejecutar desde la raíz del repositorio:

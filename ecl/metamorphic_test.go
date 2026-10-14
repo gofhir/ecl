@@ -43,15 +43,25 @@ var semBlocks = []string{
 }
 
 func TestMetamorphic_FilterBlocks(t *testing.T) {
-	p := semanticsProvider()
-	known := map[string]string{
-		// Two term clauses in one block cannot travel on one call, so the
-		// evaluator reports them unsupported (see H2 in semantics_test.go) and
-		// the in-block relations have nothing to compare for these pairs.
-		`unsupported | {{ D term = "heart", term = "corazon" }}`:       "H2",
-		`unsupported | {{ D term = "heart", term = "nonexistent" }}`:   "H2",
-		`unsupported | {{ D term = "corazon", term = "nonexistent" }}`: "H2",
-	}
+	t.Run("per dimension", func(t *testing.T) {
+		filterBlockRelations(t, semanticsProvider(), map[string]string{
+			// Two term clauses in one block cannot travel on one call, so the
+			// evaluator reports them unsupported (see H2 in semantics_test.go)
+			// and the in-block relations have nothing to compare for these.
+			`unsupported | {{ D term = "heart", term = "corazon" }}`:       "H2",
+			`unsupported | {{ D term = "heart", term = "nonexistent" }}`:   "H2",
+			`unsupported | {{ D term = "corazon", term = "nonexistent" }}`: "H2",
+		})
+	})
+	// With ecl.DescriptionRowMatcher every pair is answered and every relation
+	// holds.
+	t.Run("per row", func(t *testing.T) {
+		filterBlockRelations(t, semanticsRowsProvider(), map[string]string{})
+	})
+}
+
+func filterBlockRelations(t *testing.T, p ecl.DataProvider, known map[string]string) {
+	t.Helper()
 	ev := newEvalCache(p)
 	var got []string
 	for i, a := range semBlocks {
