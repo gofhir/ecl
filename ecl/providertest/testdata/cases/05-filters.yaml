@@ -23,8 +23,17 @@ cases:
     expression: '<< 22298006 {{ D language = en }}'
     expectedIds: ["22298006"]
 
-  - name: language filter multi-value any-of (en OR es)
-    expression: '<< 22298006 {{ D language = (en OR es) }}'
+  # A language set is space-separated: `(en OR es)` reads "OR" as a third code.
+  # Only 22298006 has a Spanish description and nothing has a French one, so the
+  # two orders tell any-of apart from every shortcut: reading only the first
+  # value fails `(fr es)`, only the last fails `(es fr)`, and dropping the filter
+  # returns all six concepts of `<< 404684003`.
+  - name: language filter multi-value any-of (es fr)
+    expression: '<< 404684003 {{ D language = (es fr) }}'
+    expectedIds: ["22298006"]
+
+  - name: language filter multi-value any-of (fr es)
+    expression: '<< 404684003 {{ D language = (fr es) }}'
     expectedIds: ["22298006"]
 
   - name: language filter es only finds bilingual concept

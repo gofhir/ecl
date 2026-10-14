@@ -57,11 +57,7 @@ func evalFixture(t *testing.T, expr string) ecl.Set {
 // for tests that assert on the error itself.
 func evalFixtureErr(t *testing.T, expr string) (ecl.Set, error) {
 	t.Helper()
-	tree, err := ecl.Parse(expr)
-	if err != nil {
-		return nil, err
-	}
-	return ecl.Evaluate(context.Background(), tree, standardProvider(t))
+	return evaluate(standardProvider(t), expr)
 }
 
 // mustParse fails the test if expr does not parse.
@@ -119,4 +115,15 @@ func exampleProvider() ecl.DataProvider {
 		panic(err)
 	}
 	return p
+}
+
+// evaluate parses and evaluates expr against p. The helpers in this file and
+// the semantics, metamorphic and provider-error tests go through it; older
+// tests (evalECL, inline Parse+Evaluate) still call the API directly.
+func evaluate(p ecl.DataProvider, expr string) (ecl.Set, error) {
+	tree, err := ecl.Parse(expr)
+	if err != nil {
+		return nil, err
+	}
+	return ecl.Evaluate(context.Background(), tree, p)
 }
