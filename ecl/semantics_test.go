@@ -1,6 +1,9 @@
 package ecl_test
 
 import (
+	"context"
+	"errors"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -14,22 +17,23 @@ import (
 
 // Semantic regressions with the result the SPECIFICATION requires, not the one
 // the evaluator happens to return. They come from the adversarial review in
-// docs/analisis-adversarial-2026-10-12.md. The defect markers name its findings,
-// except H2b, which the document does not list and is defined here:
+// docs/analisis-adversarial-2026-10-12.md, whose findings the defect markers
+// name (H2b is recorded in its addendum, section 11.2):
 //
 //	H1   D-prefixed active/moduleId/effectiveTime filters read the concept.
-//	     The fix belongs in the evaluator (categorizeFilters files them under
-//	     the concept family); the in-memory provider already answers them per
-//	     description once they arrive in DescriptionFilterOpts. That struct
-//	     cannot carry all of them yet: EffectiveTime holds one value, and
-//	     ModuleIDs has no negated form.
-//	H2   repeated clauses inside ONE block are not a conjunction.
-//	H2b  separate blocks are not independent either: they are flattened into
-//	     one predicate. The last term overrides the earlier ones (so block order
-//	     changes the result), languages are pooled into an any-of, and a term and
-//	     a language from DIFFERENT blocks must hold on the same description —
-//	     which breaks the shape of official example 8.2.2. Found after the
-//	     review, while checking its pending note on blocks.
+//	     Fixed: every filter block carries its family (ast.Filtered.Family).
+//	     DescriptionFilterOpts still cannot carry several effectiveTime values
+//	     or a negated moduleId; those forms are reported unsupported.
+//	H2   repeated clauses inside ONE block are not a conjunction. Fixed for
+//	     type, language and moduleId, whose values are intersected; two term
+//	     clauses are reported unsupported, since one call carries one term.
+//	H2b  separate blocks were flattened into one predicate: the last term
+//	     overrode the earlier ones, languages pooled into an any-of, and a term
+//	     and a language from different blocks had to hold on one description.
+//	     Fixed: one Filtered per block.
+//	H2m  the same flattening across `{{ M … }}` blocks, which still share one
+//	     Filtered over their MemberOf: clauses of different M blocks must hold
+//	     on one member row.
 //	H3   term and dialect in one block may be satisfied by different
 //	     descriptions.
 //	H4   numeric literals lose precision (float64) or saturate on overflow.
@@ -117,6 +121,11 @@ type semCase struct {
 	// A defect case must set it; an empty pinned result is written `none`, so
 	// that a forgotten pin cannot pass for a deliberate empty one.
 	now []string
+	// unsupported pins, instead of now, that the evaluator reports the case
+	// ErrUnsupportedFeature: it fails loudly rather than answering, which is
+	// the policy while the contract cannot express the query, but it is still
+	// not the specified result.
+	unsupported bool
 }
 
 func TestSemantics_DescriptionFilters(t *testing.T) {
@@ -124,20 +133,43 @@ func TestSemantics_DescriptionFilters(t *testing.T) {
 	heart := []string{semHeart}
 	runSemCases(t, []semCase{
 		// H1 — the D prefix scopes these to descriptions.
-		{expr: `* {{ D active = false }}`, want: heart, defect: "H1", now: none},
-		{expr: `* {{ D moduleId = ` + semModule + ` }}`, want: heart, defect: "H1", now: none},
-		{expr: `* {{ D effectiveTime = "` + semNewTime + `" }}`, want: heart, defect: "H1", now: none},
+		{expr: `* {{ D active = false }}`, want: heart},
+		{expr: `* {{ D moduleId = ` + semModule + ` }}`, want: heart},
+		{expr: `* {{ D effectiveTime = "` + semNewTime + `" }}`, want: heart},
 		// No description carries the concept's own time; today the concept's is read.
-		{expr: `* {{ D effectiveTime = "` + semOldTime + `" }}`, want: nil, defect: "H1", now: heart},
+		{expr: `* {{ D effectiveTime = "` + semOldTime + `" }}`, want: nil},
+		// No prefix is a description filter: the grammar makes D optional and
+		// C mandatory, so these read the description, like their D forms.
+		{expr: `* {{ active = false }}`, want: heart},
+		{expr: `* {{ effectiveTime = "` + semNewTime + `" }}`, want: heart},
+		// A positive effectiveTime set is any-of, answered one call per value:
+		// only "corazon" carries either time.
+		{expr: `* {{ D effectiveTime = ("` + semOldTime + `" "` + semNewTime + `") }}`, want: heart},
+		// `active = *` admits either value, but a description filter still asks
+		// for a description, so semStrength, which has none, is out; as a
+		// concept filter it constrains nothing. `active != *` admits neither.
+		{expr: `* {{ active = * }}`, want: both},
+		{expr: `* {{ C active = * }}`, want: []string{semHeart, semOther, semStrength}},
+		{expr: `* {{ active != * }}`, want: nil},
+		{expr: `* {{ C active != * }}`, want: nil},
+		// An ordered effectiveTime set is any-of too: only "corazon" carries a
+		// time after the first, and none is after the second.
+		{expr: `* {{ D effectiveTime > ("19000101" "30000101") }}`, want: heart},
+		// Excluding a type set that names no type excludes nothing: both
+		// concepts with descriptions remain.
+		{expr: `* {{ D typeId != (< ` + semGB + `) }}`, want: both},
+		// A positive term set beside a negated clause: every term of the set
+		// has to reach the negated call. Only "corazon" is non-English.
+		{expr: `* {{ D term = ("heart" "corazon"), language != en }}`, want: heart},
 		// The concept-scoped forms, which must not move when H1 is fixed.
 		{expr: `* {{ C active = false }}`, want: nil},
 		{expr: `* {{ C moduleId = ` + semModule + ` }}`, want: nil},
 		{expr: `* {{ C effectiveTime = "` + semOldTime + `" }}`, want: heart},
 
 		// H2 — one block, one description: two values of one column cannot both hold.
-		{expr: `* {{ D language = en, language = es }}`, want: nil, defect: "H2", now: both},
-		{expr: `* {{ D term = "nonexistent", term = "heart" }}`, want: nil, defect: "H2", now: both},
-		{expr: `* {{ D term = "heart", term = "corazon" }}`, want: nil, defect: "H2", now: heart},
+		{expr: `* {{ D language = en, language = es }}`, want: nil},
+		{expr: `* {{ D term = "nonexistent", term = "heart" }}`, want: nil, defect: "H2", unsupported: true},
+		{expr: `* {{ D term = "heart", term = "corazon" }}`, want: nil, defect: "H2", unsupported: true},
 		// A value list inside ONE clause is any-of, unlike repeated clauses. The
 		// list is space-separated (languageCodeSet); `(en OR es)` would parse
 		// "OR" as a third two-letter code. No description is French, so reading
@@ -147,25 +179,337 @@ func TestSemantics_DescriptionFilters(t *testing.T) {
 		{expr: `* {{ D language = (fr es) }}`, want: heart},
 
 		// H2b — separate blocks, each satisfied on its own.
-		{expr: `* {{ D term = "corazon" }} {{ D term = "heart" }}`, want: heart, defect: "H2b", now: both},
-		{expr: `* {{ D term = "nonexistent" }} {{ D term = "corazon" }}`, want: nil, defect: "H2b", now: heart},
+		{expr: `* {{ D term = "corazon" }} {{ D term = "heart" }}`, want: heart},
+		{expr: `* {{ D term = "nonexistent" }} {{ D term = "corazon" }}`, want: nil},
 		{expr: `* {{ D term = "heart" }} {{ D term = "corazon" }}`, want: heart},
 		{expr: `* {{ D term = "corazon" }} {{ D term = "nonexistent" }}`, want: nil},
 		// Term and language from different blocks may hold on different
 		// descriptions; the second case is the shape of official example 8.2.2.
-		{expr: `* {{ D term = "heart" }} {{ D language = es }}`, want: heart, defect: "H2b", now: none},
-		{expr: `* {{ D term = "corazon", language = es }} {{ D term = "heart", language = en }}`, want: heart, defect: "H2b", now: both},
+		{expr: `* {{ D term = "heart" }} {{ D language = es }}`, want: heart},
+		{expr: `* {{ D term = "corazon", language = es }} {{ D term = "heart", language = en }}`, want: heart},
 		// semOther has no Spanish description; the blocks' languages are pooled into an any-of.
-		{expr: `* {{ D language = es }} {{ D language = en }}`, want: heart, defect: "H2b", now: both},
+		{expr: `* {{ D language = es }} {{ D language = en }}`, want: heart},
 
 		// H3 — term and dialect on the SAME description: semHeart's "heart" is en-US only.
 		{expr: `* {{ D term = "heart", dialectId = ` + semGB + ` }}`, want: []string{semOther}, defect: "H3", now: both},
+		// The metadata clauses share H3: active and dialect are answered by two
+		// calls, so semHeart's inactive "old" (en-GB) and active "heart" (en-US)
+		// together pass a block that no single description satisfies.
+		{expr: `* {{ D active = false, dialectId = ` + semUS + ` }}`, want: nil, defect: "H3", now: heart},
 		// Across blocks semHeart qualifies through "corazon"; a fix for H3 that
 		// correlated blocks too would wrongly drop it.
 		{expr: `* {{ D term = "heart" }} {{ D dialectId = ` + semGB + ` }}`, want: both},
 		{expr: `* {{ D dialectId = ` + semGB + ` }} {{ D term = "heart" }}`, want: both},
 		{expr: `* {{ D term = "corazon" }} {{ D dialectId = ` + semUS + ` }}`, want: heart},
 	})
+}
+
+// TestSemantics_MemberFilterBlocks covers H2m on standard.yaml, whose complex
+// map gives 95566004 one row in map group 2 and ANOTHER row mapping to I10.
+func TestSemantics_MemberFilterBlocks(t *testing.T) {
+	runSemCasesOn(t, standardProvider(t), []semCase{
+		// One block: one row must satisfy both clauses, and none does.
+		{expr: `^ 447562003 {{ M mapGroup = "2", mapTarget = "I10" }}`, want: nil},
+		// Two blocks: each may be satisfied by its own row.
+		{expr: `^ 447562003 {{ M mapGroup = "2" }} {{ M mapTarget = "I10" }}`, want: []string{"95566004"}, defect: "H2m", now: none},
+		// The member filter belongs to `^ R`; the hierarchy operator applies to
+		// the members it leaves. 95566004 has no descendants in the fixture.
+		{expr: `<< ^ 447562003 {{ M mapGroup = "2" }}`, want: []string{"95566004"}},
+	})
+}
+
+// TestSemantics_InactiveRowsDoNotQualifyAMember covers a member with an
+// active row and an inactive one. `^ R` means the active rows, so a field
+// filter must be satisfied by an ACTIVE row; intersecting with the active
+// members let the inactive row's value qualify the member through its sibling.
+// The fixture declares both capabilities the per-row default needs.
+func TestSemantics_InactiveRowsDoNotQualifyAMember(t *testing.T) {
+	const refset, member = "447562003", "95566004"
+	p := providertest.NewInMemoryProvider(&providertest.FixtureSpec{
+		Concepts: []providertest.FixtureConcept{{ID: refset}, {ID: member}},
+		// Declared under refsets too, so `^ R` alone finds the member and the
+		// "X" case can only be told apart by which ROW qualifies it.
+		Refsets: map[string][]string{refset: {member}},
+		MemberFields: []providertest.FixtureMemberField{
+			{Refset: refset, Member: member, Row: "1", FieldName: "mapTarget", Value: "Y"},
+			{Refset: refset, Member: member, Row: "2", FieldName: "mapTarget", Value: "X"},
+			{Refset: refset, Member: member, Row: "2", FieldName: "active", Value: "0"},
+			// A declared empty value is a value, not a missing column.
+			{Refset: refset, Member: member, Row: "1", FieldName: "mapAdvice", Value: ""},
+		},
+	})
+	runSemCasesOn(t, p, []semCase{
+		{expr: `^ ` + refset + ` {{ M mapTarget = "Y" }}`, want: []string{member}},
+		{expr: `^ ` + refset + ` {{ M mapTarget = "X" }}`, want: nil},
+		// Asking for the inactive rows explicitly reaches the X row.
+		{expr: `^ ` + refset + ` {{ M mapTarget = "X", active = false }}`, want: []string{member}},
+		{expr: `^ ` + refset + ` {{ M mapAdvice = "" }}`, want: []string{member}},
+	})
+}
+
+// TestSemantics_ProjectionKeepsTheActiveRowDefault covers `^ [field] R`, with
+// and without a member filter. A source with two associations keeps both
+// targets, and the inactive one is left out either way: a filter matching
+// every row must not change what the projection returns.
+func TestSemantics_ProjectionKeepsTheActiveRowDefault(t *testing.T) {
+	const sameAs, source, kept, retired = "900000000000527005", "11111111", "22298006", "73211009"
+	p := providertest.NewInMemoryProvider(&providertest.FixtureSpec{
+		Concepts: []providertest.FixtureConcept{{ID: sameAs}, {ID: source}, {ID: kept}, {ID: retired}},
+		HistoricalAssociations: []providertest.FixtureHistory{
+			{Refset: sameAs, Source: source, Target: kept},
+			{Refset: sameAs, Source: source, Target: retired},
+		},
+		// Row names the association it belongs to: its target.
+		MemberFields: []providertest.FixtureMemberField{
+			{Refset: sameAs, Member: source, Row: retired, FieldName: "active", Value: "0"},
+		},
+	})
+	runSemCasesOn(t, p, []semCase{
+		{expr: `^ [targetComponentId] ` + sameAs, want: []string{kept}},
+		{expr: `^ [targetComponentId] ` + sameAs + ` {{ M referencedComponentId = ` + source + ` }}`, want: []string{kept}},
+		{expr: `^ [targetComponentId] ` + sameAs + ` {{ M active = * }}`, want: []string{kept, retired}},
+		{expr: `^ ` + sameAs + ` {{ M targetComponentId = ` + kept + ` }}`, want: []string{source}},
+	})
+}
+
+// TestSemantics_InactiveAssociationIsNotHistory covers an association row
+// marked inactive by a memberFields entry with no Row. It belongs to the
+// association's row, so the association is neither a current member nor part
+// of a history supplement.
+func TestSemantics_InactiveAssociationIsNotHistory(t *testing.T) {
+	const sameAs, retiredSource, liveSource, target = "900000000000527005", "11111111", "33333333", "22298006"
+	p := providertest.NewInMemoryProvider(&providertest.FixtureSpec{
+		Concepts: []providertest.FixtureConcept{{ID: sameAs}, {ID: target}, {ID: retiredSource}, {ID: liveSource}},
+		HistoricalAssociations: []providertest.FixtureHistory{
+			{Refset: sameAs, Source: retiredSource, Target: target},
+			{Refset: sameAs, Source: liveSource, Target: target},
+		},
+		MemberFields: []providertest.FixtureMemberField{
+			{Refset: sameAs, Member: retiredSource, FieldName: "active", Value: "0"},
+		},
+	})
+	runSemCasesOn(t, p, []semCase{
+		{expr: `^ ` + sameAs, want: []string{liveSource}},
+		{expr: target + ` {{ +HISTORY }}`, want: []string{target, liveSource}},
+	})
+}
+
+// columnsWithoutProjector declares the member row columns but cannot take
+// several clauses on one row.
+type columnsWithoutProjector struct{ ecl.DataProvider }
+
+func (columnsWithoutProjector) AnswersMemberRowColumns() {}
+
+// TestSemantics_ContradictionIsAnsweredWithoutTheProvider covers `active != *`,
+// which no row satisfies. Its two clauses are not sent, so a provider that
+// cannot take two clauses on one row still answers the empty set rather than
+// refusing an expression whose answer is known.
+func TestSemantics_ContradictionIsAnsweredWithoutTheProvider(t *testing.T) {
+	p := columnsWithoutProjector{standardProvider(t)}
+	runSemCasesOn(t, p, []semCase{
+		{expr: `^ 900000000000497000 {{ M active != * }}`, want: nil},
+	})
+}
+
+// activeMembersOnly answers RefsetMembers the way an RF2-faithful provider
+// does — only members with an active row — and declares the member row
+// columns, which its embedded fixture answers.
+type activeMembersOnly struct {
+	ecl.DataProvider
+	active []string
+}
+
+func (a activeMembersOnly) RefsetMembers(context.Context, []string) (ecl.Set, error) {
+	return ecl.NewSetFromSlice(a.active), nil
+}
+
+func (activeMembersOnly) AnswersMemberRowColumns() {}
+
+// TestSemantics_MemberActiveFilterDecidesTheRows covers `{{ M active = false }}`
+// against such a provider. `^ R` alone is the active members, so intersecting
+// the filter's rows with it left only members that also had an active row.
+func TestSemantics_MemberActiveFilterDecidesTheRows(t *testing.T) {
+	const refset, retired, current = "447562003", "22298006", "73211009"
+	base := providertest.NewInMemoryProvider(&providertest.FixtureSpec{
+		Concepts:     []providertest.FixtureConcept{{ID: refset}, {ID: retired}, {ID: current}},
+		Refsets:      map[string][]string{refset: {retired, current}},
+		MemberFields: []providertest.FixtureMemberField{{Refset: refset, Member: retired, FieldName: "active", Value: "0"}},
+	})
+	p := activeMembersOnly{DataProvider: base, active: []string{current}}
+	runSemCasesOn(t, p, []semCase{
+		{expr: `^ ` + refset, want: []string{current}},
+		{expr: `^ ` + refset + ` {{ M active = false }}`, want: []string{retired}},
+		{expr: `^ ` + refset + ` {{ M active = true }}`, want: []string{current}},
+		// Either flag lets the inactive row count, which `^` alone does not.
+		{expr: `^ ` + refset + ` {{ M active = * }}`, want: []string{retired, current}},
+		// Parentheses do not hide the memberOf from its member filter.
+		{expr: `(^ ` + refset + `) {{ M active = false }}`, want: []string{retired}},
+	})
+}
+
+// TestSemantics_MemberRowColumns covers active, moduleId and effectiveTime in
+// a member filter: columns of the member ROW, sent as member field comparisons.
+// They used to filter the referenced concept instead, which answered for a
+// different component. The rows here differ from their concepts on purpose.
+func TestSemantics_MemberRowColumns(t *testing.T) {
+	const refset, retired, current = "447562003", "22298006", "73211009"
+	p := providertest.NewInMemoryProvider(&providertest.FixtureSpec{
+		Concepts: []providertest.FixtureConcept{{ID: refset}, {ID: retired}, {ID: current}},
+		Refsets:  map[string][]string{refset: {retired, current}},
+		MemberFields: []providertest.FixtureMemberField{
+			// Both concepts are active; only the member rows differ.
+			{Refset: refset, Member: retired, FieldName: "active", Value: "0"},
+			{Refset: refset, Member: current, FieldName: "moduleId", Value: semModule},
+			{Refset: refset, Member: current, FieldName: "effectiveTime", Value: semNewTime},
+		},
+	})
+	runSemCasesOn(t, p, []semCase{
+		// A row that declares no active column is active.
+		{expr: `^ ` + refset + ` {{ M active = true }}`, want: []string{current}},
+		{expr: `^ ` + refset + ` {{ M active = false }}`, want: []string{retired}},
+		{expr: `^ ` + refset + ` {{ M moduleId = ` + semModule + ` }}`, want: []string{current}},
+		{expr: `^ ` + refset + ` {{ M effectiveTime = "` + semNewTime + `" }}`, want: []string{current}},
+		// A module set naming no module: requiring one matches no row, and
+		// excluding one excludes nothing, which leaves `^ R` alone: the members
+		// with an active row, so not retired.
+		{expr: `^ ` + refset + ` {{ M moduleId = (< ` + semGB + `) }}`, want: nil},
+		{expr: `^ ` + refset + ` {{ M moduleId != (< ` + semGB + `) }}`, want: []string{current}},
+		// `active != *` matches no row.
+		{expr: `^ ` + refset + ` {{ M active != * }}`, want: nil},
+		// Either flag: the rows decide, so the inactive row counts too.
+		{expr: `^ ` + refset + ` {{ M active = * }}`, want: []string{retired, current}},
+		// The concept-scoped reading filters the concepts of `^ R`'s active
+		// members. Both concepts are active, but retired is not such a member.
+		{expr: `^ ` + refset + ` {{ C active = true }}`, want: []string{current}},
+		{expr: `^ ` + refset, want: []string{current}},
+	})
+}
+
+// TestSemantics_DroppedClauseKeepsSiblingPolarity covers a clause that
+// constrains nothing — excluding a type set that names no type — being dropped
+// before the polarity of the block is decided. Left in the list, it sent the
+// block down the negated path and its "!=" was read onto the kept positive
+// clause: `typeId = FSN, typeId != (nothing)` asked for descriptions that are
+// NOT FSNs.
+func TestSemantics_DroppedClauseKeepsSiblingPolarity(t *testing.T) {
+	const fsnConcept, synConcept = "22298006", "73211009"
+	const fsn, syn = "900000000000003001", "900000000000013009"
+	p := providertest.NewInMemoryProvider(&providertest.FixtureSpec{
+		Concepts: []providertest.FixtureConcept{{ID: fsnConcept}, {ID: synConcept}},
+		Descriptions: []providertest.FixtureDescription{
+			{Concept: fsnConcept, Language: "en", TypeID: fsn, Value: "heart (x)"},
+			{Concept: synConcept, Language: "en", TypeID: syn, Value: "heart"},
+		},
+	})
+	runSemCasesOn(t, p, []semCase{
+		{expr: `* {{ D typeId = ` + fsn + `, typeId != (< ` + semGB + `) }}`, want: []string{fsnConcept}},
+		{expr: `* {{ D typeId != (< ` + semGB + `), typeId = ` + fsn + ` }}`, want: []string{fsnConcept}},
+	})
+}
+
+// zeroOptsAnswerNothing answers MatchDescription with zero-value Opts the way
+// the contract says — the empty Set — where the in-memory fixture is lenient.
+type zeroOptsAnswerNothing struct{ ecl.DataProvider }
+
+// AnswersDescriptionMetadata declares that it honors Active, which the
+// embedded fixture does.
+func (zeroOptsAnswerNothing) AnswersDescriptionMetadata() {}
+
+func (z zeroOptsAnswerNothing) MatchDescription(ctx context.Context, opts ecl.DescriptionFilterOpts) (ecl.Set, error) {
+	if reflect.ValueOf(opts).IsZero() {
+		return ecl.NewSet(), nil
+	}
+	return z.DataProvider.MatchDescription(ctx, opts)
+}
+
+// TestSemantics_BlockOfDroppedClausesStillNeedsADescription covers a block
+// whose every clause constrains nothing. It still asks for a description, and
+// must ask in a form the contract answers: zero-value Opts come back empty.
+func TestSemantics_BlockOfDroppedClausesStillNeedsADescription(t *testing.T) {
+	p := zeroOptsAnswerNothing{semanticsProvider()}
+	runSemCasesOn(t, p, []semCase{
+		// semStrength has no description, so it is not "a concept with a
+		// description of a type outside the empty set".
+		{expr: `* {{ D typeId != (< ` + semGB + `) }}`, want: []string{semHeart, semOther}},
+	})
+}
+
+// TestSemantics_MemberRowColumnsNeedTheCapability covers a provider that does
+// not declare ecl.MemberRowColumnsProvider. Written before these filters were
+// sent, it would look "active" up as an additional field and answer the empty
+// set; the evaluator must refuse instead.
+func TestSemantics_MemberRowColumnsNeedTheCapability(t *testing.T) {
+	// Embedding only the required interface hides every capability.
+	p := struct{ ecl.DataProvider }{standardProvider(t)}
+	for _, expr := range []string{
+		`^ 900000000000497000 {{ M active = true }}`,
+		`^ 900000000000497000 {{ M moduleId = 900000000000207008 }}`,
+		`^ 900000000000497000 {{ M effectiveTime = "20240131" }}`,
+	} {
+		t.Run(expr, func(t *testing.T) {
+			_, err := evaluate(p, expr)
+			require.ErrorIsf(t, err, ecl.ErrUnsupportedFeature, "%q must be refused without the capability", expr)
+		})
+	}
+}
+
+// TestSemantics_DescriptionMetadataNeedsTheCapability covers a provider that
+// does not declare ecl.DescriptionMetadataProvider: written before these
+// fields were sent, it may ignore them and answer every description.
+func TestSemantics_DescriptionMetadataNeedsTheCapability(t *testing.T) {
+	p := struct{ ecl.DataProvider }{semanticsProvider()}
+	for _, expr := range []string{
+		`* {{ D active = false }}`,
+		`* {{ active = false }}`, // no prefix: a description filter
+		`* {{ D moduleId = ` + semModule + ` }}`,
+		`* {{ D effectiveTime = "` + semNewTime + `" }}`,
+		`* {{ D active = * }}`,
+	} {
+		t.Run(expr, func(t *testing.T) {
+			_, err := evaluate(p, expr)
+			require.ErrorIsf(t, err, ecl.ErrUnsupportedFeature, "%q must be refused without the capability", expr)
+		})
+	}
+	// The other description clauses and the concept forms need nothing new.
+	for _, expr := range []string{`* {{ D term = "heart" }}`, `* {{ C active = false }}`} {
+		_, err := evaluate(p, expr)
+		require.NoErrorf(t, err, "%q", expr)
+	}
+}
+
+// TestSemantics_UnrepresentableFiltersFailLoudly covers the filter forms the
+// provider contract cannot carry yet. Answering them from a partial reading is
+// how H1 and H2 came about, so each must be reported ErrUnsupportedFeature
+// rather than evaluated wider than written.
+func TestSemantics_UnrepresentableFiltersFailLoudly(t *testing.T) {
+	p := semanticsProvider()
+	for _, expr := range []string{
+		// DescriptionFilterOpts has no negated module and one effectiveTime.
+		`* {{ D moduleId != ` + semModule + ` }}`,
+		// A negated set needs one row to fail every value.
+		`* {{ D effectiveTime != ("` + semOldTime + `" "` + semNewTime + `") }}`,
+		`* {{ D effectiveTime >= "` + semOldTime + `", effectiveTime <= "` + semNewTime + `" }}`,
+		// A member filter with no `^`: the grammar admits it, but there are no
+		// member rows to filter.
+		`< 447562003 {{ M mapGroup = "2" }}`,
+		// A row filter that can match nothing still lets its operand report
+		// what it cannot do — here a projection of every field.
+		`^ [*] 447562003 {{ M active != * }}`,
+		// A contradictory active pair does not excuse a later clause that
+		// cannot be carried, whatever the clause order.
+		`^ 900000000000497000 {{ M active != *, effectiveTime < "` + semOldTime + `" }}`,
+		`^ 900000000000497000 {{ M effectiveTime < "` + semOldTime + `", active != * }}`,
+		// A module clause matching no row does not excuse a later one either.
+		`^ 900000000000497000 {{ M moduleId = (< ` + semGB + `), effectiveTime < "` + semOldTime + `" }}`,
+		`^ 900000000000497000 {{ M effectiveTime < "` + semOldTime + `", moduleId = (< ` + semGB + `) }}`,
+		// MemberFilterOpts compares member columns by equality only.
+		`^ 900000000000497000 {{ M effectiveTime >= "` + semOldTime + `" }}`,
+	} {
+		t.Run(expr, func(t *testing.T) {
+			_, err := evaluate(p, expr)
+			require.ErrorIsf(t, err, ecl.ErrUnsupportedFeature, "%q must fail loudly", expr)
+		})
+	}
 }
 
 // TestSemantics_ConcreteNumbers uses integer literals only. Whether a decimal
@@ -260,9 +604,28 @@ func require64BitInt(t *testing.T) {
 
 func runSemCases(t *testing.T, cases []semCase) {
 	t.Helper()
-	p := semanticsProvider()
+	runSemCasesOn(t, semanticsProvider(), cases)
+}
+
+func runSemCasesOn(t *testing.T, p ecl.DataProvider, cases []semCase) {
+	t.Helper()
 	for _, tc := range cases {
 		t.Run(tc.expr, func(t *testing.T) {
+			if tc.unsupported {
+				require.NotEmptyf(t, tc.defect, "%q pins unsupported without a defect marker", tc.expr)
+				set, err := evaluate(p, tc.expr)
+				switch {
+				case errors.Is(err, ecl.ErrUnsupportedFeature):
+					t.Logf("KNOWN DEFECT %s: %q is reported unsupported; the specification requires %v", tc.defect, tc.expr, tc.want)
+				case err != nil:
+					t.Fatalf("%q fails with %v instead of the pinned ErrUnsupportedFeature", tc.expr, err)
+				case equalIDs(tc.want, set.Slice()):
+					t.Fatalf("%q now returns the specified %v, so defect %s looks fixed: drop its marker and unsupported", tc.expr, tc.want, tc.defect)
+				default:
+					t.Fatalf("%q returns %v, neither the specified %v nor the pinned ErrUnsupportedFeature: something else changed", tc.expr, set.Slice(), tc.want)
+				}
+				return
+			}
 			got := evalIDs(t, p, tc.expr)
 			want, now := tc.want, tc.now
 			switch {

@@ -112,7 +112,13 @@ func printAST(out io.Writer, node ast.Expression, depth int) {
 			printAttrSet(out, n.Refinement.AttrSet, depth+2)
 		}
 	case *ast.Filtered:
-		fmt.Fprintf(out, "%sFiltered (%d clauses)\n", indent, len(n.Filters))
+		// One node per filter block, so the family says which component its
+		// clauses constrain; a hand-built tree may leave it empty.
+		family := ""
+		if n.Family != "" {
+			family = " " + string(n.Family)
+		}
+		fmt.Fprintf(out, "%sFiltered%s (%d clauses)\n", indent, family, len(n.Filters))
 		printAST(out, n.Operand, depth+1)
 	case *ast.HistorySupplement:
 		profile := n.Profile

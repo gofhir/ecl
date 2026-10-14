@@ -1104,64 +1104,92 @@ func matchConcreteValue(cv *ConcreteValue, c attrClause) bool {
 // handed to evaluateMemberOf and the operand is evaluated once, there. See
 // projectedMemberOf.
 func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvider) (Set, error) {
-	descFilters, conceptFilters, memberFilters := categorizeFilters(e.Filters)
+	descFilters, conceptFilters, memberFilters, err := categorizeFilters(e.Filters, e.Family)
+	if err != nil {
+		return nil, err
+	}
 
 	// A projecting memberOf must see the member filters, so its operand is NOT
 	// evaluated by the generic path above: `^ [targetComponentId] X {{ M
 	// referencedComponentId = Y }}` filters one column and returns another, and
 	// intersecting the returned column with a filter on a different column
 	// answers nothing anybody asked.
+	if len(memberFilters) > 0 && e.Family == ast.FamilyMember && memberOfOperand(e.Operand) == nil {
+		// The grammar admits `{{ M … }}` after a focus with no `^`, where there
+		// are no member rows to filter. Reading the focus concepts as reference
+		// sets, as the generic path would, answers a question nobody wrote.
+		return nil, fmt.Errorf("%w: a member filter needs a memberOf (^) operand, whose member rows it filters", ErrUnsupportedFeature)
+	}
+	clauses, noRows, err := memberFilterOptsOf(ctx, memberFilters, provider)
+	if err != nil {
+		return nil, err
+	}
+	// The rows decide when the filter names the active column; otherwise `^ R`
+	// means the active rows, and that default is applied per ROW where the
+	// provider can carry it, so that an inactive row's value cannot qualify a
+	// member through its active sibling. Elsewhere it stays the intersection
+	// with the active members below, as before the column existed.
+	rowsDecide := false
+	if len(clauses) > 0 && memberOfOperand(e.Operand) != nil {
+		clauses, rowsDecide = rowActiveDefault(clauses, provider)
+	}
+
 	var base Set
-	if mo := projectedMemberOf(e.Operand); mo != nil {
-		opts, err := memberFilterOptsOf(ctx, memberFilters, provider)
+	if rowsDecide && projectedMemberOf(e.Operand) == nil {
+		if noRows {
+			// Nothing can match, so the clauses are not sent; the reference
+			// set operand is still evaluated so that its errors surface.
+			if _, err := Evaluate(ctx, memberOfOperand(e.Operand).Operand, provider); err != nil {
+				return nil, fmt.Errorf("evaluating member filter refset: %w", err)
+			}
+			return NewSet(), nil
+		}
+		// The rows decide, so `^ R`'s own member set would be fetched only to be
+		// replaced; membersMatching resolves the reference sets, and their
+		// errors, itself.
+		matched, err := membersMatching(ctx, e.Operand, nil, clauses, provider)
 		if err != nil {
 			return nil, err
 		}
-		if base, err = evaluateMemberOf(ctx, mo, opts, provider); err != nil {
+		base, clauses = matched, nil
+	} else if mo := projectedMemberOf(e.Operand); mo != nil {
+		if base, err = evaluateMemberOf(ctx, mo, clauses, provider); err != nil {
 			return nil, err
 		}
 		// Consumed by the projection. Everything below then treats the projected
 		// values as an ordinary set of concept ids, which is what they are:
 		// description and concept filters still apply to them.
-		memberFilters = nil
-	} else {
-		var err error
-		if base, err = Evaluate(ctx, e.Operand, provider); err != nil {
-			return nil, fmt.Errorf("evaluating Filtered operand: %w", err)
-		}
+		clauses = nil
+	} else if base, err = Evaluate(ctx, e.Operand, provider); err != nil {
+		return nil, fmt.Errorf("evaluating Filtered operand: %w", err)
+	}
+	// After the operand, so its errors and refusals still surface: a clause
+	// that can match no row empties the result, it does not excuse the operand.
+	if noRows {
+		return NewSet(), nil
 	}
 
 	result := base
 
-	if len(memberFilters) > 0 {
-		clauses, err := memberFilterOptsOf(ctx, memberFilters, provider)
+	// Every clause may have constrained nothing — excluding a module set that
+	// names none — and then the members stand as they are.
+	if len(clauses) > 0 {
+		matched, err := membersMatching(ctx, e.Operand, base, clauses, provider)
 		if err != nil {
 			return nil, err
 		}
-
-		// The reference sets, resolved once. Taking them from the memberOf's own
-		// operand rather than from base matters: base is already the MEMBERS, and
-		// a member is not a reference set.
-		var refsetIDs []string
-		if mo, ok := e.Operand.(*ast.MemberOf); ok {
-			refsetIDSet, innerErr := Evaluate(ctx, mo.Operand, provider)
-			if innerErr != nil {
-				return nil, fmt.Errorf("evaluating member filter refset: %w", innerErr)
-			}
-			refsetIDs = toIDSlice(refsetIDSet)
+		if rowsDecide {
+			// The clauses say which rows count. `^ R` alone means the active
+			// members, so intersecting with it would leave `{{ M active =
+			// false }}` only the members that ALSO have an active row.
+			result = matched
 		} else {
-			refsetIDs = toIDSlice(base)
+			result = result.Intersect(matched)
 		}
-
-		matched, err := matchMemberFilters(ctx, refsetIDs, clauses, provider)
-		if err != nil {
-			return nil, err
-		}
-		result = result.Intersect(matched)
 	}
 
-	// Description filters — build a single DescriptionFilterOpts from all
-	// clauses, then call MatchDescription once. The result is a set of concept
+	// Description filters — build a single DescriptionFilterOpts from the
+	// block's clauses, then call MatchDescription once. The result is a set of concept
 	// IDs whose descriptions match; intersect with the current base (or subtract
 	// when negated).
 	// Dialect clauses are answered by MatchDialect, not MatchDescription, so a
@@ -1169,22 +1197,16 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 	// it zero-value Opts asks "every description", and under the contract an
 	// empty input yields the empty Set. Even a lenient provider drops every
 	// concept that happens to have no descriptions.
-	hasDescriptionClause := false
-	for _, f := range descFilters {
-		if _, isDialect := f.(*ast.DialectFilter); !isDialect {
-			hasDescriptionClause = true
-			break
-		}
-	}
+	hasDescriptionClause := hasNonDialectClause(descFilters)
 
 	if hasDescriptionClause {
 		matches, err := matchDescriptionFilters(ctx, descFilters, provider)
-		if err != nil {
+		switch {
+		case err != nil:
 			return nil, err
-		}
-		if result == nil {
+		case result == nil:
 			result = matches
-		} else {
+		default:
 			result = result.Intersect(matches)
 		}
 	}
@@ -1270,6 +1292,125 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 	return result, nil
 }
 
+// anyDescription returns the concepts that have at least one description. It
+// asks through the Active field, so it needs a provider that honors it.
+func anyDescription(ctx context.Context, provider DataProvider) (Set, error) {
+	if !answersDescriptionMetadata(provider) {
+		return nil, fmt.Errorf("%w: every clause of this description filter constrains nothing, so it asks only for a description, which is asked through DescriptionFilterOpts.Active and needs a provider implementing ecl.DescriptionMetadataProvider", ErrUnsupportedFeature)
+	}
+	out := NewSet()
+	for _, active := range []bool{true, false} {
+		flag := active
+		got, err := provider.MatchDescription(ctx, DescriptionFilterOpts{Active: &flag})
+		if err != nil {
+			return nil, fmt.Errorf("%w: MatchDescription: %w", ErrProvider, err)
+		}
+		out = out.Union(nonNil(got))
+	}
+	return out, nil
+}
+
+// errNoDescriptionMetadata refuses a description filter on active, moduleId or
+// effectiveTime for a provider that has not declared it honors those fields.
+var errNoDescriptionMetadata = fmt.Errorf("%w: active, moduleId and effectiveTime in a description filter need a provider implementing ecl.DescriptionMetadataProvider, because one written before they were sent may ignore them and answer every description", ErrUnsupportedFeature)
+
+func answersDescriptionMetadata(provider DataProvider) bool {
+	_, ok := provider.(DescriptionMetadataProvider)
+	return ok
+}
+
+// namesDescriptionMetadata reports whether a description block has an active,
+// moduleId or effectiveTime clause.
+func namesDescriptionMetadata(filters []ast.Filter) bool {
+	for _, f := range filters {
+		switch f.(type) {
+		case *ast.ActiveFilter, *ast.ModuleFilter, *ast.EffectiveTimeFilter:
+			return true
+		}
+	}
+	return false
+}
+
+// rowActiveDefault adds `active = 1` to a member filter that does not name the
+// active column, where the provider can carry it on the same row: `^ R` means
+// the active rows. It reports whether the clauses now decide which rows count.
+func rowActiveDefault(clauses []MemberFilterOpts, provider DataProvider) ([]MemberFilterOpts, bool) {
+	if namesActive(clauses) {
+		return clauses, true
+	}
+	if !carriesRowActive(provider) {
+		return clauses, false
+	}
+	return append(append([]MemberFilterOpts(nil), clauses...),
+		MemberFilterOpts{FieldName: MemberColumnActive, Op: "=", ValueSet: NewSetFromSlice([]string{"1"})}), true
+}
+
+// memberOfOperand returns the memberOf a member filter's operand is, looking
+// through parentheses: `(^ R) {{ M … }}` filters R's member rows like `^ R`.
+// It returns nil for an operand with no member rows.
+func memberOfOperand(e ast.Expression) *ast.MemberOf {
+	for {
+		switch x := e.(type) {
+		case *ast.MemberOf:
+			return x
+		case *ast.Nested:
+			e = x.Inner
+		default:
+			return nil
+		}
+	}
+}
+
+// namesActive reports whether member filter clauses already constrain the
+// active column.
+func namesActive(filters []MemberFilterOpts) bool {
+	for _, f := range filters {
+		if f.FieldName == MemberColumnActive {
+			return true
+		}
+	}
+	return false
+}
+
+// carriesRowActive reports whether the provider can take an active clause on a
+// member row alongside the others: it answers the column, and it takes several
+// clauses on one row.
+func carriesRowActive(provider DataProvider) bool {
+	_, columns := provider.(MemberRowColumnsProvider)
+	_, rows := provider.(RefsetFieldProjector)
+	return columns && rows
+}
+
+// hasNonDialectClause reports whether a description block still has a clause
+// that MatchDescription answers; dialect clauses go to MatchDialect.
+func hasNonDialectClause(filters []ast.Filter) bool {
+	for _, f := range filters {
+		if _, isDialect := f.(*ast.DialectFilter); !isDialect {
+			return true
+		}
+	}
+	return false
+}
+
+// membersMatching returns the members of the filtered reference sets that
+// satisfy the member filter clauses.
+//
+// The reference sets are taken from the memberOf's own operand rather than from
+// base: base is already the MEMBERS, and a member is not a reference set.
+func membersMatching(ctx context.Context, operand ast.Expression, base Set, clauses []MemberFilterOpts, provider DataProvider) (Set, error) {
+	var refsetIDs []string
+	if mo := memberOfOperand(operand); mo != nil {
+		refsetIDSet, err := Evaluate(ctx, mo.Operand, provider)
+		if err != nil {
+			return nil, fmt.Errorf("evaluating member filter refset: %w", err)
+		}
+		refsetIDs = toIDSlice(refsetIDSet)
+	} else {
+		refsetIDs = toIDSlice(base)
+	}
+	return matchMemberFilters(ctx, refsetIDs, clauses, provider)
+}
+
 // conceptFilterClause is a single concept filter clause with its own polarity,
 // so each one can be composed independently.
 type conceptFilterClause struct {
@@ -1282,6 +1423,10 @@ type conceptFilterClause struct {
 func buildConceptFilterClauses(filters []ast.Filter) []conceptFilterClause {
 	out := make([]conceptFilterClause, 0, len(filters))
 	for _, f := range filters {
+		if a, ok := f.(*ast.ActiveFilter); ok && a.Any {
+			// Either value: every concept is active or inactive.
+			continue
+		}
 		negate := false
 		switch x := f.(type) {
 		case *ast.DefinitionStatusFilter:
@@ -1352,24 +1497,21 @@ func planConceptClause(ctx context.Context, f ast.Filter, provider DataProvider)
 			return conceptClausePlan{matchesNothing: true}, nil
 		}
 	case *ast.ModuleFilter:
-		for _, mod := range x.Modules {
-			ids, resolved, err := resolveFilterIDs(ctx, mod, provider)
-			if err != nil {
-				return conceptClausePlan{}, fmt.Errorf("evaluating module filter: %w", err)
-			}
-			if !resolved {
-				continue
-			}
-			opts.ModuleIDs = append(opts.ModuleIDs, ids...)
+		ids, namesNothing, err := resolveModuleIDs(ctx, x, provider)
+		if err != nil {
+			return conceptClausePlan{}, err
 		}
-		if len(x.Modules) > 0 && len(opts.ModuleIDs) == 0 {
+		if namesNothing {
 			return conceptClausePlan{matchesNothing: true}, nil
 		}
+		opts.ModuleIDs = ids
 	case *ast.EffectiveTimeFilter:
+		values := effectiveTimeValues(x)
 		opts.EffectiveTimeOp = x.Op
-		if len(x.Values) <= 1 {
-			if len(x.Values) == 1 {
-				opts.EffectiveTime = x.Values[0]
+		if len(values) <= 1 {
+			// None is no constraint: EffectiveTime stays empty.
+			if len(values) == 1 {
+				opts.EffectiveTime = values[0]
 			}
 			break
 		}
@@ -1378,7 +1520,7 @@ func planConceptClause(ctx context.Context, f ast.Filter, provider DataProvider)
 		// per-value results are intersected; every other operator keeps the
 		// any-of union.
 		plan := conceptClausePlan{intersect: x.Op == "!="}
-		for _, v := range x.Values {
+		for _, v := range values {
 			plan.calls = append(plan.calls, ConceptFilterOpts{EffectiveTime: v, EffectiveTimeOp: x.Op})
 		}
 		return plan, nil
@@ -1427,16 +1569,41 @@ func resolveFilterIDs(ctx context.Context, e ast.Expression, provider DataProvid
 // both an FSN and a synonym. Without the capability the form is reported rather
 // than answered wrongly.
 func matchDescriptionFilters(ctx context.Context, descFilters []ast.Filter, provider DataProvider) (Set, error) {
+	// Needs no provider, so it goes before anything that calls one.
+	if err := unsupportedDescriptionFilter(descFilters); err != nil {
+		return nil, err
+	}
+	if namesDescriptionMetadata(descFilters) && !answersDescriptionMetadata(provider) {
+		return nil, errNoDescriptionMetadata
+	}
+
+	// Built next, because building drops the clauses that constrain nothing —
+	// excluding a set that names no type, for one — and the polarity decisions
+	// below must see only the clauses that remain. Deciding on the full list let
+	// a dropped negated clause flip the polarity of a kept positive one.
+	opts, matchesNothing, descFilters, err := buildDescriptionFilterOpts(ctx, descFilters, provider)
+	if err != nil {
+		return nil, err
+	}
+	if matchesNothing {
+		// A clause named no concept, so nothing can match.
+		return NewSet(), nil
+	}
+	if !hasNonDialectClause(descFilters) {
+		// Every clause constrained nothing, but a description filter still asks
+		// for a description: `{{ D typeId != (none) }}` is "has a description of
+		// a type outside the empty set". Zero-value Opts cannot ask that — the
+		// contract answers them with the empty Set — so it is asked as the two
+		// halves of the active flag, which together are every description.
+		return anyDescription(ctx, provider)
+	}
+
 	kind, negated := negatedDescriptionFilter(descFilters)
 	negatingProvider, canNegate := provider.(NegatingDescriptionProvider)
 	if negated && !canNegate {
 		return nil, fmt.Errorf("%w: negated description filter (%s) requires a provider implementing ecl.NegatingDescriptionProvider; its negation is per description row and cannot be composed from sets",
 			ErrUnsupportedFeature, kind)
 	}
-	if err := unsupportedDescriptionFilter(descFilters); err != nil {
-		return nil, err
-	}
-
 	idFilter := descriptionIDFilterOf(descFilters)
 	idProvider, canMatchIDs := provider.(DescriptionIDProvider)
 	switch {
@@ -1451,20 +1618,11 @@ func matchDescriptionFilters(ctx context.Context, descFilters []ast.Filter, prov
 			ErrUnsupportedFeature, kind)
 	}
 
-	opts, matchesNothing, err := buildDescriptionFilterOpts(ctx, descFilters, provider)
-	if err != nil {
-		return nil, err
-	}
-	if matchesNothing {
-		// A clause named no concept, so nothing can match.
-		return NewSet(), nil
-	}
-
 	if idFilter != nil {
 		// Still one call per term: the id constraint composes with a term set the
 		// same way every sibling clause does.
 		out := NewSet()
-		for i, callOpts := range termCalls(descFilters, opts) {
+		for i, callOpts := range descriptionCalls(descFilters, opts) {
 			matches, err := idProvider.MatchDescriptionByID(ctx, DescriptionIDFilterOpts{
 				Opts:           callOpts,
 				DescriptionIDs: idFilter.IDs,
@@ -1483,17 +1641,28 @@ func matchDescriptionFilters(ctx context.Context, descFilters []ast.Filter, prov
 	}
 
 	if negated {
-		matches, err := negatingProvider.MatchDescriptionNegated(ctx, negatedOptsFor(descFilters, opts))
-		if err != nil {
-			return nil, fmt.Errorf("%w: MatchDescriptionNegated: %w", ErrProvider, err)
+		// Fanned out like the positive path: a positive set in a sibling clause
+		// is any-of, so the union of one negated call per value is exact. A
+		// single call carried only the first value of the set.
+		out := NewSet()
+		for i, callOpts := range descriptionCalls(descFilters, opts) {
+			matches, err := negatingProvider.MatchDescriptionNegated(ctx, negatedOptsFor(descFilters, callOpts))
+			if err != nil {
+				return nil, fmt.Errorf("%w: MatchDescriptionNegated: %w", ErrProvider, err)
+			}
+			if i == 0 {
+				out = nonNil(matches)
+				continue
+			}
+			out = out.Union(nonNil(matches))
 		}
-		return nonNil(matches), nil
+		return out, nil
 	}
 
 	// One call per term, unioned. A single term — the overwhelmingly common case —
 	// is one call with the same Opts as before.
 	out := NewSet()
-	for i, callOpts := range termCalls(descFilters, opts) {
+	for i, callOpts := range descriptionCalls(descFilters, opts) {
 		matches, err := provider.MatchDescription(ctx, callOpts)
 		if err != nil {
 			return nil, fmt.Errorf("%w: MatchDescription: %w", ErrProvider, err)
@@ -1505,6 +1674,33 @@ func matchDescriptionFilters(ctx context.Context, descFilters []ast.Filter, prov
 		out = out.Union(nonNil(matches))
 	}
 	return out, nil
+}
+
+// descriptionCalls expands every positive value set the single-valued fields of
+// DescriptionFilterOpts cannot carry — a term set and an effectiveTime set —
+// into one call per combination. Each set is any-of, so the union of the calls
+// is exact, and each call keeps the sibling clauses.
+func descriptionCalls(filters []ast.Filter, base DescriptionFilterOpts) []DescriptionFilterOpts {
+	calls := termCalls(filters, base)
+	for _, f := range filters {
+		et, ok := f.(*ast.EffectiveTimeFilter)
+		if !ok {
+			continue
+		}
+		values := effectiveTimeValues(et)
+		if len(values) <= 1 {
+			continue
+		}
+		out := make([]DescriptionFilterOpts, 0, len(calls)*len(values))
+		for _, c := range calls {
+			for _, v := range values {
+				c.EffectiveTime = v
+				out = append(out, c)
+			}
+		}
+		return out
+	}
+	return calls
 }
 
 // termCalls expands a positive term SET into one DescriptionFilterOpts per term.
@@ -1555,10 +1751,18 @@ func negatedOptsFor(descFilters []ast.Filter, opts DescriptionFilterOpts) Negate
 	return out
 }
 
-// categorizeFilters splits a flat list of filters into description, concept,
-// and member families. Ambiguous filters (active/module/effectiveTime) default
-// to the concept family — this is the most common usage in practice.
-func categorizeFilters(filters []ast.Filter) (desc, concept, member []ast.Filter) {
+// categorizeFilters splits one Filtered's clauses into description, concept and
+// member families. The active, moduleId and effectiveTime filters exist in all
+// three, so the block's own family decides; guessing "concept" for them, as this used to,
+// sent `{{ D active = false }}` and every unprefixed `{{ active = … }}` to the
+// concept. An empty family is a hand-built tree from before the field existed
+// and keeps that reading.
+func categorizeFilters(filters []ast.Filter, family ast.FilterFamily) (desc, concept, member []ast.Filter, err error) {
+	switch family {
+	case ast.FamilyDescription, ast.FamilyConcept, ast.FamilyMember, "":
+	default:
+		return nil, nil, nil, fmt.Errorf("%w: unknown filter family %q", ErrUnsupportedFeature, family)
+	}
 	for _, f := range filters {
 		switch f.(type) {
 		case *ast.TermFilter, *ast.TypeFilter, *ast.LanguageFilter, *ast.DialectFilter,
@@ -1569,12 +1773,23 @@ func categorizeFilters(filters []ast.Filter) (desc, concept, member []ast.Filter
 		case *ast.MemberFieldFilter:
 			member = append(member, f)
 		case *ast.ActiveFilter, *ast.ModuleFilter, *ast.EffectiveTimeFilter:
-			// Ambiguous — default to concept family. Description-level
-			// active/module/effectiveTime is rare in practice.
-			concept = append(concept, f)
+			// Shared by all three families, so only the block they came from
+			// says which component they constrain.
+			switch family {
+			case ast.FamilyDescription:
+				desc = append(desc, f)
+			case ast.FamilyMember:
+				// Columns of the member row, sent as member field comparisons by
+				// memberFilterOptsOf. Filtering the referenced CONCEPTS instead,
+				// as this used to, answered a question about different rows.
+				member = append(member, f)
+			default:
+				// FamilyConcept, or "" for a hand-built tree that predates Family.
+				concept = append(concept, f)
+			}
 		}
 	}
-	return desc, concept, member
+	return desc, concept, member, nil
 }
 
 // negatedDescriptionFilter reports whether any description filter clause uses
@@ -1631,47 +1846,216 @@ func unsupportedDescriptionFilter(filters []ast.Filter) error {
 	return nil
 }
 
-// buildDescriptionFilterOpts accumulates description filter clauses into a
-// single DescriptionFilterOpts. Multiple clauses of the same kind are
-// simplified by taking the last one (rarely seen in practice).
+// buildDescriptionFilterOpts accumulates the clauses of ONE description filter
+// block into a single DescriptionFilterOpts. They all have to hold on the same
+// description, so a dimension named twice is a conjunction on one row:
 //
-// Every clause here is positive: evaluateFiltered rejects the negated forms
-// before calling this, because they cannot be composed at set level.
-func buildDescriptionFilterOpts(ctx context.Context, filters []ast.Filter, provider DataProvider) (DescriptionFilterOpts, bool, error) {
-	var opts DescriptionFilterOpts
+//   - type, language and moduleId keep the values both clauses allow, which is
+//     exact: `language = en, language = es` can hold on no description;
+//   - two active clauses agree or match nothing;
+//   - a second term or effectiveTime clause, which the single Term and
+//     EffectiveTime fields cannot carry, is reported unsupported. Keeping only
+//     the last one, as this used to, answered a wider question than was asked.
+//
+// The negated forms are composed by the caller, which needs each dimension's
+// polarity from one clause: a dimension that is both repeated and negated is
+// reported unsupported here rather than guessed.
+func buildDescriptionFilterOpts(ctx context.Context, filters []ast.Filter, provider DataProvider) (DescriptionFilterOpts, bool, []ast.Filter, error) {
+	b := descriptionOptsBuilder{seen: map[string]int{}, negated: map[string]bool{}}
+	kept := make([]ast.Filter, 0, len(filters))
 	for _, f := range filters {
+		var err error
+		b.dropped = false
 		switch x := f.(type) {
 		case *ast.TermFilter:
-			// unsupportedDescriptionFilter has already rejected a set, so there
-			// is exactly one term here.
-			if len(x.Terms) > 0 {
-				opts.Term = x.Terms[0].Text
-				if mt := x.Terms[0].MatchType; mt != "" {
-					opts.MatchType = mt
-				}
-			}
+			err = b.addTerm(x)
 		case *ast.TypeFilter:
-			// Collect all type SCTIDs from the filter (any-of semantics).
-			for _, typeExpr := range x.Types {
-				ids, resolved, err := resolveFilterIDs(ctx, typeExpr, provider)
-				if err != nil {
-					return opts, false, fmt.Errorf("evaluating type filter: %w", err)
-				}
-				if !resolved {
-					// The operand names no description type, so the filter
-					// matches nothing.
-					return opts, true, nil
-				}
-				opts.TypeIDs = append(opts.TypeIDs, ids...)
-			}
+			err = b.addType(ctx, x, provider)
 		case *ast.LanguageFilter:
-			opts.Languages = append(opts.Languages, x.Languages...)
+			err = b.addLanguage(x)
+		case *ast.ActiveFilter:
+			b.addActive(x)
+		case *ast.ModuleFilter:
+			err = b.addModule(ctx, x, provider)
+		case *ast.EffectiveTimeFilter:
+			err = b.addEffectiveTime(x)
 		case *ast.DialectFilter:
 			// Handled separately in evaluateFiltered.
-			continue
+		}
+		if err != nil {
+			return b.opts, false, nil, err
+		}
+		if b.nothing {
+			return b.opts, true, nil, nil
+		}
+		if !b.dropped {
+			kept = append(kept, f)
 		}
 	}
-	return opts, false, nil
+	return b.opts, false, kept, nil
+}
+
+// descriptionOptsBuilder folds the clauses of one block into one
+// DescriptionFilterOpts; see buildDescriptionFilterOpts for the rules.
+type descriptionOptsBuilder struct {
+	opts    DescriptionFilterOpts
+	seen    map[string]int
+	negated map[string]bool
+	nothing bool // a clause, or two together, can hold on no description
+	dropped bool // the clause just added constrains nothing and is left out
+}
+
+// note counts a clause of kind and rejects a dimension that is both repeated
+// and negated, whose polarities one call cannot carry.
+func (b *descriptionOptsBuilder) note(kind string, neg bool) error {
+	b.seen[kind]++
+	b.negated[kind] = b.negated[kind] || neg
+	if b.seen[kind] > 1 && b.negated[kind] {
+		return fmt.Errorf("%w: a negated %s clause repeated in one description filter needs both polarities on one call", ErrUnsupportedFeature, kind)
+	}
+	return nil
+}
+
+func (b *descriptionOptsBuilder) addTerm(x *ast.TermFilter) error {
+	if err := b.note("term", x.Op == "!="); err != nil {
+		return err
+	}
+	if b.seen["term"] > 1 {
+		return fmt.Errorf("%w: two term clauses in one description filter must hold on the same description, and DescriptionFilterOpts.Term carries one term", ErrUnsupportedFeature)
+	}
+	// matchDescriptionFilters has rejected a negated set before building
+	// (unsupportedDescriptionFilter), and descriptionCalls fans out a positive
+	// one, so the first term is the one this call carries.
+	if len(x.Terms) > 0 {
+		b.opts.Term = x.Terms[0].Text
+		if mt := x.Terms[0].MatchType; mt != "" {
+			b.opts.MatchType = mt
+		}
+	}
+	return nil
+}
+
+func (b *descriptionOptsBuilder) addType(ctx context.Context, x *ast.TypeFilter, provider DataProvider) error {
+	// Resolved before it is counted: a clause that turns out to constrain
+	// nothing must not count as a repeat of its dimension.
+	var clause []string
+	for _, typeExpr := range x.Types {
+		ids, resolved, err := resolveFilterIDs(ctx, typeExpr, provider)
+		if err != nil {
+			return fmt.Errorf("evaluating type filter: %w", err)
+		}
+		// The set is any-of, so an operand naming no type contributes nothing
+		// and the others still count.
+		if resolved {
+			clause = append(clause, ids...)
+		}
+	}
+	if len(clause) == 0 && x.Op == "!=" {
+		// Excluding no type is no constraint at all, not an empty result.
+		b.dropped = true
+		return nil
+	}
+	if err := b.note("type", x.Op == "!="); err != nil {
+		return err
+	}
+	b.opts.TypeIDs = conjoin(b.opts.TypeIDs, clause, b.seen["type"] > 1)
+	b.nothing = len(b.opts.TypeIDs) == 0
+	return nil
+}
+
+func (b *descriptionOptsBuilder) addLanguage(x *ast.LanguageFilter) error {
+	if len(x.Languages) == 0 {
+		// Only a hand-built tree names no language; it constrains nothing.
+		b.dropped = true
+		return nil
+	}
+	if err := b.note("language", x.Op == "!="); err != nil {
+		return err
+	}
+	b.opts.Languages = conjoin(b.opts.Languages, x.Languages, b.seen["language"] > 1)
+	b.nothing = len(b.opts.Languages) == 0
+	return nil
+}
+
+func (b *descriptionOptsBuilder) addActive(x *ast.ActiveFilter) {
+	if x.Any {
+		// Either value constrains nothing; the block still asks for a
+		// description (see anyDescription).
+		b.dropped = true
+		return
+	}
+	v := x.Value
+	if b.opts.Active != nil && *b.opts.Active != v {
+		b.nothing = true
+		return
+	}
+	b.opts.Active = &v
+}
+
+func (b *descriptionOptsBuilder) addModule(ctx context.Context, x *ast.ModuleFilter, provider DataProvider) error {
+	clause, namesNothing, err := resolveModuleIDs(ctx, x, provider)
+	switch {
+	case err != nil:
+		return err
+	case namesNothing && x.Op == "!=":
+		// Excluding no module is no constraint, as in the other families.
+		b.dropped = true
+		return nil
+	case x.Op == "!=":
+		return fmt.Errorf("%w: a negated moduleId in a description filter is per description row, and DescriptionFilterOpts has no negated module", ErrUnsupportedFeature)
+	}
+	if err := b.note("moduleId", false); err != nil {
+		return err
+	}
+	b.opts.ModuleIDs = conjoin(b.opts.ModuleIDs, clause, b.seen["moduleId"] > 1)
+	// No module was named, or the clauses allow none in common.
+	b.nothing = len(b.opts.ModuleIDs) == 0
+	return nil
+}
+
+func (b *descriptionOptsBuilder) addEffectiveTime(x *ast.EffectiveTimeFilter) error {
+	values := effectiveTimeValues(x)
+	if len(values) == 0 {
+		// A hand-built filter naming no time constrains nothing, as it always
+		// has for concepts.
+		b.dropped = true
+		return nil
+	}
+	if err := b.note("effectiveTime", x.Op == "!="); err != nil {
+		return err
+	}
+	switch {
+	case b.seen["effectiveTime"] > 1:
+		// Two comparisons on one row — a range — need two fields.
+		return fmt.Errorf("%w: two effectiveTime clauses in one description filter must hold on the same description, and DescriptionFilterOpts.EffectiveTime carries one comparison", ErrUnsupportedFeature)
+	case len(values) > 1 && x.Op == "!=":
+		// Every other operator reads a set as any-of, which descriptionCalls
+		// fans out exactly; "!=" needs one row to fail every value, which one
+		// call per value cannot decide.
+		return fmt.Errorf("%w: an effectiveTime set with \"!=\" needs every value on one call, and DescriptionFilterOpts.EffectiveTime carries one", ErrUnsupportedFeature)
+	}
+	b.opts.EffectiveTime, b.opts.EffectiveTimeOp = values[0], x.Op
+	return nil
+}
+
+// conjoin folds one clause's values into those of the clauses before it. The
+// first clause sets the values; a repeated one keeps only the values both
+// allow, because every clause of a block holds on the same description.
+func conjoin(have, clause []string, repeated bool) []string {
+	if !repeated {
+		return clause
+	}
+	keep := make(map[string]bool, len(clause))
+	for _, v := range clause {
+		keep[v] = true
+	}
+	out := have[:0:0]
+	for _, v := range have {
+		if keep[v] {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // buildDialectFilterOpts converts an ast.DialectFilter into DialectFilterOpts
@@ -2062,6 +2446,11 @@ func evaluateMemberOf(ctx context.Context, e *ast.MemberOf, filters []MemberFilt
 			return nil, fmt.Errorf("%w: the memberOf field projection ^[%s] requires a provider implementing ecl.RefsetFieldProjector; the members and the projected field are different columns of the same row, so it cannot be composed from the member set",
 				ErrUnsupportedFeature, e.Fields[0])
 		}
+		// `^ R` means the active rows, projected or not. A filter that already
+		// names the active column decides for itself; evaluateFiltered adds the
+		// default to the others, and a bare projection gets it here, so adding a
+		// filter that matches every row cannot shrink the result.
+		filters, _ = rowActiveDefault(filters, provider)
 		projected, err := projector.ProjectRefsetField(ctx, RefsetProjectionOpts{
 			RefsetIDs: refsetIDs,
 			Field:     e.Fields[0],
@@ -2112,8 +2501,8 @@ func checkProjectionSupport(e *ast.MemberOf) error {
 // projection, and nil otherwise. Only a projection needs the special routing; a
 // plain `^` composes with a member filter the ordinary way.
 func projectedMemberOf(operand ast.Expression) *ast.MemberOf {
-	mo, ok := operand.(*ast.MemberOf)
-	if !ok {
+	mo := memberOfOperand(operand)
+	if mo == nil {
 		return nil
 	}
 	if len(mo.Fields) == 0 && !mo.AllFields {
@@ -2123,20 +2512,129 @@ func projectedMemberOf(operand ast.Expression) *ast.MemberOf {
 }
 
 // memberFilterOptsOf converts every member filter clause of a constraint.
-func memberFilterOptsOf(ctx context.Context, filters []ast.Filter, provider DataProvider) ([]MemberFilterOpts, error) {
+// The second result reports a clause that can match no row, so the caller can
+// answer the empty set without asking the provider: sending it would rely on
+// every provider reading an empty ValueSet the same way, which the contract
+// does not say.
+func memberFilterOptsOf(ctx context.Context, filters []ast.Filter, provider DataProvider) ([]MemberFilterOpts, bool, error) {
 	out := make([]MemberFilterOpts, 0, len(filters))
+	_, answersColumns := provider.(MemberRowColumnsProvider)
+	actives := map[bool]bool{}
+	contradicts := false
 	for _, f := range filters {
-		field, ok := f.(*ast.MemberFieldFilter)
-		if !ok {
+		var (
+			opts         MemberFilterOpts
+			skip, noRows bool
+			err          error
+		)
+		switch x := f.(type) {
+		case *ast.MemberFieldFilter:
+			opts, err = oneMemberFilterOpts(ctx, x, provider)
+		case *ast.ActiveFilter, *ast.ModuleFilter, *ast.EffectiveTimeFilter:
+			if !answersColumns {
+				return nil, false, fmt.Errorf("%w: active, moduleId and effectiveTime in a member filter are columns of the member row, which need a provider implementing ecl.MemberRowColumnsProvider", ErrUnsupportedFeature)
+			}
+			if a, ok := x.(*ast.ActiveFilter); ok && !a.Any {
+				// `active != *` sends both values: no row holds both. The M
+				// blocks of an expression share one node (H2m), so opposite
+				// values in two blocks read the same way until that is fixed.
+				// Noted, not returned: the clauses after it must still be
+				// validated, or a refusal would depend on clause order.
+				contradicts = contradicts || actives[!a.Value]
+				actives[a.Value] = true
+			}
+			opts, skip, noRows, err = memberColumnOpts(ctx, f, provider)
+		default:
 			continue
 		}
-		opts, err := oneMemberFilterOpts(ctx, field, provider)
-		if err != nil {
-			return nil, err
+		switch {
+		case err != nil:
+			return nil, false, err
+		case noRows:
+			// Noted, not returned, for the same reason as a contradiction.
+			contradicts = true
+		case !skip:
+			out = append(out, opts)
 		}
-		out = append(out, opts)
 	}
-	return out, nil
+	return out, contradicts, nil
+}
+
+// memberColumnOpts sends a member filter on one of the columns every member row
+// has as a field comparison, under the RF2 column name; see MemberFilterOpts.
+// The skip result reports a clause that constrains nothing (excluding a module
+// set that names no module), and noRows one that matches no row (requiring one).
+func memberColumnOpts(ctx context.Context, f ast.Filter, provider DataProvider) (opts MemberFilterOpts, skip, noRows bool, err error) {
+	switch x := f.(type) {
+	case *ast.ActiveFilter:
+		values := []string{"0"}
+		switch {
+		case x.Any:
+			// Either flag, so the rows decide rather than `^`'s active-only
+			// default (see namesActive in evaluateFiltered).
+			values = []string{"1", "0"}
+		case x.Value:
+			values = []string{"1"}
+		}
+		return MemberFilterOpts{FieldName: MemberColumnActive, Op: "=", ValueSet: NewSetFromSlice(values)}, false, false, nil
+	case *ast.ModuleFilter:
+		ids, namesNothing, err := resolveModuleIDs(ctx, x, provider)
+		if err != nil {
+			return opts, false, false, err
+		}
+		op := x.Op
+		if op == "" {
+			op = "=" // a hand-built filter may leave it empty
+		}
+		if namesNothing {
+			return opts, op == "!=", op != "!=", nil
+		}
+		return MemberFilterOpts{FieldName: MemberColumnModuleID, Op: op, ValueSet: NewSetFromSlice(ids)}, false, false, nil
+	case *ast.EffectiveTimeFilter:
+		et := x
+		if et.Op != "=" && et.Op != "!=" && et.Op != "" {
+			return opts, false, false, fmt.Errorf("%w: effectiveTime %s in a member filter needs an ordered comparison, and MemberFilterOpts compares by equality", ErrUnsupportedFeature, et.Op)
+		}
+		values := effectiveTimeValues(et)
+		if len(values) == 0 {
+			return opts, true, false, nil
+		}
+		op := et.Op
+		if op == "" {
+			op = "="
+		}
+		return MemberFilterOpts{FieldName: MemberColumnEffectiveTime, Op: op, ValueSet: NewSetFromSlice(values)}, false, false, nil
+	default:
+		return opts, false, false, fmt.Errorf("memberColumnOpts: %T is not a member row column", f)
+	}
+}
+
+// resolveModuleIDs resolves every module a module filter names. The
+// namesNothing result reports a set whose operands all resolved to no concept, which each family
+// answers in its own terms; an empty slice alone would read as "no filter".
+func resolveModuleIDs(ctx context.Context, x *ast.ModuleFilter, provider DataProvider) (ids []string, namesNothing bool, err error) {
+	for _, mod := range x.Modules {
+		got, resolved, err := resolveFilterIDs(ctx, mod, provider)
+		if err != nil {
+			return nil, false, fmt.Errorf("evaluating module filter: %w", err)
+		}
+		if resolved {
+			ids = append(ids, got...)
+		}
+	}
+	return ids, len(x.Modules) > 0 && len(ids) == 0, nil
+}
+
+// effectiveTimeValues returns the times an effectiveTime filter names, falling
+// back to the deprecated single-value field a hand-built tree may set alone. A
+// filter naming none — only a hand-built tree can — constrains nothing in every
+// family.
+func effectiveTimeValues(x *ast.EffectiveTimeFilter) []string {
+	values := x.Values
+	if len(values) == 0 && x.Value != "" { //nolint:staticcheck // hand-built trees may set only the deprecated field
+		values = []string{x.Value} //nolint:staticcheck // as above
+	}
+	return values
 }
 
 // oneMemberFilterOpts converts a single member filter clause.

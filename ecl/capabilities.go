@@ -256,3 +256,36 @@ type RefsetProjectionOpts struct {
 	// row as the projected field. Empty when the expression has none.
 	Filters []MemberFilterOpts
 }
+
+// MemberRowColumnsProvider declares that RefsetMembersFiltered — and
+// ProjectRefsetField, where implemented — answer the three columns every
+// reference set member row has, under their RF2 names: "active" ("1" or "0"),
+// "moduleId" and "effectiveTime" (YYYYMMDD). See MemberFilterOpts.
+//
+// Implement it to enable `{{ M active = … }}`, `{{ M moduleId = … }}` and
+// `{{ M effectiveTime = … }}`. Without it those filters report
+// ErrUnsupportedFeature: a provider written before they were sent would look the
+// columns up as additional fields, find none, and answer the empty set — a wrong
+// answer nobody would notice, where a refusal says what is missing.
+type MemberRowColumnsProvider interface {
+	// AnswersMemberRowColumns is a declaration, not a query; the evaluator
+	// only checks that it exists.
+	AnswersMemberRowColumns()
+}
+
+// DescriptionMetadataProvider declares that MatchDescription and its
+// capability variants honor the description metadata fields of
+// DescriptionFilterOpts: Active, ModuleIDs and EffectiveTime/EffectiveTimeOp.
+//
+// Implement it to enable `{{ D active = … }}`, `{{ D moduleId = … }}` and
+// `{{ D effectiveTime … }}` — and the same filters with no prefix, which the
+// grammar makes description filters. The fields have always been in the
+// contract, but the evaluator did not send them until these filters were read
+// as description filters, so a provider written before may ignore them and
+// answer every description. Without the declaration those filters report
+// ErrUnsupportedFeature instead.
+type DescriptionMetadataProvider interface {
+	// AnswersDescriptionMetadata is a declaration, not a query; the evaluator
+	// only checks that it exists.
+	AnswersDescriptionMetadata()
+}

@@ -218,7 +218,21 @@ type DialectEntryOpts struct {
 	AcceptabilityIDs []string // optional; nil/empty = any acceptability
 }
 
+// The member row columns the evaluator sends as MemberFilterOpts.FieldName for
+// `{{ M active/moduleId/effectiveTime … }}`; see MemberRowColumnsProvider.
+const (
+	MemberColumnActive        = "active"        // "1" or "0"
+	MemberColumnModuleID      = "moduleId"      // a module SCTID
+	MemberColumnEffectiveTime = "effectiveTime" // YYYYMMDD
+)
+
 // MemberFilterOpts describes member-level field filter constraints.
+//
+// FieldName is the RF2 column of the member row. Besides the refset's own
+// additional fields (mapTarget, mapGroup, …) the evaluator sends the three
+// columns every member row has, for `{{ M active/moduleId/effectiveTime … }}`:
+// "active" with ValueSet {"1"} or {"0"}, "moduleId" with module SCTIDs, and
+// "effectiveTime" with YYYYMMDD values, all compared by equality.
 type MemberFilterOpts struct {
 	FieldName string
 	Op        string // "=" or "!="

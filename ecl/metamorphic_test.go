@@ -28,7 +28,8 @@ import (
 // Every relation that does not hold today is listed in a knownViolations map
 // with the defect behind it. The list is strict in both directions: a violation
 // missing from it fails, and so does a listed one that no longer occurs, so
-// fixing a defect forces its entries out.
+// fixing a defect forces its entries out. A construct the evaluator reports
+// unsupported is listed the same way, as `unsupported | …`.
 
 // semBlocks are description-filter clauses chosen so that pairs of them
 // disagree on the semantics fixture (semanticsProvider in semantics_test.go).
@@ -44,22 +45,12 @@ var semBlocks = []string{
 func TestMetamorphic_FilterBlocks(t *testing.T) {
 	p := semanticsProvider()
 	known := map[string]string{
-		// H2b flattens the blocks: the last term wins, so order matters...
-		`commute | {{ D term = "heart" }} {{ D term = "corazon" }}`:       "H2b",
-		`commute | {{ D term = "heart" }} {{ D term = "nonexistent" }}`:   "H2b",
-		`commute | {{ D term = "corazon" }} {{ D term = "nonexistent" }}`: "H2b",
-		// ...languages are pooled into an any-of...
-		`blocks=AND | {{ D language = en }} {{ D language = es }}`: "H2b",
-		// ...and a term and a language from different blocks are required of
-		// one description.
-		`blocks=AND | {{ D term = "heart" }} {{ D language = es }}`:   "H2b",
-		`blocks=AND | {{ D term = "corazon" }} {{ D language = en }}`: "H2b",
-		// H2 is the same flattening inside one block: the last term wins...
-		`clauses commute | {{ D term = "heart", term = "corazon" }}`:       "H2",
-		`clauses commute | {{ D term = "heart", term = "nonexistent" }}`:   "H2",
-		`clauses commute | {{ D term = "corazon", term = "nonexistent" }}`: "H2",
-		// ...and two languages widen the block instead of narrowing it.
-		`block⊆each clause | {{ D language = en, language = es }}`: "H2",
+		// Two term clauses in one block cannot travel on one call, so the
+		// evaluator reports them unsupported (see H2 in semantics_test.go) and
+		// the in-block relations have nothing to compare for these pairs.
+		`unsupported | {{ D term = "heart", term = "corazon" }}`:       "H2",
+		`unsupported | {{ D term = "heart", term = "nonexistent" }}`:   "H2",
+		`unsupported | {{ D term = "corazon", term = "nonexistent" }}`: "H2",
 	}
 	ev := newEvalCache(p)
 	var got []string
@@ -68,7 +59,6 @@ func TestMetamorphic_FilterBlocks(t *testing.T) {
 			pair := fmt.Sprintf(`{{ D %s }} {{ D %s }}`, a, b)
 			block := fmt.Sprintf(`{{ D %s, %s }}`, a, b)
 			ab := ev.ids(t, `* `+pair)
-			one := ev.ids(t, `* `+block)
 
 			if !equalIDs(ab, ev.ids(t, fmt.Sprintf(`* {{ D %s }} {{ D %s }}`, b, a))) {
 				got = append(got, "commute | "+pair)
@@ -76,9 +66,16 @@ func TestMetamorphic_FilterBlocks(t *testing.T) {
 			if !equalIDs(ab, ev.ids(t, fmt.Sprintf(`(* {{ D %s }}) AND (* {{ D %s }})`, a, b))) {
 				got = append(got, "blocks=AND | "+pair)
 			}
-			// Under flattening the one-block and two-block forms compile to the
-			// same predicate, so the next relation cannot fail today; the two
-			// after it compare against single-clause blocks and can.
+
+			oneSet, err := evaluate(p, `* `+block)
+			if errors.Is(err, ecl.ErrUnsupportedFeature) {
+				got = append(got, "unsupported | "+block)
+				continue
+			}
+			require.NoErrorf(t, err, "evaluating %q", `* `+block)
+			one := oneSet.Slice()
+			// One block is stricter than the same clauses in separate blocks:
+			// it asks one description to satisfy them all.
 			if !subsetIDs(one, ab) {
 				got = append(got, "block⊆blocks | "+block)
 			}

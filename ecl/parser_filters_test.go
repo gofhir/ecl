@@ -119,3 +119,29 @@ func TestParse_DescriptionIDFilterIsModeled(t *testing.T) {
 	set := filterOf[*ast.DescriptionIDFilter](t, "< 404684003 {{ D id = (123456789012 234567890123) }}")
 	require.Len(t, set.IDs, 2)
 }
+
+// TestParse_FilterBlocksNestInSourceOrder covers the shape the evaluator relies
+// on: one Filtered per D or C block, carrying its family, nested so the block
+// written first is innermost — and all M blocks in one Filtered over the
+// MemberOf. Flattening every block into one node is what lost both the block
+// boundaries and the D/C/M scope.
+func TestParse_FilterBlocksNestInSourceOrder(t *testing.T) {
+	tree, err := Parse(`^ 447562003 {{ M mapGroup = "2" }} {{ C active = true }} {{ D term = "heart" }} {{ active = false }}`)
+	require.NoError(t, err)
+
+	var families []ast.FilterFamily
+	for {
+		f, ok := tree.(*ast.Filtered)
+		if !ok {
+			break
+		}
+		families = append(families, f.Family)
+		tree = f.Operand
+	}
+	// Outermost first: the last block written wraps the others. The
+	// unprefixed block is a description filter, as the grammar makes D optional.
+	require.Equal(t, []ast.FilterFamily{
+		ast.FamilyDescription, ast.FamilyDescription, ast.FamilyConcept, ast.FamilyMember,
+	}, families)
+	require.IsType(t, &ast.MemberOf{}, tree, "the M blocks sit directly over the MemberOf they filter")
+}

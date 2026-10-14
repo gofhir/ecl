@@ -479,6 +479,23 @@ Se cargó el mismo RF2 sintético, generado desde un `FixtureSpec`, en Hermes v1
 
 Conclusión para la sección 8: una referencia sirve como segunda opinión dentro de su subconjunto confiable, nunca como juez. Coincidir con ella no prueba corrección, y cada caso necesita un resultado derivado de la especificación.
 
+### 11.7 Estado tras corregir el ámbito de los filtros
+
+El parser emite un `ast.Filtered` por bloque `{{ D … }}` o `{{ C … }}`, anidados en orden, y cada uno indica su familia en el campo nuevo `Family`. Los bloques `{{ M … }}` siguen juntos sobre el `MemberOf` que filtran.
+
+- **H1 y H2b quedan corregidos.**
+- **H2 queda corregido para `type`, `language` y `moduleId`**, cuyos valores se intersectan dentro del bloque. Dos cláusulas `term` en un mismo bloque se informan como `ErrUnsupportedFeature`: dar la respuesta exacta exige una capacidad nueva del provider, igual que H3.
+- **Cambio de comportamiento:** `{{ active = … }}`, `{{ moduleId = … }}` y `{{ effectiveTime = … }}` sin prefijo filtran descripciones, como indica la gramática, que hace opcional la `D`. Antes filtraban conceptos. Como el evaluador no enviaba esos campos de `DescriptionFilterOpts` hasta ahora, exigen la capacidad nueva `DescriptionMetadataProvider`; sin ella se informan como `ErrUnsupportedFeature`. Un filtro `{{ M … }}` cuyo foco no tiene `^` también se informa como no soportado.
+- **Filtros de miembro sobre la fila:** `{{ M active/moduleId/effectiveTime … }}` se envían como comparaciones de campo con el nombre de la columna RF2 (`active` como `"1"`/`"0"`, `moduleId`, `effectiveTime` como `YYYYMMDD`). Antes filtraban el concepto referenciado. Las comparaciones de orden sobre `effectiveTime` de miembro se informan como `ErrUnsupportedFeature`, porque `MemberFilterOpts` compara por igualdad. Un provider tiene que declarar que responde esas columnas implementando la capacidad nueva `MemberRowColumnsProvider`; sin ella el filtro se informa como no soportado, porque un provider anterior buscaría las columnas como campos adicionales y respondería vacío sin avisar. `VerifyContract` comprueba que todo miembro aparezca con `active = 1` o con `active = 0`, y que un valor que ninguna fila tiene no devuelva miembros. El provider de `providertest` implementa la capacidad y considera activa una fila que no declara `active`.
+- **Filas inactivas:** `^ R` significa las filas activas. Cuando el provider implementa `MemberRowColumnsProvider` y `RefsetFieldProjector`, un filtro M sin `active` recibe una cláusula `active = 1` sobre la misma fila, así que el valor de una fila inactiva ya no califica al miembro a través de una fila activa hermana. Sin esas capacidades se mantiene la intersección con los miembros activos, como antes.
+- **Formas que ahora se informan como `ErrUnsupportedFeature`** en lugar de evaluarse más amplias de lo escrito:
+  - en descripciones, `moduleId !=`, dos cláusulas `effectiveTime` en un bloque y un conjunto de `effectiveTime` con `!=`. Un conjunto positivo se responde con una llamada por valor.
+- **Corregido de paso:** la ruta negada de filtros de descripción consultaba sólo el primer valor de un conjunto de términos; `active = *` se leía como `active = true` (ahora `ActiveFilter.Any`: una descripción en cualquier estado, ninguna restricción en conceptos, y en miembros las filas activas e inactivas por igual); un operando sin tipos en un conjunto de `typeId` anulaba los demás.
+- **Pendiente, H2m:** los bloques `{{ M … }}` separados siguen exigiendo una misma fila, porque comparten un nodo sobre el `MemberOf`. Corregirlo toca la proyección `^ [campo]`, donde varios bloques no tienen una semántica clara. Queda como fallo esperado estricto.
+- **H3 se extiende a las cláusulas de metadatos:** `active` y `dialectId` en un mismo bloque se resuelven con dos llamadas y pueden satisfacerse en descripciones distintas.
+
+H4, H5 y H6 no cambian.
+
 ## Apéndice A. Reproducción de los hallazgos
 
 Guardar el siguiente programa fuera del paquete, por ejemplo en `/tmp/go-ecl-audit-probe.go`, y ejecutar desde la raíz del repositorio:

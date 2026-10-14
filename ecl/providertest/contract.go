@@ -66,6 +66,8 @@ func VerifyContract(t *testing.T, newProvider func() ecl.DataProvider) {
 		{"DialectAliasResolvesToRealRefsets", checkDialectAliasResolves},
 		{"DescriptionIDIsApplied", checkDescriptionIDIsMatchable},
 		{"ProjectedMembersMatchRefsetMembers", checkRefsetFieldProjection},
+		{"MemberActiveColumnCoversEveryMember", checkMemberRowColumns},
+		{"DescriptionMetadataIsApplied", checkDescriptionMetadata},
 	}
 
 	for _, c := range checks {
@@ -850,6 +852,103 @@ func checkRefsetFieldProjection(ctx context.Context, t *testing.T, p ecl.DataPro
 	case !errors.Is(err, ecl.ErrUnsupportedFeature):
 		t.Errorf("projecting an unusable field returned %v, which does not wrap ecl.ErrUnsupportedFeature;\n"+
 			"a caller mapping sentinels to HTTP answers would report an unhealthy backend for an expression that will never work", err)
+	}
+}
+
+// checkMemberRowColumns covers MemberRowColumnsProvider, as far as a
+// data-independent check can.
+//
+// Every member row has an active flag, "1" or "0", so every member RefsetMembers returns
+// has a row that active = 1 or active = 0 selects. The two together may return
+// more — RefsetMembers is entitled to leave out members whose rows are all
+// inactive — but never less. A provider that only knows the refset's
+// additional fields answers neither: the empty set, which is the silent wrong
+// answer the capability exists to rule out.
+func checkMemberRowColumns(ctx context.Context, t *testing.T, p ecl.DataProvider) {
+	if _, ok := p.(ecl.MemberRowColumnsProvider); !ok {
+		t.Skip("the provider does not implement ecl.MemberRowColumnsProvider; `{{ M active/moduleId/effectiveTime … }}` will report ErrUnsupportedFeature")
+	}
+
+	refsets := discoverRefsets(ctx, t, p)
+	if len(refsets) == 0 {
+		t.Skip("no reference set with members could be discovered, so there is no member row to check")
+	}
+
+	for _, refsetID := range refsets {
+		members, err := p.RefsetMembers(ctx, []string{refsetID})
+		if err != nil {
+			t.Fatalf("RefsetMembers: %v", err)
+		}
+		either := ecl.NewSet()
+		for _, flag := range []string{"1", "0"} {
+			got, err := p.RefsetMembersFiltered(ctx, []string{refsetID}, ecl.MemberFilterOpts{
+				FieldName: ecl.MemberColumnActive, Op: "=", ValueSet: ecl.NewSetFromSlice([]string{flag}),
+			})
+			if err != nil {
+				t.Fatalf("RefsetMembersFiltered(active = %s): %v", flag, err)
+			}
+			either = either.Union(nonNilSet(got))
+		}
+
+		// The flag is "1" or "0"; a provider that answers any other value with
+		// members is not comparing the column at all.
+		bogus, err := p.RefsetMembersFiltered(ctx, []string{refsetID}, ecl.MemberFilterOpts{
+			FieldName: ecl.MemberColumnActive, Op: "=", ValueSet: ecl.NewSetFromSlice([]string{"zz"}),
+		})
+		if err != nil {
+			t.Fatalf("RefsetMembersFiltered(active = zz): %v", err)
+		}
+		if n := nonNilSet(bogus).Len(); n > 0 {
+			t.Errorf("reference set %s: active = zz, a value no row has, returned %d member(s); the provider is ignoring the active column's value", refsetID, n)
+		}
+		// With a projector the evaluator sends the active default on the same
+		// row through ProjectRefsetField, so the two paths must agree on it.
+		if projector, ok := p.(ecl.RefsetFieldProjector); ok {
+			activeRow := ecl.MemberFilterOpts{FieldName: ecl.MemberColumnActive, Op: "=", ValueSet: ecl.NewSetFromSlice([]string{"1"})}
+			viaFilter, err := p.RefsetMembersFiltered(ctx, []string{refsetID}, activeRow)
+			if err != nil {
+				t.Fatalf("RefsetMembersFiltered(active = 1): %v", err)
+			}
+			viaProjection, err := projector.ProjectRefsetField(ctx, ecl.RefsetProjectionOpts{
+				RefsetIDs: []string{refsetID}, Field: "referencedComponentId", Filters: []ecl.MemberFilterOpts{activeRow},
+			})
+			if err != nil {
+				t.Fatalf("ProjectRefsetField(referencedComponentId, active = 1): %v", err)
+			}
+			a, b := nonNilSet(viaFilter), nonNilSet(viaProjection)
+			if a.Len() != b.Len() || a.Minus(b).Len() > 0 {
+				t.Errorf("reference set %s: active = 1 returns %d member(s) through RefsetMembersFiltered and %d through ProjectRefsetField; the evaluator uses either, so they must agree",
+					refsetID, a.Len(), b.Len())
+			}
+		}
+		if missing := nonNilSet(members).Minus(either); missing.Len() > 0 {
+			t.Errorf("reference set %s: %d member(s) have no row that active = 1 or active = 0 selects;\n"+
+				"every member row has an active flag, so each member must turn up under one of them — the provider is not answering the active column",
+				refsetID, missing.Len())
+		}
+	}
+}
+
+// checkDescriptionMetadata covers DescriptionMetadataProvider, as far as a
+// data-independent check can: a module and an effectiveTime no description
+// can carry must match nothing. A provider that ignores the fields answers
+// every description instead — the wider answer the declaration rules out.
+func checkDescriptionMetadata(ctx context.Context, t *testing.T, p ecl.DataProvider) {
+	if _, ok := p.(ecl.DescriptionMetadataProvider); !ok {
+		t.Skip("the provider does not implement ecl.DescriptionMetadataProvider; `{{ D active/moduleId/effectiveTime … }}` will report ErrUnsupportedFeature")
+	}
+	for name, opts := range map[string]ecl.DescriptionFilterOpts{
+		"moduleId 0":               {ModuleIDs: []string{"0"}},
+		"effectiveTime = 00000000": {EffectiveTime: "00000000", EffectiveTimeOp: "="},
+		"effectiveTime > 99991231": {EffectiveTime: "99991231", EffectiveTimeOp: ">"},
+	} {
+		got, err := p.MatchDescription(ctx, opts)
+		if err != nil {
+			t.Fatalf("MatchDescription(%s): %v", name, err)
+		}
+		if n := nonNilSet(got).Len(); n > 0 {
+			t.Errorf("MatchDescription(%s), which no description can satisfy, returned %d concept(s); the provider is ignoring that field", name, n)
+		}
 	}
 }
 
