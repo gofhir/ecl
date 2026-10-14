@@ -2,6 +2,7 @@ package mrcm
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -68,13 +69,22 @@ type jsonRange struct {
 // Cardinality strings ("0..*", "1..1", etc.) are parsed into Cardinality
 // structs. An empty cardinality string defaults to {0, -1} (i.e. "0..*").
 //
-// All attributeId values are validated as SCTIDs (Verhoeff check).
+// All attributeId values are validated as SCTIDs (Verhoeff check). A
+// ruleStrengthId must be empty (mandatory), mandatory or optional; any other
+// value is an error, because the validator would otherwise skip the rule as
+// not mandatory. A document must hold one JSON value and nothing after it.
 func LoadFromJSON(r io.Reader) (*Model, error) {
 	var jm jsonModel
 	dec := json.NewDecoder(r)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&jm); err != nil {
 		return nil, fmt.Errorf("mrcm: decode JSON: %w", err)
+	}
+	// Decode reads ONE value and stops, so a second model, a concatenated file
+	// or stray text after the first would be dropped without a word — and
+	// DisallowUnknownFields never sees it.
+	if err := onlyWhitespaceLeft(io.MultiReader(dec.Buffered(), r)); err != nil {
+		return nil, err
 	}
 
 	model := &Model{
@@ -100,11 +110,9 @@ func LoadFromJSON(r io.Reader) (*Model, error) {
 		if err != nil {
 			return nil, fmt.Errorf("mrcm: domains[%d].inGroupCardinality: %w", i, err)
 		}
-		strength := jd.RuleStrengthID
-		if strength == "" {
-			strength = RuleStrengthMandatory
-		} else if !sctid.IsValid(strength) {
-			return nil, fmt.Errorf("mrcm: domains[%d]: invalid ruleStrengthId %q", i, strength)
+		strength, err := ruleStrength(jd.RuleStrengthID)
+		if err != nil {
+			return nil, fmt.Errorf("mrcm: domains[%d]: %w", i, err)
 		}
 		model.Domains = append(model.Domains, AttributeDomain{
 			AttributeID:        jd.AttributeID,
@@ -123,11 +131,9 @@ func LoadFromJSON(r io.Reader) (*Model, error) {
 		if err := validateRuleECL(jr.RangeECL); err != nil {
 			return nil, fmt.Errorf("mrcm: ranges[%d].rangeEcl: %w", i, err)
 		}
-		strength := jr.RuleStrengthID
-		if strength == "" {
-			strength = RuleStrengthMandatory
-		} else if !sctid.IsValid(strength) {
-			return nil, fmt.Errorf("mrcm: ranges[%d]: invalid ruleStrengthId %q", i, strength)
+		strength, err := ruleStrength(jr.RuleStrengthID)
+		if err != nil {
+			return nil, fmt.Errorf("mrcm: ranges[%d]: %w", i, err)
 		}
 		model.Ranges = append(model.Ranges, AttributeRange{
 			AttributeID:    jr.AttributeID,
@@ -138,6 +144,45 @@ func LoadFromJSON(r io.Reader) (*Model, error) {
 	}
 
 	return model, nil
+}
+
+// onlyWhitespaceLeft reads the rest of the input and reports anything but
+// JSON whitespace. It reads byte by byte through a small buffer, so a large
+// trailing value costs time, not memory — unlike reading it as a token, which
+// buffers a whole string — and a stray "}" or "]", which json.Decoder.More
+// does not report, is caught too.
+func onlyWhitespaceLeft(r io.Reader) error {
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		for _, c := range buf[:n] {
+			switch c {
+			case ' ', '\t', '\n', '\r':
+			default:
+				return fmt.Errorf("mrcm: decode JSON: unexpected data after the model: %q", c)
+			}
+		}
+		switch {
+		case errors.Is(err, io.EOF):
+			return nil
+		case err != nil:
+			return fmt.Errorf("mrcm: decode JSON: reading after the model: %w", err)
+		}
+	}
+}
+
+// ruleStrength resolves a rule's ruleStrengthId: empty is mandatory, and
+// otherwise it must be one of the two strengths the validator knows. A
+// well-formed SCTID that is neither would load and then switch the rule off,
+// since the validator skips every rule that is not mandatory.
+func ruleStrength(id string) (string, error) {
+	switch id {
+	case "":
+		return RuleStrengthMandatory, nil
+	case RuleStrengthMandatory, RuleStrengthOptional:
+		return id, nil
+	}
+	return "", fmt.Errorf("invalid ruleStrengthId %q: must be mandatory (%s) or optional (%s)", id, RuleStrengthMandatory, RuleStrengthOptional)
 }
 
 // LoadFromBytes is a convenience wrapper around LoadFromJSON.

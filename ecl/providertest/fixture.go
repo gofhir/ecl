@@ -1043,6 +1043,9 @@ func (p *inMemoryProvider) MatchDescriptionByID(_ context.Context, filter ecl.De
 	return out, nil
 }
 
+// fieldReferencedComponentID is every reference set's first column: the member.
+const fieldReferencedComponentID = "referencedComponentId"
+
 // componentIDFields are the member fields that hold a component id, and so can
 // be returned as a Set of concept ids.
 //
@@ -1051,8 +1054,8 @@ func (p *inMemoryProvider) MatchDescriptionByID(_ context.Context, filter ecl.De
 // mapPriority — holds a value that is not a concept, and projecting it would
 // produce a Set of things that are not concept ids.
 var componentIDFields = map[string]bool{
-	"referencedComponentId": true,
-	"targetComponentId":     true,
+	fieldReferencedComponentID: true,
+	"targetComponentId":        true,
 }
 
 // ProjectRefsetField implements ecl.RefsetFieldProjector.
@@ -1116,7 +1119,7 @@ func (r memberRow) field(name string) string {
 // column returns one column of the row and whether the row has it. A declared
 // empty value is a value; only an undeclared column is missing.
 func (r memberRow) column(name string) (string, bool) {
-	if name == "referencedComponentId" {
+	if name == fieldReferencedComponentID {
 		return r.member, true
 	}
 	if v, ok := r.fields[name]; ok {

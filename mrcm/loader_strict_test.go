@@ -1,10 +1,14 @@
 package mrcm
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/gofhir/ecl/ecl/providertest"
+	"github.com/gofhir/ecl/scg"
 )
 
 // TestLoad_RejectsWhatTheModelCannotMean covers H6 of
@@ -23,11 +27,9 @@ import (
 // is a policy decision the analysis leaves open, and a test here would encode a
 // guess as the requirement.
 //
-// Each case states the outcome the loader SHOULD have (reject) separately from
-// the defect it still has, so dropping a marker turns the case into the
-// regression test rather than inverting it. A case marked H6 is a strict
-// expected failure, as in ecl/semantics_test.go: it passes while the document
-// still loads, and fails once it is rejected for the right reason.
+// Each case states the outcome the loader must have (reject). These loaded
+// without error until the loader required the end of the document and one of
+// the two known strengths; they are ordinary regression cases now.
 //
 // "The right reason" is pinned by control: the same document without the
 // offending part, which must load. The two differ only in that part, so an
@@ -46,22 +48,26 @@ func TestLoad_RejectsWhatTheModelCannotMean(t *testing.T) {
 	for _, tc := range []struct {
 		name, doc, control, names string
 		reject                    bool
-		defect                    string
 	}{
-		{name: "trailing JSON value", doc: `{} {"unexpected": true}`, control: `{}`, reject: true, defect: "H6"},
-		{name: "trailing model", doc: `{"domains": []} {"domains": []}`, control: `{"domains": []}`, reject: true, defect: "H6"},
-		{name: "trailing garbage", doc: `{} x`, control: `{}`, reject: true, defect: "H6"},
+		{name: "trailing JSON value", doc: `{} {"unexpected": true}`, control: `{}`, reject: true},
+		{name: "trailing model", doc: `{"domains": []} {"domains": []}`, control: `{"domains": []}`, reject: true},
+		{name: "trailing garbage", doc: `{} x`, control: `{}`, reject: true},
+		// A stray closing bracket, which json.Decoder.More does not report.
+		{name: "trailing brace", doc: `{} }`, control: `{}`, reject: true},
+		{name: "trailing bracket", doc: `{"domains": []}]`, control: `{"domains": []}`, reject: true},
+		// Whitespace after the model is not data.
+		{name: "trailing whitespace", doc: "{} \n\t\r "},
 		{
 			name:    "unknown domain rule strength",
 			doc:     withStrength(domain, "domains", unknownStrength),
 			control: withStrength(domain, "domains", RuleStrengthMandatory),
-			names:   unknownStrength, reject: true, defect: "H6",
+			names:   unknownStrength, reject: true,
 		},
 		{
 			name:    "unknown range rule strength",
 			doc:     withStrength(rng, "ranges", unknownStrength),
 			control: withStrength(rng, "ranges", RuleStrengthMandatory),
-			names:   unknownStrength, reject: true, defect: "H6",
+			names:   unknownStrength, reject: true,
 		},
 		// The two known strengths keep loading, so the fix cannot simply reject
 		// every explicit strength.
@@ -80,13 +86,23 @@ func TestLoad_RejectsWhatTheModelCannotMean(t *testing.T) {
 				require.NoErrorf(t, err, "%s must load", tc.doc)
 			case err != nil && !rejected:
 				t.Fatalf("%s fails, but the error does not name %s: %v", tc.doc, tc.names, err)
-			case tc.defect == "":
-				require.Truef(t, rejected, "%s must be rejected", tc.doc)
-			case rejected:
-				t.Fatalf("%s is now rejected (%v), so defect %s looks fixed: drop its marker", tc.doc, err, tc.defect)
 			default:
-				t.Logf("KNOWN DEFECT %s: %s loads without error", tc.defect, tc.doc)
+				require.Truef(t, rejected, "%s must be rejected", tc.doc)
 			}
 		})
 	}
+}
+
+// TestValidate_RefusesUnknownRuleStrength covers a Model built in Go rather than
+// loaded: the loader refuses an unknown strength, but the validator skips every
+// rule that is not mandatory, so it has to refuse one too.
+func TestValidate_RefusesUnknownRuleStrength(t *testing.T) {
+	model := &Model{Domains: []AttributeDomain{{
+		AttributeID: "363698007", DomainECL: "*", Cardinality: Cardinality{Max: -1},
+		RuleStrengthID: "723597002", // one digit off mandatory
+	}}}
+	expr, err := scg.Parse("22298006 : 363698007 = 74281007")
+	require.NoError(t, err)
+	_, err = Validate(context.Background(), expr, model, providertest.NewInMemoryProvider(&providertest.FixtureSpec{}))
+	require.ErrorContains(t, err, "723597002")
 }

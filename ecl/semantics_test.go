@@ -3,6 +3,8 @@ package ecl_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
 	"reflect"
 	"slices"
 	"strconv"
@@ -12,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/gofhir/ecl/ecl"
+	"github.com/gofhir/ecl/ecl/ast"
 	"github.com/gofhir/ecl/ecl/providertest"
 )
 
@@ -36,7 +39,9 @@ import (
 //	     on one member row.
 //	H3   term and dialect in one block may be satisfied by different
 //	     descriptions.
-//	H4   numeric literals lose precision (float64) or saturate on overflow.
+//	H4   numeric literals lost precision (float64) or saturated on overflow.
+//	     Fixed: comparisons are exact (math/big on the literal as written), and
+//	     an integer or cardinality wider than int is a parse error.
 //
 // A case with a defect marker is a STRICT expected failure: it passes while the
 // evaluator still returns something other than the specified result, and fails
@@ -470,10 +475,58 @@ func TestSemantics_DescriptionMetadataNeedsTheCapability(t *testing.T) {
 			require.ErrorIsf(t, err, ecl.ErrUnsupportedFeature, "%q must be refused without the capability", expr)
 		})
 	}
+	// A module clause that names nothing constrains nothing, so it does not
+	// need the capability either: the block is a plain term match.
+	tree := mustParse(t, `* {{ D term = "heart", moduleId = `+semModule+` }}`)
+	mf := tree.(*ast.Filtered).Filters[1].(*ast.ModuleFilter)
+	mf.Modules, mf.Module = nil, nil //nolint:staticcheck // the deprecated field is the point
+	_, err := ecl.Evaluate(context.Background(), tree, p)
+	require.NoError(t, err)
+
 	// The other description clauses and the concept forms need nothing new.
 	for _, expr := range []string{`* {{ D term = "heart" }}`, `* {{ C active = false }}`} {
 		_, err := evaluate(p, expr)
 		require.NoErrorf(t, err, "%q", expr)
+	}
+}
+
+// TestSemantics_DeprecatedModuleFieldStillFilters covers a hand-built module
+// filter that sets only the deprecated Module field, as a v1 reader's tree
+// may. It must filter like the Modules form, not lose its constraint.
+func TestSemantics_DeprecatedModuleFieldStillFilters(t *testing.T) {
+	p := semanticsProvider()
+	for _, expr := range []string{`* {{ D moduleId = ` + semModule + ` }}`, `* {{ C moduleId = ` + semModule + ` }}`} {
+		t.Run(expr, func(t *testing.T) {
+			want := evalIDs(t, p, expr)
+			tree := mustParse(t, expr)
+			mf := tree.(*ast.Filtered).Filters[0].(*ast.ModuleFilter)
+			mf.Module, mf.Modules = mf.Modules[0], nil //nolint:staticcheck // the deprecated field is the point
+			got, err := ecl.Evaluate(context.Background(), tree, p)
+			require.NoError(t, err)
+			require.Equal(t, want, got.Slice())
+		})
+	}
+}
+
+// TestSemantics_ModuleFilterNamingNothingConstrainsNothing covers a hand-built
+// module filter with no module at all, in each family: it constrains nothing,
+// so "!=" must not subtract every concept, as the concept family did.
+func TestSemantics_ModuleFilterNamingNothingConstrainsNothing(t *testing.T) {
+	p := semanticsProvider()
+	for _, tc := range []struct{ expr, unfiltered string }{
+		{`* {{ C moduleId != ` + semModule + ` }}`, `*`},
+		{`* {{ D moduleId = ` + semModule + ` }}`, `* {{ D active = * }}`},
+	} {
+		t.Run(tc.expr, func(t *testing.T) {
+			tree := mustParse(t, tc.expr)
+			// Both fields: the parser fills the deprecated one too, and it is
+			// a module the filter still names.
+			mf := tree.(*ast.Filtered).Filters[0].(*ast.ModuleFilter)
+			mf.Modules, mf.Module = nil, nil //nolint:staticcheck // the deprecated field is the point
+			got, err := ecl.Evaluate(context.Background(), tree, p)
+			require.NoError(t, err)
+			require.Equal(t, evalIDs(t, p, tc.unfiltered), got.Slice())
+		})
 	}
 }
 
@@ -502,6 +555,10 @@ func TestSemantics_UnrepresentableFiltersFailLoudly(t *testing.T) {
 		// A module clause matching no row does not excuse a later one either.
 		`^ 900000000000497000 {{ M moduleId = (< ` + semGB + `), effectiveTime < "` + semOldTime + `" }}`,
 		`^ 900000000000497000 {{ M effectiveTime < "` + semOldTime + `", moduleId = (< ` + semGB + `) }}`,
+		// Two value sets in one block multiply into provider calls (a term set
+		// alone is one call per term, however long): 17 terms
+		// by 16 times is above the limit.
+		`* {{ D term = ("a" "b" "c" "d" "e" "f" "g" "h" "i" "j" "k" "l" "m" "n" "o" "p" "q"), effectiveTime = ("20010101" "20020101" "20030101" "20040101" "20050101" "20060101" "20070101" "20080101" "20090101" "20100101" "20110101" "20120101" "20130101" "20140101" "20150101" "20160101") }}`,
 		// MemberFilterOpts compares member columns by equality only.
 		`^ 900000000000497000 {{ M effectiveTime >= "` + semOldTime + `" }}`,
 	} {
@@ -524,10 +581,121 @@ func TestSemantics_ConcreteNumbers(t *testing.T) {
 		{expr: attr + `= #9007199254740992`, want: heart},
 		{expr: attr + `= #9007199254740991`, want: nil},
 		{expr: attr + `= #9007199254740994`, want: nil},
-		{expr: attr + `= #9007199254740993`, want: nil, defect: "H4", now: heart},
-		{expr: attr + `< #9007199254740993`, want: heart, defect: "H4", now: none},
+		{expr: attr + `= #9007199254740993`, want: nil},
+		{expr: attr + `< #9007199254740993`, want: heart},
 		{expr: attr + `= #9223372036854775807`, want: other},
-		{expr: attr + `= #9223372036854775806`, want: nil, defect: "H4", now: other},
+		{expr: attr + `= #9223372036854775806`, want: nil},
+	})
+}
+
+// TestSemantics_NumericLiteralsKeepTheirText covers two edges of the exact
+// comparison. A literal compared as TEXT, as a member field is, must travel as
+// written — "1.5", not the fraction "3/2". And a stored value is read as a
+// decimal number only: a fraction or a hexadecimal string, which an exact
+// rational parser would otherwise accept, is not one.
+func TestSemantics_NumericLiteralsKeepTheirText(t *testing.T) {
+	const refset, member, fraction, hex = "447562003", "95566004", "22298006", "73211009"
+	p := providertest.NewInMemoryProvider(&providertest.FixtureSpec{
+		Concepts: []providertest.FixtureConcept{{ID: refset}, {ID: member}, {ID: fraction}, {ID: hex}, {ID: semStrength}},
+		Refsets:  map[string][]string{refset: {member}},
+		MemberFields: []providertest.FixtureMemberField{
+			{Refset: refset, Member: member, FieldName: "mapPriority", Value: "1.5"},
+			{Refset: refset, Member: member, FieldName: "mapGroup", Value: "1"},
+			{Refset: refset, Member: member, FieldName: "mapRule", Value: "0"},
+		},
+		Relationships: []providertest.FixtureRelationship{
+			{Source: fraction, TypeID: semStrength, Concrete: &providertest.FixtureConcrete{Kind: "decimal", Value: "1/2"}},
+			{Source: hex, TypeID: semStrength, Concrete: &providertest.FixtureConcrete{Kind: "integer", Value: "0x10"}},
+			// An exponent is a decimal form RF2 can write; one beyond the bound is
+			// compared through its float64 (+Inf here) rather than dropped.
+			{Source: member, TypeID: semStrength, Concrete: &providertest.FixtureConcrete{Kind: "decimal", Value: "5e2"}},
+			{Source: refset, TypeID: semStrength, Concrete: &providertest.FixtureConcrete{Kind: "decimal", Value: "1e100000"}},
+			// Tiny, but a number: it used to round to about 0 and must not drop out.
+			{Source: fraction, TypeID: semStrength, Concrete: &providertest.FixtureConcrete{Kind: "decimal", Value: "1e-401"}},
+			// More digits than float64 tells apart from 0.1.
+			{Source: hex, TypeID: semStrength, Concrete: &providertest.FixtureConcrete{Kind: "decimal", Value: "0.1"}},
+		},
+	})
+	runSemCasesOn(t, p, []semCase{
+		// Compared as text in its canonical form, whatever was typed.
+		{expr: `^ ` + refset + ` {{ M mapPriority = #1.5 }}`, want: []string{member}},
+		{expr: `^ ` + refset + ` {{ M mapPriority = #1.50 }}`, want: []string{member}},
+		{expr: `^ ` + refset + ` {{ M mapGroup = #+1 }}`, want: []string{member}},
+		{expr: `^ ` + refset + ` {{ M mapGroup = #1.0 }}`, want: []string{member}},
+		{expr: `^ ` + refset + ` {{ M mapRule = #-0 }}`, want: []string{member}},
+		{expr: `* : ` + semStrength + ` = #0.5`, want: nil},
+		{expr: `* : ` + semStrength + ` = #16`, want: nil},
+		{expr: `* : ` + semStrength + ` = #500`, want: []string{member}},
+		{expr: `* : ` + semStrength + ` > #1000`, want: []string{refset}},
+		// 1e-401 is above zero and below one; 0.1 is below 0.10000000000000001
+		// although both round to the same float64.
+		{expr: `* : ` + semStrength + ` > #0`, want: []string{member, fraction, hex, refset}},
+		{expr: `* : ` + semStrength + ` < #0.000001`, want: []string{fraction}},
+		{expr: `* : ` + semStrength + ` = #0.10000000000000001`, want: nil},
+		{expr: `* : ` + semStrength + ` < #0.10000000000000001`, want: []string{fraction, hex}},
+	})
+
+	// A hand-built member literal that is not a finite number is refused as
+	// unsupported, not as a generic error.
+	tree := mustParse(t, `^ `+refset+` {{ M mapPriority = #1.5 }}`)
+	tree.(*ast.Filtered).Filters[0].(*ast.MemberFieldFilter).Value = &ast.DecimalValue{Value: math.NaN()}
+	_, err := ecl.Evaluate(context.Background(), tree, p)
+	require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
+
+	// Text counts only while it still says Value. A parsed node whose Value is
+	// edited compares against the new Value: 501 is not the stored 5e2.
+	tree = mustParse(t, `* : `+semStrength+` = #500`)
+	require.Equal(t, []string{member}, evalIDs(t, p, `* : `+semStrength+` = #500`))
+	tree.(*ast.Refined).Refinement.AttrSet.Attr.Value.(*ast.IntegerValue).Value = 501
+	got, err := ecl.Evaluate(context.Background(), tree, p)
+	require.NoError(t, err)
+	require.Empty(t, got.Slice(), "the edited Value, not the stale Text, decides")
+
+	// A hand-built node may set only Text; Value is then the zero value, and
+	// Text, the exact literal, is what it means.
+	tree = mustParse(t, `* : `+semStrength+` = #500`)
+	tree.(*ast.Refined).Refinement.AttrSet.Attr.Value = &ast.IntegerValue{Text: "500"}
+	got, err = ecl.Evaluate(context.Background(), tree, p)
+	require.NoError(t, err)
+	require.Equal(t, []string{member}, got.Slice())
+
+	// The limit is in digits: 4000 of them with a "." still parse.
+	_, err = ecl.Parse(`* : ` + semStrength + ` < #0.` + strings.Repeat("1", 3999))
+	require.NoError(t, err)
+
+	// A literal of more digits than any concrete value has is refused at parse
+	// time rather than built as an exact rational compared once per stored value.
+	_, err = ecl.Parse(`* : ` + semStrength + ` < #0.` + strings.Repeat("0", 5000) + `1`)
+	var pe *ecl.ParseError
+	require.ErrorAs(t, err, &pe)
+	require.ErrorContains(t, err, "limit")
+}
+
+// TestSemantics_LongTermSetIsStillOneCallPerTerm covers a term set beyond the
+// fan-out limit: the limit is on the PRODUCT of two sets, and a term set alone
+// was always answered one call per term.
+func TestSemantics_LongTermSetIsStillOneCallPerTerm(t *testing.T) {
+	terms := make([]string, 300)
+	for i := range terms {
+		terms[i] = fmt.Sprintf(`"t%d"`, i)
+	}
+	terms[0] = `"heart"`
+	runSemCases(t, []semCase{
+		{expr: `* {{ D term = (` + strings.Join(terms, " ") + `) }}`, want: []string{semHeart, semOther}},
+	})
+}
+
+// TestSemantics_LongEffectiveTimeSetIsStillOneCallPerTime covers an
+// effectiveTime set beyond the fan-out limit with no term set beside it: the
+// limit is on the product of the two, so one set alone is not refused.
+func TestSemantics_LongEffectiveTimeSetIsStillOneCallPerTime(t *testing.T) {
+	times := make([]string, 300)
+	for i := range times {
+		times[i] = fmt.Sprintf(`"%d0101"`, 1700+i)
+	}
+	times[0] = `"` + semNewTime + `"`
+	runSemCases(t, []semCase{
+		{expr: `* {{ D effectiveTime = (` + strings.Join(times, " ") + `) }}`, want: []string{semHeart}},
 	})
 }
 
@@ -548,8 +716,8 @@ func TestSemantics_NumericOverflowIsRejected(t *testing.T) {
 		expr, literal, defect string
 		now                   []string // the result while the literal is accepted; none when empty
 	}{
-		{expr: `* : ` + semStrength + ` = #99999999999999999999999999999`, literal: "99999999999999999999999999999", defect: "H4", now: []string{semOther}},
-		{expr: `* : [99999999999999999999..*] ` + semStrength + ` = *`, literal: "99999999999999999999", defect: "H4", now: none},
+		{expr: `* : ` + semStrength + ` = #99999999999999999999999999999`, literal: "99999999999999999999999999999"},
+		{expr: `* : [99999999999999999999..*] ` + semStrength + ` = *`, literal: "99999999999999999999"},
 	} {
 		t.Run(tc.expr, func(t *testing.T) {
 			set, err := evaluate(p, tc.expr)

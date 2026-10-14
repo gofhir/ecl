@@ -106,7 +106,10 @@ type Issue struct {
 // relationship group; see validateInGroupCardinality, which also records what the
 // specification leaves open about the minimum.
 //
-// A nil expression, model, or provider returns an error.
+// A nil expression, model, or provider returns an error, and so does a model
+// rule whose ruleStrengthId is neither mandatory nor optional: the rule checks
+// skip every rule that is not mandatory, so an unknown strength would switch
+// the rule off without a word. LoadFromJSON refuses the same values.
 func Validate(ctx context.Context, expr *scg.Expression, model *Model, provider ecl.DataProvider) (*Result, error) {
 	if expr == nil {
 		return nil, fmt.Errorf("mrcm: nil expression")
@@ -116,6 +119,12 @@ func Validate(ctx context.Context, expr *scg.Expression, model *Model, provider 
 	}
 	if provider == nil {
 		return nil, fmt.Errorf("mrcm: nil data provider")
+	}
+	// The same strengths the loader accepts. The rule checks below skip every
+	// rule that is not mandatory, so a Model built in Go with an unknown
+	// strength would otherwise switch its rule off without a word.
+	if err := checkRuleStrengths(model); err != nil {
+		return nil, err
 	}
 
 	v := &validator{
@@ -789,4 +798,20 @@ func inGroupCardinalitySummary(rules []AttributeDomain) string {
 // that spells out "0..0" is a no-op here and should set "grouped": false instead.
 func inGroupSpecified(c Cardinality) bool {
 	return c.Min != 0 || c.Max != 0
+}
+
+// checkRuleStrengths refuses a model rule whose strength is neither of the two
+// the validator knows.
+func checkRuleStrengths(model *Model) error {
+	for i, d := range model.Domains {
+		if _, err := ruleStrength(d.RuleStrengthID); err != nil {
+			return fmt.Errorf("mrcm: domains[%d]: %w", i, err)
+		}
+	}
+	for i, r := range model.Ranges {
+		if _, err := ruleStrength(r.RuleStrengthID); err != nil {
+			return fmt.Errorf("mrcm: ranges[%d]: %w", i, err)
+		}
+	}
+	return nil
 }

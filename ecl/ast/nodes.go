@@ -171,6 +171,11 @@ type Attribute struct {
 }
 
 // Cardinality represents a [min..max] cardinality constraint.
+//
+// Min and Max are int, whose width is the platform's: a bound wider than int is
+// a parse error, so the limit is 2^31-1 on a 32-bit build and 2^63-1 on a 64-bit
+// one. TODO(v2): make them int64, so the limit is the same everywhere; changing
+// the type of an exported field breaks callers, so it waits for a major version.
 type Cardinality struct {
 	Min int
 	Max int // -1 = unbounded (*)
@@ -182,10 +187,33 @@ type Cardinality struct {
 type StringValue struct{ Value string }
 
 // IntegerValue represents an integer literal in an attribute comparison.
-type IntegerValue struct{ Value int }
+type IntegerValue struct {
+	// Value is the literal as an int, whose width is the platform's: a literal
+	// wider than int is a parse error, so Value is always the number written,
+	// but the limit is 2^31-1 on a 32-bit build and 2^63-1 on a 64-bit one.
+	// TODO(v2): make it int64, so the limit is the same everywhere; changing the
+	// type of an exported field breaks callers, so it waits for a major version.
+	Value int
+
+	// Text is the literal as written, without the "#". Comparisons use it, so
+	// they are exact whatever Value's width. It wins over Value, except where
+	// Value is non-zero and no longer what Text says, which reads as a node
+	// edited after parsing. To change a parsed node's number, set Value and
+	// clear Text: an edit to zero cannot be told from a node that sets only Text.
+	Text string
+}
 
 // DecimalValue represents a decimal literal in an attribute comparison.
-type DecimalValue struct{ Value float64 }
+type DecimalValue struct {
+	// Value is the nearest float64, which cannot hold every decimal.
+	Value float64
+
+	// Text is the literal as written, without the "#". Comparisons use it, so
+	// `#0.1` means exactly one tenth. It wins over Value, except where Value is
+	// non-zero and no longer what Text says, which reads as a node edited after
+	// parsing. To change a parsed node's number, set Value and clear Text.
+	Text string
+}
 
 // BooleanValue represents a boolean literal in an attribute comparison.
 type BooleanValue struct{ Value bool }

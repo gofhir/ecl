@@ -21,7 +21,7 @@ import (
 // an evaluator wrong in a self-consistent way passes them — but they are cheap,
 // and they catch exactly the defects a second engine tends to share: the
 // block-order dependence of H2b and the float64 ordering of H4 (see
-// semantics_test.go) both surface here without anyone writing down a result,
+// semantics_test.go) both surfaced here without anyone writing down a result,
 // as does H2. H1 and H3 do not: a wrong scope or a lost correlation can be
 // perfectly self-consistent, so only the hand-written cases catch those.
 //
@@ -171,14 +171,7 @@ func TestMetamorphic_NumericComparisons(t *testing.T) {
 	q := func(op, lit string) []string {
 		return ev.ids(t, fmt.Sprintf(`* : %s %s #%s`, semStrength, op, lit))
 	}
-	known := map[string]string{
-		// 2^53+1 rounds onto the stored 2^53.
-		`= ⊆ < next | = #9007199254740992 ⊆ < #9007199254740993`:         "H4",
-		`= values are exclusive | #9007199254740992 / #9007199254740993`: "H4",
-		// MaxInt64-1 rounds onto the stored MaxInt64.
-		`= ⊆ < next | = #9223372036854775806 ⊆ < #9223372036854775807`:         "H4",
-		`= values are exclusive | #9223372036854775806 / #9223372036854775807`: "H4",
-	}
+	known := map[string]string{}
 	var got []string
 	for i, n := range numericLiterals {
 		eq, lt, le, gt, ge, ne := q("=", n), q("<", n), q("<=", n), q(">", n), q(">=", n), q("!=", n)

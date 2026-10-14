@@ -151,7 +151,11 @@ type Relationship struct {
 type ConcreteValue struct {
 	// Kind is "integer", "decimal", "string", or "boolean".
 	Kind string
-	// Value holds the raw value as a string for the caller to parse.
+	// Value holds the raw value as a string for the caller to parse. A numeric
+	// value is a decimal number as RF2 writes it — sign, digits, an optional
+	// fraction and exponent — and is compared exactly; other forms ("Inf",
+	// hexadecimal, fractions like "1/2") are not numbers and match no
+	// comparison.
 	Value string
 }
 

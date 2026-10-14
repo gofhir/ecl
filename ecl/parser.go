@@ -167,6 +167,9 @@ func buildAST(tree grammar.IExpressionconstraintContext, stream *antlr.CommonTok
 
 	visitor := &astBuilder{}
 	result := visitor.Visit(tree)
+	if len(visitor.errs) > 0 {
+		return nil, &ParseError{Errors: visitor.errs}
+	}
 	if expr, ok := result.(ast.Expression); ok {
 		return expr, nil
 	}
@@ -237,6 +240,18 @@ func (l *eclErrorListener) SyntaxError(_ antlr.Recognizer, _ any, line, column i
 
 type astBuilder struct {
 	grammar.BaseECLVisitor
+
+	// errs collects what the grammar accepts but the AST cannot hold, such as
+	// an integer literal wider than int. buildAST returns them as a ParseError:
+	// dropping the conversion error, as this used to, stored a different number
+	// than the one written.
+	errs []SyntaxError
+}
+
+// reject records an error at ctx's first token.
+func (v *astBuilder) reject(ctx antlr.ParserRuleContext, format string, args ...any) {
+	tok := ctx.GetStart()
+	v.errs = append(v.errs, SyntaxError{Line: tok.GetLine(), Column: tok.GetColumn(), Msg: fmt.Sprintf(format, args...)})
 }
 
 // Visit dispatches to the correct typed Visit method via the Accept pattern.
@@ -1713,15 +1728,22 @@ func (v *astBuilder) visitCardinality(ctx grammar.ICardinalityContext) *ast.Card
 		return nil
 	}
 	card := &ast.Cardinality{}
+	bound := func(c antlr.ParserRuleContext) int {
+		n, err := strconv.Atoi(c.GetText())
+		if err != nil {
+			v.reject(c, "cardinality %s does not fit in an int", c.GetText())
+		}
+		return n
+	}
 	if concrete.Minvalue() != nil {
-		card.Min, _ = strconv.Atoi(concrete.Minvalue().GetText())
+		card.Min = bound(concrete.Minvalue())
 	}
 	if concrete.Maxvalue() != nil {
 		maxCtx := concrete.Maxvalue().(*grammar.MaxvalueContext)
 		if maxCtx.Many() != nil {
 			card.Max = -1
 		} else {
-			card.Max, _ = strconv.Atoi(maxCtx.GetText())
+			card.Max = bound(maxCtx)
 		}
 	}
 	return card
@@ -1744,12 +1766,42 @@ func (v *astBuilder) visitNumericValue(ctx grammar.INumericvalueContext) ast.Exp
 		return nil
 	}
 	text := concrete.GetText()
-	if concrete.Decimalvalue() != nil {
-		val, _ := strconv.ParseFloat(text, 64)
-		return &ast.DecimalValue{Value: val}
+	if digits := countDigits(text); digits > maxNumberDigits {
+		// The evaluator compares literals exactly, and an exact value this long
+		// costs more per comparison than any concrete value justifies. One
+		// error for the token: the conversions below would only add another.
+		v.reject(concrete, "numeric literal of %d digits is longer than the limit of %d", digits, maxNumberDigits)
+		if concrete.Decimalvalue() != nil {
+			return &ast.DecimalValue{Text: text}
+		}
+		return &ast.IntegerValue{Text: text}
 	}
-	val, _ := strconv.Atoi(text)
-	return &ast.IntegerValue{Value: val}
+	if concrete.Decimalvalue() != nil {
+		// Value is only the nearest float64; comparisons use Text. A decimal
+		// beyond float64's range has no nearest value at all.
+		val, err := strconv.ParseFloat(text, 64)
+		if err != nil {
+			v.reject(concrete, "decimal literal %s is out of range", text)
+		}
+		return &ast.DecimalValue{Value: val, Text: text}
+	}
+	val, err := strconv.Atoi(text)
+	if err != nil {
+		v.reject(concrete, "integer literal %s does not fit in an int", text)
+	}
+	return &ast.IntegerValue{Value: val, Text: text}
+}
+
+// countDigits counts the decimal digits of a numeric literal, the unit
+// maxNumberDigits is in.
+func countDigits(text string) int {
+	n := 0
+	for i := 0; i < len(text); i++ {
+		if text[i] >= '0' && text[i] <= '9' {
+			n++
+		}
+	}
+	return n
 }
 
 func (v *astBuilder) visitConcreteString(ctx grammar.IConcretestringContext) ast.Expression {
