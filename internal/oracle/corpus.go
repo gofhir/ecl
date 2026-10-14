@@ -25,7 +25,23 @@ type Case struct {
 	// different server would report edition differences as divergences, which is
 	// the one thing a differential test must never do.
 	Needs string
+
+	// Unsupported declares that this library refuses the expression with
+	// ErrUnsupportedFeature, so the case pins the refusal rather than a
+	// comparison. A refusal that is not declared fails the run, and so does a
+	// declared one that no longer happens; see Verdict.
+	Unsupported bool
+
+	// ServerMayReject names a known defect of a server that keeps it from
+	// answering the case. Such a case is not required (see Required): when
+	// the server rejects it nothing is compared, and when it answers, the case
+	// is compared like any other but is not counted toward the floor.
+	ServerMayReject string
 }
+
+// historyMaxDefect is why r4.ontoserver.csiro.au cannot answer
+// `{{ +HISTORY-MAX }}`; see the README's oracle section.
+const historyMaxDefect = "r4.ontoserver.csiro.au answers HTTP 500 (NullPointerException) for the member filter on 1186924009 and 1186921001, two of the association reference sets MAX resolves to"
 
 // Corpus is the set of expressions the differential test runs.
 //
@@ -186,8 +202,9 @@ var Corpus = []Case{
 		Exercises: "reverse attribute whose source set is a constraint",
 	},
 	{
-		Expr:      "<< 74281007 : [1..1] R 363698007 = << 22298006",
-		Exercises: "reverse CARDINALITY — needs InboundRelationshipsProvider, so this case is expected to report unsupported rather than diverge",
+		Expr:        "<< 74281007 : [1..1] R 363698007 = << 22298006",
+		Exercises:   "reverse CARDINALITY — needs InboundRelationshipsProvider, so this case is expected to report unsupported rather than diverge",
+		Unsupported: true,
 	},
 
 	// ── Reference sets ───────────────────────────────────────────────────────
@@ -239,8 +256,9 @@ var Corpus = []Case{
 		Exercises: "the middle profile, which must differ from both MIN and MAX",
 	},
 	{
-		Expr:      "22298006 {{ +HISTORY-MAX }}",
-		Exercises: "every association reference set, discovered from the terminology rather than hardcoded",
+		Expr:            "22298006 {{ +HISTORY-MAX }}",
+		Exercises:       "every association reference set, discovered from the terminology rather than hardcoded",
+		ServerMayReject: historyMaxDefect,
 	},
 	{
 		// On MOD rather than MAX, and that matters: MAX is blocked by a server
@@ -251,12 +269,14 @@ var Corpus = []Case{
 		Exercises: "a history supplement over a SET, which is the only case that sends more than one target to the member filter",
 	},
 	{
-		Expr:      "(<< 22298006) {{ +HISTORY-MAX }}",
-		Exercises: "the same over the widest profile",
+		Expr:            "(<< 22298006) {{ +HISTORY-MAX }}",
+		Exercises:       "the same over the widest profile",
+		ServerMayReject: historyMaxDefect,
 	},
 	{
-		Expr:      "(22298006 {{ +HISTORY-MAX }}) MINUS 22298006",
-		Exercises: "the supplement as an operand, which isolates the historical concepts",
+		Expr:            "(22298006 {{ +HISTORY-MAX }}) MINUS 22298006",
+		Exercises:       "the supplement as an operand, which isolates the historical concepts",
+		ServerMayReject: historyMaxDefect,
 	},
 
 	// ── Nesting ──────────────────────────────────────────────────────────────

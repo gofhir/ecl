@@ -19,6 +19,11 @@ var (
 	// Provider. A corpus case that hits it is out of scope, not failing.
 	ErrNotAnswerable = errors.New("oracle: not answerable through a FHIR terminology API")
 
+	// ErrNoData means the server's edition lacks data a primitive needs, such
+	// as the association reference set metadata. Unlike ErrNotAnswerable it
+	// depends on the server, not on what a FHIR API can express.
+	ErrNoData = errors.New("oracle: the server's edition lacks the data")
+
 	// ErrTooLarge means an intermediate set exceeded maxExpansion. Bound the
 	// corpus expression; do not raise the cap to make it pass.
 	ErrTooLarge = errors.New("oracle: intermediate set too large")
@@ -383,7 +388,7 @@ func (p *Provider) HistoricalAssociations(ctx context.Context, conceptIDs ecl.Se
 		// whose cause is a missing lookup, not the evaluator.
 		if len(refsets) == 0 {
 			return nil, fmt.Errorf("%w: no association reference sets found under %s, so the %s profile cannot be resolved",
-				ErrNotAnswerable, historyAssociationParent, profile)
+				ErrNoData, historyAssociationParent, profile)
 		}
 	}
 
