@@ -209,6 +209,8 @@ El modelo tampoco representa `contentTypeId`, ni ofrece carga RF2 directa. Trata
 
 ### H8 — El estado verde del oráculo puede aportar cero evidencia
 
+(Corregido en §11.12.)
+
 **P2 · Confirmado por lectura.**
 
 [`TestDifferential`](../internal/oracle/oracle_test.go) omite casos por servidor inaccesible, capacidades no implementadas y operaciones rechazadas. Distingue acuerdos vacíos, lo cual es bueno, pero no exige un mínimo de acuerdos no vacíos. Una ejecución puede acabar satisfactoriamente sin comparar nada útil.
@@ -429,7 +431,7 @@ La sección 9 pide casos de regresión que «fallan contra el commit revisado».
 
 Las relaciones metamórficas detectan H2, H2b y H4 sin ningún resultado escrito a mano. H1 y H3 no: un ámbito equivocado o una correlación perdida pueden ser perfectamente coherentes consigo mismos, así que sólo los detectan los casos escritos a mano.
 
-H7 y H8 no tienen pruebas. (H7 las tiene desde §11.11, en `mrcm/range_test.go`.)
+H7 y H8 no tienen pruebas. (H7 las tiene desde §11.11, en `mrcm/range_test.go`; H8, desde §11.12, en `internal/oracle/evidence_test.go`.)
 
 ### 11.2 H2b: los bloques separados tampoco son independientes
 
@@ -505,7 +507,7 @@ H4, H5 y H6 no cambian.
 - **Límite nuevo:** un bloque que combina un conjunto de términos con uno de `effectiveTime` se rechaza si el producto supera 256 llamadas al provider. Un conjunto de términos solo sigue sin límite propio.
 - **H6 queda corregido.** El loader de MRCM rechaza datos después del modelo y cualquier `ruleStrengthId` distinto de las dos fuerzas que el validador conoce; `Validate` aplica la misma regla a un modelo construido en Go. `null` sigue abierto como decisión de política.
 
-Quedan abiertos H2 (dos cláusulas `term` en un bloque), H2m y H3, que comparten la necesidad de una capacidad que resuelva un bloque completo sobre una sola descripción o fila, además de H7 y H8. (H2 y H3 se corrigen en §11.9; H2m, en §11.10, sin capacidad nueva; H7, en §11.11.)
+Quedan abiertos H2 (dos cláusulas `term` en un bloque), H2m y H3, que comparten la necesidad de una capacidad que resuelva un bloque completo sobre una sola descripción o fila, además de H7 y H8. (H2 y H3 se corrigen en §11.9; H2m, en §11.10, sin capacidad nueva; H7, en §11.11; H8, en §11.12.)
 
 ### 11.9 Bloque de descripción completo: `DescriptionRowMatcher`
 
@@ -543,6 +545,27 @@ En ese momento quedaba abierto H2m, corregido en §11.10.
 - **Antes**, un rango concreto frente a un valor conceptual fallaba al parsearse como ECL y se informaba como `invalid_rule`. Ahora es `range_violation`, y un rango concreto mal escrito sigue siendo `invalid_rule`.
 - **Compatibilidad:** los campos son nuevos y `gofhir/server` sólo lee `Issues`. Sí verá violaciones nuevas en valores concretos y anidados que antes pasaban sin comprobarse.
 - Sigue fuera de alcance `contentTypeId`: las filas de distintos contextos de contenido se tratan como alternativas.
+
+### 11.12 Un verde del oráculo es evidencia (H8)
+
+- **H8 queda corregido.** `TestDifferential` registra el resultado de cada caso y `oracle.Verdict` decide si la corrida aporta evidencia. Antes, saltarse un caso era neutro: una corrida con el servidor caído, o en la que todos los casos coincidían en el conjunto vacío, pasaba sin haber comparado nada. Ahora la corrida falla cuando:
+  - el servidor es inalcanzable;
+  - un caso coincide sólo en el conjunto vacío, porque es un defecto del corpus;
+  - la biblioteca rechaza un caso que el corpus no declara `Unsupported`, o un caso declarado llega a compararse;
+  - un caso necesita una primitiva que el harness no puede pedir a una API FHIR;
+  - hay menos acuerdos no vacíos *en casos requeridos* que los exigidos. Un caso es requerido salvo que nombre datos de una edición (`Needs`), esté declarado `Unsupported`, o esté declarado `ServerMayReject` con el defecto del servidor que lo bloquea. Por defecto se exigen todos los requeridos, 31 de 39. Sólo cuentan los acuerdos de casos requeridos, así que un acuerdo en otro caso no puede reemplazar a uno requerido que no se comparó, y los requeridos que no coincidieron se nombran. `ECL_ORACLE_MIN_AGREED` fija otro umbral para un servidor que responde menos por razones legítimas.
+- **Corridas filtradas:** una corrida con `-run` comprueba cada caso que corrió, pero no el umbral. Los casos que no corrieron no se registran, y una corrida en la que no corre ningún caso falla.
+- **Datos que falta en la edición:** si a la edición del servidor le faltan los refsets de asociación, el resultado es `NoData` (`ErrNoData`), no `NotAnswerable`, porque depende del servidor y no del corpus.
+- **Negativa declarada que desaparece:** un caso `Unsupported` que esta biblioteca llegó a responder se reporta aunque después el servidor rechace la expresión completa.
+- **Errores del harness:** un error del harness es `Failed` y falla su propio caso; ya no se cuenta como divergencia ni como servidor inalcanzable. Incluye un corpus mal escrito, una expansión sobre el tope y un timeout, sea el presupuesto del caso o el de una petición.
+- **Notas sin fallo:** un caso `ServerMayReject` que el servidor sí respondió se registra como nota, porque el defecto puede haberse corregido en ese servidor y seguir en otro. Un caso con `Needs` que el servidor rechaza también se registra como nota: `Needs` cubre una edición sin datos, no un rechazo.
+- **Negativa declarada con respuesta vacía:** un caso `Unsupported` que responde vacío no se toma como prueba de que la negativa desapareció. Un foco vacío se resuelve antes de llegar a la construcción rechazada.
+- **Medido:**
+  - Contra `r4.ontoserver.csiro.au`, coinciden los 31 casos requeridos, de 35 acuerdos no vacíos en total, y la corrida queda en verde. Los otros 4 casos son la cardinalidad inversa, declarada `Unsupported`, y los tres `+HISTORY-MAX` que el servidor rechaza, declarados `ServerMayReject` con el defecto.
+  - La primera versión de la política tenía un agujero: contaba acuerdos de casos de edición contra un umbral calculado sólo con casos core, y ese verde dependía de él (31 de 34 casos core). La revisión lo detectó; ahora sólo cuentan los casos requeridos.
+  - Contra un host inexistente, la corrida falla, cuando antes pasaba con los 39 casos saltados.
+- **La política se prueba sin red** (`TestVerdict`, `TestRequiredAgreements`), así que forma parte de `make check`. Al escribirla, esos tests encontraron que un caso declarado no soportado que coincidía no se reportaba.
+- **Sigue fuera del alcance del oráculo:** los filtros de descripción y de concepto (H1–H3). El harness no puede pedir esas primitivas a una API FHIR (`MatchDescription` y `FilterConcepts` son `ErrNotAnswerable`). Esos hallazgos los cubren los casos escritos a mano y la conformance.
 
 ## Apéndice A. Reproducción de los hallazgos
 

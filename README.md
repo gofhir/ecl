@@ -344,17 +344,42 @@ That is where every semantic bug found so far actually lived.
 
 ```
 $ make oracle
-35 agreed (0 of them vacuously, on the empty set), 4 skipped, of 39 cases;
-102 HTTP requests in 40s
+35 agreed, 1 refused here, 3 rejected by the server, of 39 cases
+(31 required to agree); 102 HTTP requests in 41s
 ```
 
 It covers set algebra, refinements, cardinality, negation, attribute groups,
 concrete values, dot notation, reverse attributes, reference sets and history
-supplements. Agreement on an empty set is counted separately and never as
-evidence — two implementations that both return nothing agree for any reason at
-all.
+supplements.
 
-The four skips are each a stated reason rather than a silence:
+**A green run is evidence, not the absence of a failure.** Skipping used to be
+neutral, so a run in which the server was down, or every case agreed on the empty
+set, passed having compared nothing. Now the run fails when:
+
+- the server is unreachable;
+- a case agrees only on the empty set — two implementations that both return
+  nothing agree for any reason at all, so the case must be replaced;
+- this library refuses a case the corpus does not declare `Unsupported`, or a
+  declared one is compared after all;
+- a case needs a primitive the harness cannot ask a FHIR API for;
+- fewer *required* cases agree on a non-empty set than the corpus requires. A
+  case is required unless it names an edition's data (`Needs`), is declared
+  `Unsupported`, or is declared `ServerMayReject` with the server defect that
+  blocks it — 31 of the 39. Only required cases count, so an agreement
+  elsewhere cannot stand in for a required case that was not compared, and the
+  ones that were not are named. A server that legitimately answers fewer can
+  be given another floor with `ECL_ORACLE_MIN_AGREED`.
+
+A run filtered with `-run` checks every case it ran, but not the floor; one that
+runs no case at all fails. A
+declaration that may be stale on this server — a `ServerMayReject` case the
+server answered — is logged as a note, not a failure, since another server may
+still have the defect.
+
+The policy is `oracle.Verdict`, tested offline with every other test.
+
+The four cases that are not compared are each declared in the corpus, with the
+reason, rather than skipped in silence:
 
 - **Reverse cardinality** needs `InboundRelationshipsProvider`, which the harness
   does not implement, so this library correctly reports the construct unsupported
