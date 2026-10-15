@@ -2,11 +2,18 @@ package providertest
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gofhir/ecl/ecl"
 )
 
 // wantTotalCases is the number of bundled conformance cases. Raise it when you
@@ -93,4 +100,83 @@ func TestEqualSlices(t *testing.T) {
 	assert.True(t, equalSlices([]string{"a", "b"}, []string{"a", "b"}))
 	assert.False(t, equalSlices([]string{"a"}, []string{"a", "b"}))
 	assert.False(t, equalSlices([]string{"a", "b"}, []string{"a", "c"}))
+}
+
+// TestRunAllSuites_WithoutRowMatcher runs the bundled suites against the
+// reference provider with ecl.DescriptionRowMatcher hidden, so the
+// per-dimension path every provider without the capability takes keeps its
+// coverage. A case that requires the capability passes there by being refused.
+func TestRunAllSuites_WithoutRowMatcher(t *testing.T) {
+	suites, err := LoadBundledSuites()
+	require.NoError(t, err)
+	rep, err := RunSuites(context.Background(), suites, RunOptions{LoadFixture: func(name string) (ecl.DataProvider, error) {
+		p, err := BundledFixture(name)
+		if err != nil {
+			return nil, err
+		}
+		return WithoutRowMatcher(p), nil
+	}})
+	require.NoError(t, err)
+
+	requiring := 0
+	for _, s := range suites {
+		for _, c := range s.Cases {
+			if slices.Contains(c.Requires, "DescriptionRowMatcher") {
+				requiring++
+			}
+		}
+	}
+	require.Positive(t, requiring, "some bundled case requires DescriptionRowMatcher, or the yaml field is not read")
+
+	refused := 0
+	for _, r := range rep.Results {
+		assert.Truef(t, r.Passed || r.Skipped, "%s/%s without DescriptionRowMatcher: %s", r.Suite, r.Case.Name, r.Reason)
+		if strings.HasPrefix(r.Reason, "refused as unsupported") {
+			refused++
+		}
+	}
+	require.Equal(t, requiring, refused, "the cases that require DescriptionRowMatcher, refused without it")
+}
+
+// TestWithoutRowMatcher_ForwardsEveryOtherCapability reads the capability
+// interfaces from ecl/capabilities.go and checks that WithoutRowMatcher keeps
+// every method of each but DescriptionRowMatcher. A capability added to the
+// reference provider and forgotten there would otherwise make the
+// per-dimension tests run without it, and stay green.
+func TestWithoutRowMatcher_ForwardsEveryOtherCapability(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "../capabilities.go", nil, 0)
+	require.NoError(t, err)
+	wrapper := reflect.TypeOf(WithoutRowMatcher(NewInMemoryProvider(&FixtureSpec{})))
+	reference := reflect.TypeOf(NewInMemoryProvider(&FixtureSpec{}))
+
+	checked := 0
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			if !ok {
+				continue
+			}
+			iface, ok := ts.Type.(*ast.InterfaceType)
+			if !ok || ts.Name.Name == "DescriptionRowMatcher" {
+				continue
+			}
+			for _, m := range iface.Methods.List {
+				for _, name := range m.Names {
+					if _, ok := reference.MethodByName(name.Name); !ok {
+						continue // a capability the reference provider does not implement
+					}
+					checked++
+					_, ok := wrapper.MethodByName(name.Name)
+					assert.Truef(t, ok, "WithoutRowMatcher drops %s.%s; add the capability to its struct", ts.Name.Name, name.Name)
+				}
+			}
+		}
+	}
+	require.NotZero(t, checked, "no capability method was found to check")
+	_, rows := wrapper.MethodByName("MatchDescriptionRows")
+	require.False(t, rows, "WithoutRowMatcher must hide DescriptionRowMatcher")
 }

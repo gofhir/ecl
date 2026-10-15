@@ -289,3 +289,96 @@ type DescriptionMetadataProvider interface {
 	// only checks that it exists.
 	AnswersDescriptionMetadata()
 }
+
+// DescriptionRowMatcher evaluates a whole `{{ D … }}` block on single
+// description rows: the concepts having ONE description that satisfies every
+// clause of the block.
+//
+// Without it the evaluator answers a block from separate calls — the clauses
+// MatchDescription carries in one call, the dialect clauses through
+// MatchDialect, each value set fanned out — and intersects them at concept
+// level. That cannot express two clauses on the same dimension (two term
+// clauses must hold on one row, and DescriptionFilterOpts carries one term),
+// and it lets a term and a dialect, or an active flag and a dialect, be
+// satisfied by DIFFERENT descriptions of the concept. With it, the block
+// travels whole and the provider decides per row, so both work.
+//
+// When a provider implements it, the evaluator sends it every description
+// block and the other description methods and capabilities are not consulted
+// for blocks. Implementing it declares that EVERY condition of
+// DescriptionRowFilter is honored: a field the provider ignored would widen
+// the answer without a word, so a provider that cannot test one dimension per
+// row should not implement it. VerifyContract checks each dimension.
+type DescriptionRowMatcher interface {
+	MatchDescriptionRows(ctx context.Context, filter DescriptionRowFilter) (Set, error)
+}
+
+// DescriptionRowFilter is one description block. A description row matches
+// when EVERY condition, in every list, holds on it; a filter with no condition
+// at all asks for any description. Each condition is any-of over its own
+// values, and Negate inverts it for that row only.
+type DescriptionRowFilter struct {
+	// Concepts are the candidates the block filters. The answer is read as a
+	// subset of them, and a provider should use them to scope its query; nil
+	// means every concept.
+	Concepts Set
+
+	Terms []TermCondition
+
+	// Types, Languages, Modules and IDs compare the row's typeId, languageCode,
+	// moduleId and its own SCTID with the condition's values.
+	Types     []ValueCondition
+	Languages []ValueCondition
+	Modules   []ValueCondition
+	IDs       []ValueCondition
+
+	// EffectiveTimes compare the row's effectiveTime (YYYYMMDD).
+	EffectiveTimes []TimeCondition
+
+	// Active, when non-nil, is the row's own active flag.
+	Active *bool
+
+	// Dialects are the row's own language reference set memberships.
+	Dialects []DialectCondition
+}
+
+// TermCondition holds on a row whose term matches any of Terms, or none of
+// them when Negate is set.
+type TermCondition struct {
+	Terms  []SearchTermOpts
+	Negate bool
+}
+
+// SearchTermOpts is one search term: Term with its MatchType, "match" (word
+// prefix, the default) or "wild" (glob), as in DescriptionFilterOpts.
+type SearchTermOpts struct {
+	Term      string
+	MatchType string
+}
+
+// ValueCondition holds on a row whose value is one of Values, or none of them
+// when Negate is set. A row without the value satisfies the negated form only.
+type ValueCondition struct {
+	Values []string
+	Negate bool
+}
+
+// TimeCondition holds on a row whose effectiveTime compares with Op ("=",
+// "<", ">=", …) to any of Values; with "!=" it holds when the time equals none
+// of them. A row with no effectiveTime satisfies no TimeCondition.
+type TimeCondition struct {
+	Values []string
+	Op     string
+}
+
+// DialectCondition holds on a row that is a member of a reference set of any
+// entry, with one of the entry's acceptabilities when it names any. With Negate
+// it holds on a row that has a language reference set membership NOT matching
+// any entry — acceptable in another dialect — as MatchDialect reads "!=": a
+// description preferred in en-GB and acceptable in en-US satisfies
+// `dialectId != en-GB` through its en-US membership, and one with no
+// membership at all satisfies neither form.
+type DialectCondition struct {
+	Entries []DialectEntryOpts
+	Negate  bool
+}

@@ -379,3 +379,22 @@ cases:
   - name: two clauses satisfied by the same row match
     expression: '^ 447562003 {{ M mapGroup = "2", mapTarget = "I15.9" }}'
     expectedIds: ["95566004"]
+
+  # Two negations in one block, and a negated term set. Both are decided per
+  # description ROW, which one call can carry only through
+  # ecl.DescriptionRowMatcher; the reference fixture implements it. A provider
+  # without it passes these cases by refusing them as unsupported (requires).
+  # Expected ids are read off the fixture's descriptions:
+  #   - every description but 751000000102 has an id other than it (an id-less
+  #     row satisfies "!=") and no word starting with "x";
+  #   - 22298006 qualifies through "Infarto de miocardio": "infarction" is not a
+  #     prefix of "Infarto", so the Spanish row fails both terms.
+  - name: description id filter with a negated sibling clause, per row
+    expression: '<< 138875005 {{ D id != 751000000102, term != "x" }}'
+    requires: [DescriptionRowMatcher]
+    expectedIds: ["11687002", "22298006", "404684003", "64572001", "73211009", "95566004"]
+
+  - name: negated term filter set, per row
+    expression: '<< 404684003 {{ D term != ("infarction" "diabetes") }}'
+    requires: [DescriptionRowMatcher]
+    expectedIds: ["22298006", "404684003", "64572001", "95566004"]

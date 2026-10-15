@@ -139,3 +139,27 @@ func VerifyFixture(t *testing.T) {
 		}
 	}
 }
+
+// WithoutRowMatcher returns the reference provider with ecl.DescriptionRowMatcher
+// hidden and every other capability kept, so a test reaches the per-dimension
+// path a provider without that capability takes. It panics for any provider
+// but one from this package: the capabilities it forwards are the reference
+// provider's, and a capability added to it must be added here too.
+func WithoutRowMatcher(p ecl.DataProvider) ecl.DataProvider {
+	ref, ok := p.(*inMemoryProvider)
+	if !ok {
+		panic(fmt.Sprintf("providertest.WithoutRowMatcher: %T is not a providertest provider", p))
+	}
+	return struct {
+		ecl.DataProvider
+		ecl.BatchPropertiesProvider
+		ecl.BatchConcreteValuesProvider
+		ecl.InboundRelationshipsProvider
+		ecl.NegatingDescriptionProvider
+		ecl.DialectAliasResolver
+		ecl.DescriptionIDProvider
+		ecl.RefsetFieldProjector
+		ecl.MemberRowColumnsProvider
+		ecl.DescriptionMetadataProvider
+	}{ref, ref, ref, ref, ref, ref, ref, ref, ref, ref}
+}

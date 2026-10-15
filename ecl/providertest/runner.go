@@ -2,6 +2,7 @@ package providertest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -96,6 +97,11 @@ func runCase(ctx context.Context, suiteName string, c Case, provider ecl.DataPro
 	if c.Skip != "" {
 		return Result{Suite: suiteName, Case: c, Skipped: true, Reason: c.Skip}
 	}
+	if missing, known := missingCapability(c.Requires, provider); !known {
+		return Result{Suite: suiteName, Case: c, Passed: false, Reason: fmt.Sprintf("requires an unknown capability %q", missing)}
+	} else if missing != "" {
+		return refusedForCapability(ctx, suiteName, c, provider, missing)
+	}
 	tree, err := ecl.Parse(c.Expression)
 	if err != nil {
 		if c.ExpectError {
@@ -125,6 +131,40 @@ func runCase(ctx context.Context, suiteName string, c Case, provider ecl.DataPro
 			Reason: fmt.Sprintf("expected=%v got=%v", wantIDs, gotIDs)}
 	}
 	return Result{Suite: suiteName, Case: c, Passed: true}
+}
+
+// capabilities are the optional interfaces a case may require, by name.
+var capabilities = map[string]func(ecl.DataProvider) bool{
+	"DescriptionRowMatcher": func(p ecl.DataProvider) bool { _, ok := p.(ecl.DescriptionRowMatcher); return ok },
+}
+
+// missingCapability returns the first required capability the provider lacks,
+// and whether every name is one this runner knows.
+func missingCapability(required []string, provider ecl.DataProvider) (missing string, known bool) {
+	for _, name := range required {
+		has, ok := capabilities[name]
+		if !ok {
+			return name, false
+		}
+		if missing == "" && !has(provider) {
+			missing = name
+		}
+	}
+	return missing, true
+}
+
+// refusedForCapability runs a case for a provider without a capability it
+// requires: the case passes when the expression is refused as unsupported.
+func refusedForCapability(ctx context.Context, suiteName string, c Case, provider ecl.DataProvider, missing string) Result {
+	tree, err := ecl.Parse(c.Expression)
+	if err == nil {
+		_, err = ecl.Evaluate(ctx, tree, provider)
+	}
+	if errors.Is(err, ecl.ErrUnsupportedFeature) {
+		return Result{Suite: suiteName, Case: c, Passed: true, Reason: "refused as unsupported without " + missing}
+	}
+	return Result{Suite: suiteName, Case: c, Passed: false,
+		Reason: fmt.Sprintf("needs %s, which the provider lacks, so it must be refused with ErrUnsupportedFeature; got %v", missing, err)}
 }
 
 func loadFixtureRelative(name, dir string) (ecl.DataProvider, error) {

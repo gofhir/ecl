@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/gofhir/ecl/ecl/ast"
 )
 
 // ------------------------------------------------------------------------
@@ -338,4 +340,12 @@ func TestEvaluate_DialectFilter(t *testing.T) {
 	assert.True(t, got.Contains("22298006"))
 	assert.True(t, got.Contains("73211009"))
 	assert.True(t, got.Contains("64572001"))
+}
+
+// TestAddRowCondition_UnknownClauseIsRefused covers a clause the row path has
+// no condition for: dropping it would answer the block wider than written.
+func TestAddRowCondition_UnknownClauseIsRefused(t *testing.T) {
+	var f DescriptionRowFilter
+	_, err := addRowCondition(context.Background(), &f, &ast.DefinitionStatusFilter{}, nil)
+	require.ErrorIs(t, err, ErrUnsupportedFeature)
 }
