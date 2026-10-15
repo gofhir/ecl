@@ -193,10 +193,38 @@ type BooleanValue struct{ Value bool }
 // --- Filters ---.
 
 // Filtered represents an expression constraint with one or more filter constraints.
+//
+// The parser emits one Filtered per `{{ D … }}` or `{{ C … }}` block, nested in
+// source order, because each block is satisfied on its own: two description
+// blocks may be satisfied by different descriptions, while the clauses of one
+// block must hold on the same one. All `{{ M … }}` blocks of an expression share
+// one innermost Filtered, directly over the MemberOf they filter.
 type Filtered struct {
 	Operand Expression
 	Filters []Filter
+
+	// Family is the filter constraint the clauses came from. It is what tells
+	// `{{ D active = false }}` (a description) from `{{ C active = false }}` (a
+	// concept): ActiveFilter, ModuleFilter and EffectiveTimeFilter are shared by
+	// all three families. Empty, as in a hand-built tree, reads those three as
+	// concept filters, which is how they were read before the field existed.
+	// The other rules of a block apply whatever the family: a node holds ONE
+	// block, so a hand-built node that flattens several description blocks is
+	// read as one block, and two term clauses in it are reported unsupported.
+	Family FilterFamily
 }
+
+// FilterFamily names the filter constraint a Filtered came from.
+type FilterFamily string
+
+// The three filter constraints of the grammar. `{{ … }}` with no prefix is a
+// description filter constraint: the grammar makes D optional and C and M
+// mandatory.
+const (
+	FamilyDescription FilterFamily = "description"
+	FamilyConcept     FilterFamily = "concept"
+	FamilyMember      FilterFamily = "member"
+)
 
 // Filter is a marker interface for filter constraint nodes.
 type Filter interface {
@@ -287,6 +315,12 @@ type DialectEntry struct {
 // ActiveFilter represents an active status filter.
 type ActiveFilter struct {
 	Value bool
+
+	// Any is `active = *`: either value. It is not "no clause": a description
+	// block still asks for a description, and a member block lets the filter,
+	// not the active-members default of `^`, decide which rows count. Value is
+	// true alongside it, which is how the form was represented before.
+	Any bool
 }
 
 // ModuleFilter represents a module filter.

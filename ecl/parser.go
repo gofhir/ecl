@@ -423,29 +423,52 @@ func (v *astBuilder) VisitSubexpressionconstraint(ctx *grammar.Subexpressioncons
 		}
 	}
 
+	// 2b. Apply member filter constraints. They belong to the refset operator,
+	// not to the whole subexpression: in `< ^ R {{ M active = false }}` the
+	// filter selects member rows of R, and `<` then applies to the members it
+	// left. Applied after the constraint operator, as this used to be, the
+	// filter's operand was the descendants rather than the MemberOf, and it went
+	// looking for reference sets among them.
+	//
+	// All M blocks share one node directly over the MemberOf: evaluateFiltered
+	// resolves the reference sets, and any projection, from that operand.
+	memberBlocks := ctx.AllMemberfilterconstraint()
+	member := make([]ast.Filter, 0, len(memberBlocks))
+	for _, fc := range memberBlocks {
+		member = append(member, v.buildMemberFilterClauses(fc)...)
+	}
+	if len(member) > 0 {
+		focusExpr = &ast.Filtered{Operand: focusExpr, Filters: member, Family: ast.FamilyMember}
+	}
+
 	// 3. Apply constraint operator (hierarchy)
 	if ctx.Constraintoperator() != nil {
 		focusExpr = v.applyConstraintOperator(ctx.Constraintoperator(), focusExpr)
 	}
 
-	// 4. Apply description/concept/member filter constraints. Each constraint
+	// 4. Apply description and concept filter constraints (member ones are 2b). Each constraint
 	// can contain multiple sub-clauses (term, type, language, active, module,
 	// etc.) which we extract into typed ast.Filter nodes.
-	filters := make([]ast.Filter, 0,
-		len(ctx.AllDescriptionfilterconstraint())+
-			len(ctx.AllConceptfilterconstraint())+
-			len(ctx.AllMemberfilterconstraint()))
-	for _, fc := range ctx.AllDescriptionfilterconstraint() {
-		filters = append(filters, v.buildDescriptionFilterClauses(fc)...)
-	}
-	for _, fc := range ctx.AllConceptfilterconstraint() {
-		filters = append(filters, v.buildConceptFilterClauses(fc)...)
-	}
-	for _, fc := range ctx.AllMemberfilterconstraint() {
-		filters = append(filters, v.buildMemberFilterClauses(fc)...)
-	}
-	if len(filters) > 0 {
-		focusExpr = &ast.Filtered{Operand: focusExpr, Filters: filters}
+	//
+	// Every D and C block gets its own Filtered, carrying its family: the
+	// clauses of one block hold on one description, separate blocks each on
+	// their own (official examples 8.1.8 and 8.2.2), and active, moduleId and
+	// effectiveTime mean different things in each family. Flattening them all
+	// into one node lost both, which made the last term filter win across
+	// blocks and sent `{{ D active = false }}` to the concept.
+	// Walked as children rather than through the two typed accessors, so the
+	// nesting follows the source order of D and C blocks written interleaved.
+	for _, child := range ctx.GetChildren() {
+		switch fc := child.(type) {
+		case grammar.IDescriptionfilterconstraintContext:
+			if clauses := v.buildDescriptionFilterClauses(fc); len(clauses) > 0 {
+				focusExpr = &ast.Filtered{Operand: focusExpr, Filters: clauses, Family: ast.FamilyDescription}
+			}
+		case grammar.IConceptfilterconstraintContext:
+			if clauses := v.buildConceptFilterClauses(fc); len(clauses) > 0 {
+				focusExpr = &ast.Filtered{Operand: focusExpr, Filters: clauses, Family: ast.FamilyConcept}
+			}
+		}
 	}
 
 	// 5. Apply history supplement
@@ -566,6 +589,12 @@ func (v *astBuilder) buildDescriptionFilterClauses(fc grammar.IDescriptionfilter
 		// chain of ifs so the set of handled branches is visible at a glance:
 		// every sub-rule the grammar defines must appear here, or its clause
 		// disappears from the AST and the query silently widens.
+		// The active filter can yield two clauses (`active != *`), so it is
+		// taken before the one-clause branches.
+		if x := d.Activefilter(); x != nil {
+			out = append(out, v.buildActiveFilters(x)...)
+			continue
+		}
 		for _, branch := range []struct {
 			present bool
 			build   func() ast.Filter
@@ -574,7 +603,6 @@ func (v *astBuilder) buildDescriptionFilterClauses(fc grammar.IDescriptionfilter
 			{d.Typefilter() != nil, func() ast.Filter { return v.buildTypeFilter(d.Typefilter()) }},
 			{d.Languagefilter() != nil, func() ast.Filter { return v.buildLanguageFilter(d.Languagefilter()) }},
 			{d.Dialectfilter() != nil, func() ast.Filter { return v.buildDialectFilter(d.Dialectfilter()) }},
-			{d.Activefilter() != nil, func() ast.Filter { return v.buildActiveFilter(d.Activefilter()) }},
 			{d.Modulefilter() != nil, func() ast.Filter { return v.buildModuleFilter(d.Modulefilter()) }},
 			{d.Effectivetimefilter() != nil, func() ast.Filter { return v.buildEffectiveTimeFilter(d.Effectivetimefilter()) }},
 			{d.Descriptionidfilter() != nil, func() ast.Filter { return v.buildDescriptionIDFilter(d.Descriptionidfilter()) }},
@@ -650,9 +678,7 @@ func (v *astBuilder) buildConceptFilterClauses(fc grammar.IConceptfilterconstrai
 			continue
 		}
 		if x := c.Activefilter(); x != nil {
-			if f := v.buildActiveFilter(x); f != nil {
-				out = append(out, f)
-			}
+			out = append(out, v.buildActiveFilters(x)...)
 			continue
 		}
 	}
@@ -687,9 +713,7 @@ func (v *astBuilder) buildMemberFilterClauses(fc grammar.IMemberfilterconstraint
 			continue
 		}
 		if x := m.Activefilter(); x != nil {
-			if f := v.buildActiveFilter(x); f != nil {
-				out = append(out, f)
-			}
+			out = append(out, v.buildActiveFilters(x)...)
 			continue
 		}
 		if x := m.Memberfieldfilter(); x != nil {
@@ -1137,35 +1161,38 @@ func (v *astBuilder) buildDescriptionIDFilter(ctx grammar.IDescriptionidfilterCo
 	return f
 }
 
-func (v *astBuilder) buildActiveFilter(ctx grammar.IActivefilterContext) *ast.ActiveFilter {
+// buildActiveFilters builds the clauses of one active filter: one, except for
+// `active != *`, which needs two. ActiveFilter carries a value, not an operator,
+// so "!=" is folded into it, and the wildcard has no value to carry:
+//
+//   - `active = *` admits either value: one clause with Any set. It used to read
+//     as `active = true` and drop every inactive component.
+//   - `active != *` admits neither, so it emits `active = true` and `active =
+//     false`, which no component satisfies together in any family.
+func (v *astBuilder) buildActiveFilters(ctx grammar.IActivefilterContext) []ast.Filter {
 	concrete, ok := ctx.(*grammar.ActivefilterContext)
 	if !ok {
 		return nil
+	}
+	negated := false
+	if op := concrete.Booleancomparisonoperator(); op != nil {
+		negated = v.extractComparisonOp(op.GetText()) == "!="
 	}
 	active := true
 	if av := concrete.Activevalue(); av != nil {
 		if avCtx, ok := av.(*grammar.ActivevalueContext); ok {
 			switch {
-			case avCtx.Activetruevalue() != nil:
-				active = true
 			case avCtx.Activefalsevalue() != nil:
 				active = false
 			case avCtx.Wildcard() != nil:
-				// Wildcard means "either" — represented as true here with a
-				// note; evaluator may treat wildcard specially in the future.
-				active = true
+				if !negated {
+					return []ast.Filter{&ast.ActiveFilter{Value: true, Any: true}}
+				}
+				return []ast.Filter{&ast.ActiveFilter{Value: true}, &ast.ActiveFilter{Value: false}}
 			}
 		}
 	}
-	// The grammar allows "!=" but the AST ActiveFilter only carries a Value.
-	// If operator is "!=", we invert the recorded boolean so downstream code
-	// still gets the correct semantics for the common case (active = false).
-	if concrete.Booleancomparisonoperator() != nil {
-		if v.extractComparisonOp(concrete.Booleancomparisonoperator().GetText()) == "!=" {
-			active = !active
-		}
-	}
-	return &ast.ActiveFilter{Value: active}
+	return []ast.Filter{&ast.ActiveFilter{Value: active != negated}}
 }
 
 func (v *astBuilder) buildModuleFilter(ctx grammar.IModulefilterContext) *ast.ModuleFilter {

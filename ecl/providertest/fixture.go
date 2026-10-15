@@ -107,6 +107,9 @@ type FixtureMemberField struct {
 	// a single row satisfying all of them.
 	//
 	// Empty means the member has one row, which is every simple reference set.
+	// For an association reference set declared under historicalAssociations,
+	// each association is its own row keyed by its target, so Row set to the
+	// target adds columns (active, say) to that association's row.
 	Row string `yaml:"row"`
 
 	FieldName string `yaml:"fieldName"`
@@ -282,6 +285,8 @@ var (
 	_ ecl.DialectAliasResolver         = (*inMemoryProvider)(nil)
 	_ ecl.DescriptionIDProvider        = (*inMemoryProvider)(nil)
 	_ ecl.RefsetFieldProjector         = (*inMemoryProvider)(nil)
+	_ ecl.MemberRowColumnsProvider     = (*inMemoryProvider)(nil)
+	_ ecl.DescriptionMetadataProvider  = (*inMemoryProvider)(nil)
 )
 
 type inMemoryProvider struct {
@@ -618,24 +623,50 @@ func (p *inMemoryProvider) FilterConcepts(_ context.Context, concepts ecl.Set, o
 	return out, nil
 }
 
+// RefsetMembers returns the members with an active row: `^ R` means the active
+// members, so one whose every row declares active "0" is left out.
 func (p *inMemoryProvider) RefsetMembers(_ context.Context, refsetIDs []string) (ecl.Set, error) {
-	out := ecl.NewSet()
+	var out []string
 	for _, rid := range refsetIDs {
+		active := p.membersWithActiveRow(rid)
 		for m := range p.refsetMembers[rid] {
-			out = out.Union(ecl.NewSetFromSlice([]string{m}))
+			if active(m) {
+				out = append(out, m)
+			}
 		}
 	}
-	return out, nil
+	return ecl.NewSetFromSlice(out), nil
 }
 
+// RefsetsContainingMembers is the inverse of RefsetMembers, active rows only.
 func (p *inMemoryProvider) RefsetsContainingMembers(_ context.Context, conceptIDs []string) (ecl.Set, error) {
-	out := ecl.NewSet()
+	var out []string
+	byRefset := map[string]func(string) bool{}
 	for _, id := range conceptIDs {
 		for rs := range p.refsetsByMember[id] {
-			out = out.Union(ecl.NewSetFromSlice([]string{rs}))
+			if byRefset[rs] == nil {
+				byRefset[rs] = p.membersWithActiveRow(rs)
+			}
+			if byRefset[rs](id) {
+				out = append(out, rs)
+			}
 		}
 	}
-	return out, nil
+	return ecl.NewSetFromSlice(out), nil
+}
+
+// membersWithActiveRow builds refsetID's rows once and returns whether a member
+// has an active row there. A member with no declared row is active, as every
+// fixture component is by default.
+func (p *inMemoryProvider) membersWithActiveRow(refsetID string) func(member string) bool {
+	declared, active := map[string]bool{}, map[string]bool{}
+	for _, row := range p.memberRows(refsetID) {
+		declared[row.member] = true
+		if row.field(ecl.MemberColumnActive) == "1" {
+			active[row.member] = true
+		}
+	}
+	return func(member string) bool { return active[member] || !declared[member] }
 }
 
 func (p *inMemoryProvider) HistoricalAssociations(_ context.Context, conceptIDs ecl.Set, profile string) (ecl.Set, error) {
@@ -643,6 +674,20 @@ func (p *inMemoryProvider) HistoricalAssociations(_ context.Context, conceptIDs 
 		return ecl.NewSet(), nil
 	}
 	allowed := historyRefsetsForProfile(profile)
+	// The association rows of each reference set, built once per call.
+	inactive := map[string]map[[2]string]bool{}
+	isActive := func(h FixtureHistory) bool {
+		if inactive[h.Refset] == nil {
+			rows := map[[2]string]bool{}
+			for _, row := range p.memberRows(h.Refset) {
+				if row.field(ecl.MemberColumnActive) != "1" {
+					rows[[2]string{row.member, row.field("targetComponentId")}] = true
+				}
+			}
+			inactive[h.Refset] = rows
+		}
+		return !inactive[h.Refset][[2]string{h.Source, h.Target}]
+	}
 	out := ecl.NewSet()
 	conceptIDs.Iter(func(id string) bool {
 		for _, h := range p.spec.HistoricalAssociations {
@@ -659,6 +704,11 @@ func (p *inMemoryProvider) HistoricalAssociations(_ context.Context, conceptIDs 
 				continue
 			}
 			if allowed != nil && !contains(allowed, h.Refset) {
+				continue
+			}
+			if !isActive(h) {
+				// An inactive association row is not a current association,
+				// as RefsetMembers already reads it.
 				continue
 			}
 			out = out.Union(ecl.NewSetFromSlice([]string{h.Source}))
@@ -751,22 +801,17 @@ func dialectRowMatches(d FixtureDialectMember, entries []ecl.DialectEntryOpts) b
 }
 
 func (p *inMemoryProvider) RefsetMembersFiltered(_ context.Context, refsetIDs []string, opts ecl.MemberFilterOpts) (ecl.Set, error) {
-	out := ecl.NewSet()
+	// The same rows ProjectRefsetField reads, so the one-clause and the
+	// several-clause paths see the same columns, the implicit ones included.
+	var members []string
 	for _, rid := range refsetIDs {
-		for _, mf := range p.spec.MemberFields {
-			if mf.Refset != rid || mf.FieldName != opts.FieldName {
-				continue
-			}
-			matched := opts.ValueSet != nil && opts.ValueSet.Contains(mf.Value)
-			if opts.Op == "!=" {
-				matched = !matched
-			}
-			if matched {
-				out = out.Union(ecl.NewSetFromSlice([]string{mf.Member}))
+		for _, row := range p.memberRows(rid) {
+			if row.matches([]ecl.MemberFilterOpts{opts}) {
+				members = append(members, row.member)
 			}
 		}
 	}
-	return out, nil
+	return ecl.NewSetFromSlice(members), nil
 }
 
 // isActive reports whether a fixture entity is active (nil pointer = active
@@ -1043,6 +1088,16 @@ func (p *inMemoryProvider) ProjectRefsetField(_ context.Context, opts ecl.Refset
 	return out, nil
 }
 
+// AnswersDescriptionMetadata declares ecl.DescriptionMetadataProvider: both
+// description matchers apply Active, ModuleIDs and EffectiveTime through
+// metadataMatches.
+func (p *inMemoryProvider) AnswersDescriptionMetadata() {}
+
+// AnswersMemberRowColumns declares ecl.MemberRowColumnsProvider: every row this
+// provider builds answers "active" (defaulting to "1"), "moduleId" and
+// "effectiveTime" through memberRow.field.
+func (p *inMemoryProvider) AnswersMemberRowColumns() {}
+
 // memberRow is ONE reference set member row with the fields declared for it. A
 // member with several rows produces several of these.
 type memberRow struct {
@@ -1054,16 +1109,40 @@ type memberRow struct {
 // member itself — every reference set's first column, not an extra field someone
 // has to declare.
 func (r memberRow) field(name string) string {
+	v, _ := r.column(name)
+	return v
+}
+
+// column returns one column of the row and whether the row has it. A declared
+// empty value is a value; only an undeclared column is missing.
+func (r memberRow) column(name string) (string, bool) {
 	if name == "referencedComponentId" {
-		return r.member
+		return r.member, true
 	}
-	return r.fields[name]
+	if v, ok := r.fields[name]; ok {
+		return v, true
+	}
+	// A row is active unless it says otherwise, like every other fixture
+	// component; moduleId and effectiveTime have no default.
+	if name == ecl.MemberColumnActive {
+		return "1", true
+	}
+	return "", false
 }
 
 // matches reports whether every filter holds on this row.
+//
+// A row without the column satisfies no comparison on it, "!=" included: the
+// filter asks about a value the row does not have, and answering true made
+// `{{ M mapTarget != "A" }}` select the members of a refset that has no
+// mapTarget column at all. The implicit columns always have a value.
 func (r memberRow) matches(filters []ecl.MemberFilterOpts) bool {
 	for _, f := range filters {
-		matched := f.ValueSet != nil && f.ValueSet.Contains(r.field(f.FieldName))
+		value, ok := r.column(f.FieldName)
+		if !ok {
+			return false
+		}
+		matched := f.ValueSet != nil && f.ValueSet.Contains(value)
 		if f.Op == "!=" {
 			matched = !matched
 		}
@@ -1100,17 +1179,52 @@ func (p *inMemoryProvider) memberRows(refsetID string) []memberRow {
 		return fields[k]
 	}
 
-	for _, member := range p.spec.Refsets[refsetID] {
-		get(key{member: member})
-	}
 	for _, mf := range p.spec.MemberFields {
 		if mf.Refset == refsetID {
 			get(key{member: mf.Member, row: mf.Row})[mf.FieldName] = mf.Value
 		}
 	}
 	for _, h := range p.spec.HistoricalAssociations {
-		if h.Refset == refsetID {
-			get(key{member: h.Source})["targetComponentId"] = h.Target
+		if h.Refset != refsetID {
+			continue
+		}
+		// One row per association, keyed by its target, so a source with
+		// several targets keeps them all. A memberFields row declared with
+		// Row set to that target is the same row and carries its columns.
+		get(key{member: h.Source, row: h.Target})["targetComponentId"] = h.Target
+	}
+	// Columns a memberFields entry declares with no Row, for a member whose
+	// rows are its associations, belong to those rows: a simple association
+	// refset has one row per association, and Row "" cannot name which.
+	for k, cols := range fields {
+		if k.row != "" {
+			continue
+		}
+		merged := false
+		for other := range fields {
+			if other.member == k.member && other.row != "" && fields[other]["targetComponentId"] != "" {
+				for name, v := range cols {
+					if _, set := fields[other][name]; !set {
+						fields[other][name] = v
+					}
+				}
+				merged = true
+			}
+		}
+		if merged {
+			delete(fields, k)
+		}
+	}
+	// A member listed under refsets gets a row of its own only if no other
+	// section declares one for it: otherwise that empty row is a phantom, and a
+	// "!=" filter would match it for a member whose real rows all fail.
+	hasRows := map[string]bool{}
+	for k := range fields {
+		hasRows[k.member] = true
+	}
+	for _, member := range p.spec.Refsets[refsetID] {
+		if !hasRows[member] {
+			get(key{member: member})
 		}
 	}
 
