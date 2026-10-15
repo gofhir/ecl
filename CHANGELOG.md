@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.7.0](https://github.com/gofhir/ecl/compare/v1.6.0...v1.7.0) (2026-10-15)
+
+
+### Bug Fixes
+
+* answer a description block on single rows through DescriptionRowMatcher ([cd5aaad](https://github.com/gofhir/ecl/commit/cd5aaad15703044715957a3be167e3f891584d7c))
+* answer a description block on single rows through DescriptionRowMatcher ([8d7c1fe](https://github.com/gofhir/ecl/commit/8d7c1feda8901b63f7848f6fa319128e25465bd1))
+* answer separate member filter blocks each on its own row ([e7f45b0](https://github.com/gofhir/ecl/commit/e7f45b0f3117625880ecf2e710f890d5ee971c0c))
+* answer separate member filter blocks each on its own row ([aa8f55b](https://github.com/gofhir/ecl/commit/aa8f55b9f0aec91de1c1ea6097f63966aac1ca93))
+* check MRCM ranges for every kind of value ([e6e26b7](https://github.com/gofhir/ecl/commit/e6e26b77e733cfbdc60bc047b2b8124eca182306))
+* check MRCM ranges for every kind of value ([c77272b](https://github.com/gofhir/ecl/commit/c77272b090b681589e5fd840b7504062f2776ee4))
+* exact numbers, one provider-error classifier, strict MRCM loading ([d904b46](https://github.com/gofhir/ecl/commit/d904b46672ccd80f975dff62dc2b938c1213872d))
+* exact numbers, one provider-error classifier, strict MRCM loading ([5a7d85c](https://github.com/gofhir/ecl/commit/5a7d85c1c0aec3cafdd60f9cec60ee093dde193c))
+* keep each filter block's scope and boundaries ([70bdf21](https://github.com/gofhir/ecl/commit/70bdf21006645450f634ab7b98e4a75cf727cdc8))
+* keep each filter block's scope and boundaries ([d839754](https://github.com/gofhir/ecl/commit/d839754a0a92475dd0ba33c1002aa29ace585848))
+* make a green differential run mean something was compared ([c3393c0](https://github.com/gofhir/ecl/commit/c3393c035f313821788a785a71664bea35b29d2b))
+* make a green differential run mean something was compared ([771906e](https://github.com/gofhir/ecl/commit/771906ee4c9721a44827f54b0c4450eef50fd9ae))
+
+
+### Miscellaneous Chores
+
+* release 1.7.0 ([f53c7b2](https://github.com/gofhir/ecl/commit/f53c7b29b7cfbb163109e3736d97a7e06f0fe3ed))
+
 ## [1.6.0](https://github.com/gofhir/ecl/compare/v1.5.0...v1.6.0) (2026-08-31)
 
 
