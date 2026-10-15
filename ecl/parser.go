@@ -445,15 +445,14 @@ func (v *astBuilder) VisitSubexpressionconstraint(ctx *grammar.Subexpressioncons
 	// filter's operand was the descendants rather than the MemberOf, and it went
 	// looking for reference sets among them.
 	//
-	// All M blocks share one node directly over the MemberOf: evaluateFiltered
-	// resolves the reference sets, and any projection, from that operand.
-	memberBlocks := ctx.AllMemberfilterconstraint()
-	member := make([]ast.Filter, 0, len(memberBlocks))
-	for _, fc := range memberBlocks {
-		member = append(member, v.buildMemberFilterClauses(fc)...)
-	}
-	if len(member) > 0 {
-		focusExpr = &ast.Filtered{Operand: focusExpr, Filters: member, Family: ast.FamilyMember}
+	// Every M block gets its own node, nested in source order over the
+	// MemberOf, like D and C blocks: the clauses of one block hold on one
+	// member row, separate blocks each on their own (H2m). evaluateFiltered
+	// resolves the reference sets, and any projection, from the MemberOf.
+	for _, fc := range ctx.AllMemberfilterconstraint() {
+		if clauses := v.buildMemberFilterClauses(fc); len(clauses) > 0 {
+			focusExpr = &ast.Filtered{Operand: focusExpr, Filters: clauses, Family: ast.FamilyMember}
+		}
 	}
 
 	// 3. Apply constraint operator (hierarchy)

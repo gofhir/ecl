@@ -35,9 +35,9 @@ import (
 //	     overrode the earlier ones, languages pooled into an any-of, and a term
 //	     and a language from different blocks had to hold on one description.
 //	     Fixed: one Filtered per block.
-//	H2m  the same flattening across `{{ M … }}` blocks, which still share one
-//	     Filtered over their MemberOf: clauses of different M blocks must hold
-//	     on one member row.
+//	H2m  the same flattening across `{{ M … }}` blocks: clauses of different M
+//	     blocks had to hold on one member row. Fixed: one Filtered per block;
+//	     over a field projection every block holds on the projected row.
 //	H3   term and dialect in one block may be satisfied by different
 //	     descriptions. Answered per row by ecl.DescriptionRowMatcher; the H3
 //	     markers stand for the per-dimension path a provider without it takes.
@@ -130,7 +130,7 @@ type semCase struct {
 	// now is what the evaluator returns while the defect stands. Pinning it
 	// turns "anything but want" into one exact wrong answer, so a change that
 	// trades one wrong result for another fails instead of passing unnoticed.
-	// A defect case must set it; an empty pinned result is written `none`, so
+	// A defect case must set it; an empty pinned result is written `[]string{}`, so
 	// that a forgotten pin cannot pass for a deliberate empty one.
 	now []string
 	// unsupported pins, instead of now, that the evaluator reports the case
@@ -242,11 +242,142 @@ func TestSemantics_MemberFilterBlocks(t *testing.T) {
 		// One block: one row must satisfy both clauses, and none does.
 		{expr: `^ 447562003 {{ M mapGroup = "2", mapTarget = "I10" }}`, want: nil},
 		// Two blocks: each may be satisfied by its own row.
-		{expr: `^ 447562003 {{ M mapGroup = "2" }} {{ M mapTarget = "I10" }}`, want: []string{"95566004"}, defect: "H2m", now: none},
+		{expr: `^ 447562003 {{ M mapGroup = "2" }} {{ M mapTarget = "I10" }}`, want: []string{"95566004"}},
+		{expr: `^ 447562003 {{ M mapGroup = "2" }} {{ M mapTarget = "X99" }}`, want: nil},
+		// A D block around them filters the members they leave.
+		{expr: `^ 447562003 {{ M mapGroup = "2" }} {{ M mapTarget = "I10" }} {{ D term = "Hypertensive" }}`, want: []string{"95566004"}},
+		{expr: `^ 447562003 {{ M mapGroup = "2" }} {{ M mapTarget = "I10" }} {{ D term = "heart" }}`, want: nil},
 		// The member filter belongs to `^ R`; the hierarchy operator applies to
 		// the members it leaves. 95566004 has no descendants in the fixture.
 		{expr: `<< ^ 447562003 {{ M mapGroup = "2" }}`, want: []string{"95566004"}},
 	})
+}
+
+// TestSemantics_MemberBlocksWithoutCapabilities covers separate one-clause M
+// blocks on a provider with no optional capability: each block is one
+// RefsetMembersFiltered call, the reference sets and their members are
+// fetched once, and a block refused for a missing capability is refused
+// before any block is sent.
+func TestSemantics_MemberBlocksWithoutCapabilities(t *testing.T) {
+	p := &memberCalls{DataProvider: standardProvider(t), calls: map[string]int{}}
+	got, err := evaluate(p, `^ (<< 447562003) {{ M mapGroup = "2" }} {{ M mapTarget = "I10" }} {{ M mapGroup = "1" }}`)
+	require.NoError(t, err)
+	require.Equal(t, []string{"95566004"}, got.Slice())
+	require.Equal(t, map[string]int{"Descendants": 1, "RefsetMembers": 1, "RefsetMembersFiltered": 3}, p.calls)
+
+	// Once no member is left, the remaining blocks are not sent.
+	p.calls = map[string]int{}
+	got, err = evaluate(p, `^ 447562003 {{ M mapTarget = "X99" }} {{ M mapGroup = "2" }}`)
+	require.NoError(t, err)
+	require.Empty(t, got.Slice())
+	require.Equal(t, map[string]int{"RefsetMembersFiltered": 1}, p.calls)
+
+	p.calls = map[string]int{}
+	_, err = evaluate(p, `^ 447562003 {{ M mapGroup = "2" }} {{ M active = false }}`)
+	require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
+	require.Empty(t, p.calls, "the refusal comes before any block is sent")
+
+	// Two clauses on one row need RefsetFieldProjector, whichever block they
+	// are in and whatever an earlier block matched.
+	for _, expr := range []string{
+		`^ 447562003 {{ M mapTarget = "X99" }} {{ M mapGroup = "2", mapTarget = "I10" }}`,
+		`^ 447562003 {{ M mapGroup = "2", mapTarget = "I10" }} {{ M mapTarget = "X99" }}`,
+	} {
+		p.calls = map[string]int{}
+		_, err = evaluate(p, expr)
+		require.ErrorIsf(t, err, ecl.ErrUnsupportedFeature, expr)
+		require.Emptyf(t, p.calls, "%s: refused before any block is sent", expr)
+	}
+}
+
+// TestSemantics_MemberBlockEdges covers what several M blocks share with one:
+// a block that can match no row empties the result, one whose clauses all
+// constrain nothing leaves the members, and parentheses around `^ R` change
+// nothing.
+func TestSemantics_MemberBlockEdges(t *testing.T) {
+	runSemCasesOn(t, standardProvider(t), []semCase{
+		// No module descends from 95566004, so the module set names none.
+		{expr: `^ 447562003 {{ M mapGroup = "2" }} {{ M moduleId = (< 95566004) }}`, want: nil},
+		{expr: `^ 447562003 {{ M mapGroup = "2" }} {{ M moduleId != (< 95566004) }}`, want: []string{"95566004"}},
+		{expr: `(^ 447562003) {{ M mapGroup = "2" }} {{ M mapTarget = "I10" }}`, want: []string{"95566004"}},
+	})
+
+	// Errors from the reference set operand and from a block surface.
+	for method, expr := range map[string]string{
+		"Descendants":           `^ (<< 447562003) {{ M mapGroup = "2" }} {{ M mapTarget = "I10" }}`,
+		"RefsetMembersFiltered": `^ 447562003 {{ M mapGroup = "2" }} {{ M mapTarget = "I10" }}`,
+	} {
+		p := &memberCalls{DataProvider: standardProvider(t), calls: map[string]int{}, fail: method}
+		_, err := evaluate(p, expr)
+		require.ErrorIsf(t, err, ecl.ErrProvider, "%s failing", method)
+	}
+}
+
+// TestSemantics_HandBuiltMemberChainIsRefused covers member clauses nested in
+// shapes only a hand-built tree has. Nodes of Family "" read the inner node's
+// members as reference sets and answered the empty set; a member node also
+// holding a term filter lost it once chained; and a chain over an operand
+// with no `^` has no member rows. Each is refused.
+func TestSemantics_HandBuiltMemberChainIsRefused(t *testing.T) {
+	const expr = `^ 447562003 {{ M mapGroup = "2" }} {{ M mapTarget = "I10" }}`
+	for name, edit := range map[string]func(outer *ast.Filtered){
+		"family empty": func(outer *ast.Filtered) {
+			for n := outer; n != nil; {
+				n.Family = ""
+				n, _ = n.Operand.(*ast.Filtered)
+			}
+		},
+		"term in a member node": func(outer *ast.Filtered) {
+			outer.Filters = append(outer.Filters, &ast.TermFilter{Op: "=", Terms: []ast.SearchTerm{{Text: "heart"}}})
+		},
+		"no memberOf": func(outer *ast.Filtered) {
+			outer.Operand.(*ast.Filtered).Operand = &ast.ConceptRef{ID: "447562003"}
+		},
+	} {
+		tree := mustParse(t, expr)
+		edit(tree.(*ast.Filtered))
+		_, err := ecl.Evaluate(context.Background(), tree, standardProvider(t))
+		require.ErrorIsf(t, err, ecl.ErrUnsupportedFeature, name)
+	}
+}
+
+// memberCalls counts the member and hierarchy calls of a provider, and hides
+// every optional capability of the one it wraps.
+type memberCalls struct {
+	ecl.DataProvider
+	calls map[string]int
+	fail  string // a method that fails
+}
+
+var errMemberCallFailed = errors.New("backend down")
+
+func (m *memberCalls) failing(method string) error {
+	m.calls[method]++
+	if m.fail == method {
+		return errMemberCallFailed
+	}
+	return nil
+}
+
+func (m *memberCalls) Descendants(ctx context.Context, ids []string, includeSelf bool) (ecl.Set, error) {
+	if err := m.failing("Descendants"); err != nil {
+		return nil, err
+	}
+	return m.DataProvider.Descendants(ctx, ids, includeSelf)
+}
+
+func (m *memberCalls) RefsetMembers(ctx context.Context, ids []string) (ecl.Set, error) {
+	if err := m.failing("RefsetMembers"); err != nil {
+		return nil, err
+	}
+	return m.DataProvider.RefsetMembers(ctx, ids)
+}
+
+func (m *memberCalls) RefsetMembersFiltered(ctx context.Context, ids []string, f ecl.MemberFilterOpts) (ecl.Set, error) {
+	if err := m.failing("RefsetMembersFiltered"); err != nil {
+		return nil, err
+	}
+	return m.DataProvider.RefsetMembersFiltered(ctx, ids, f)
 }
 
 // TestSemantics_InactiveRowsDoNotQualifyAMember covers a member with an
@@ -275,6 +406,11 @@ func TestSemantics_InactiveRowsDoNotQualifyAMember(t *testing.T) {
 		// Asking for the inactive rows explicitly reaches the X row.
 		{expr: `^ ` + refset + ` {{ M mapTarget = "X", active = false }}`, want: []string{member}},
 		{expr: `^ ` + refset + ` {{ M mapAdvice = "" }}`, want: []string{member}},
+		// Separate blocks may hold on different rows, the inactive one
+		// included when a block asks for it; one block may not.
+		{expr: `^ ` + refset + ` {{ M mapTarget = "Y" }} {{ M mapTarget = "X", active = false }}`, want: []string{member}},
+		{expr: `^ ` + refset + ` {{ M active = true }} {{ M active = false }}`, want: []string{member}},
+		{expr: `^ ` + refset + ` {{ M mapTarget = "Y", active = false }}`, want: nil},
 	})
 }
 
@@ -300,6 +436,14 @@ func TestSemantics_ProjectionKeepsTheActiveRowDefault(t *testing.T) {
 		{expr: `^ [targetComponentId] ` + sameAs + ` {{ M referencedComponentId = ` + source + ` }}`, want: []string{kept}},
 		{expr: `^ [targetComponentId] ` + sameAs + ` {{ M active = * }}`, want: []string{kept, retired}},
 		{expr: `^ ` + sameAs + ` {{ M targetComponentId = ` + kept + ` }}`, want: []string{source}},
+		// A projection is a column of one row, so every M block holds on the
+		// projected row: the retired association's row is the inactive one.
+		{expr: `^ [targetComponentId] ` + sameAs + ` {{ M targetComponentId = ` + retired + ` }} {{ M active = true }}`, want: nil},
+		{expr: `^ [targetComponentId] ` + sameAs + ` {{ M targetComponentId = ` + retired + ` }} {{ M active = * }}`, want: []string{retired}},
+		{expr: `^ [targetComponentId] ` + sameAs + ` {{ M active = true }} {{ M active = false }}`, want: nil},
+		// Without the projection the blocks are separate: the source has an
+		// active row too, so it passes both.
+		{expr: `^ ` + sameAs + ` {{ M targetComponentId = ` + retired + `, active = * }} {{ M active = true }}`, want: []string{source}},
 	})
 }
 
@@ -846,7 +990,7 @@ func TestSemantics_NumericOverflowIsRejected(t *testing.T) {
 	p := semanticsProvider()
 	for _, tc := range []struct {
 		expr, literal, defect string
-		now                   []string // the result while the literal is accepted; none when empty
+		now                   []string // the result while the literal is accepted; []string{} when empty
 	}{
 		{expr: `* : ` + semStrength + ` = #99999999999999999999999999999`, literal: "99999999999999999999999999999"},
 		{expr: `* : [99999999999999999999..*] ` + semStrength + ` = *`, literal: "99999999999999999999"},
@@ -859,7 +1003,7 @@ func TestSemantics_NumericOverflowIsRejected(t *testing.T) {
 			}
 			rejected := err != nil && strings.Contains(err.Error(), tc.literal) && !isGrammarError(err)
 			if tc.defect != "" && tc.now == nil {
-				t.Fatalf("%q is marked %s but pins no current result: set now (none for the empty set)", tc.expr, tc.defect)
+				t.Fatalf("%q is marked %s but pins no current result: set now ([]string{} for the empty set)", tc.expr, tc.defect)
 			}
 			switch {
 			case tc.defect == "":
@@ -887,9 +1031,6 @@ func isGrammarError(err error) bool {
 	}
 	return false
 }
-
-// none pins an empty current result explicitly; see semCase.now.
-var none = []string{}
 
 // require64BitInt skips a numeric test where int is narrower than 64 bits. The
 // AST stores integer literals in int, so on a 32-bit platform every literal
@@ -932,7 +1073,7 @@ func runSemCasesOn(t *testing.T, p ecl.DataProvider, cases []semCase) {
 			case tc.defect == "":
 				require.Nilf(t, tc.now, "%q has no defect marker, so its pinned wrong result is stale: drop now", tc.expr)
 			case tc.now == nil:
-				t.Fatalf("%q is marked %s but pins no current result: set now (none for the empty set)", tc.expr, tc.defect)
+				t.Fatalf("%q is marked %s but pins no current result: set now ([]string{} for the empty set)", tc.expr, tc.defect)
 			}
 			switch {
 			case tc.defect == "":
