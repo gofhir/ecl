@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gofhir/ecl/ecl"
+	"github.com/gofhir/ecl/ecl/ast"
 	"github.com/gofhir/ecl/scg"
 )
 
@@ -44,16 +45,33 @@ const (
 	// rather than a hard error so one broken rule cannot hide the violations
 	// already found, nor the rules that are fine.
 	IssueKindInvalidRule = "invalid_rule"
+
+	// IssueKindUncheckedRange lists, in Result.Unchecked, a value whose range
+	// applies but could not be decided. It is not a violation: the value may
+	// well be in range.
+	IssueKindUncheckedRange = "unchecked_range"
 )
 
 // Result reports the outcome of validating an SCG expression against an MRCM
 // model.
 type Result struct {
-	// Valid is true if no issues were reported.
+	// Valid is true if no issues were reported. It says that no rule was found
+	// broken, not that every rule was checked: see Complete.
 	Valid bool
 
 	// Issues lists MRCM rule violations found in the expression.
 	Issues []Issue
+
+	// Complete is true when every range rule that applies was decided. A rule
+	// that could not be evaluated at all is an invalid_rule issue, which makes
+	// Valid false; so a caller that needs the expression shown to conform,
+	// rather than not shown to break a rule, requires Valid && Complete.
+	Complete bool
+
+	// Unchecked lists the values whose range applies but could not be decided,
+	// as unchecked_range entries; Complete is false when there is any. They are
+	// not in Issues and do not make the result invalid.
+	Unchecked []Issue
 }
 
 // Issue describes a single MRCM validation failure.
@@ -90,10 +108,15 @@ type Issue struct {
 //     domain_violation.
 //   - Checks the rule's grouped flag against the SCG group structure.
 //     Mismatches yield grouped_violation or ungrouped_violation.
-//   - Looks up range rules for the attribute. For ConceptRef values it
-//     evaluates the range ECL and checks membership; misses are
-//     range_violation. Concrete values and nested expressions are not subject
-//     to ECL range checks.
+//   - Looks up range rules for the attribute and checks the value against
+//     them; misses are range_violation. A concept is checked against an ECL
+//     range, a concrete value against a range in the Template Syntax form
+//     (`int(>#0..)`, `dec(#0.5..#10)`, `str("mg")`, `bool`), and a value of
+//     the other sort is out of range. A nested expression is judged by its
+//     focus concepts, as written, against a range built from *, << X and < X
+//     with AND and OR; against any other ECL range, or a rule that could not
+//     be evaluated, it is listed in Result.Unchecked, which makes Complete
+//     false, rather than reported either way.
 //   - Recurses into nested SCG expressions (using the nested expression's own
 //     focus concepts as focus).
 //
@@ -132,7 +155,9 @@ func Validate(ctx context.Context, expr *scg.Expression, model *Model, provider 
 		model:    model,
 		provider: provider,
 		// memo caches ECL expression -> evaluated set, scoped to this run.
-		memo: make(map[string]ecl.Set),
+		memo:   make(map[string]ecl.Set),
+		parsed: make(map[string]ast.Expression),
+		nodes:  make(map[nodeKey]ecl.Set),
 		// domains is the model's rules grouped by attribute, built once: the
 		// cardinality check needs it per focus concept and per nested
 		// expression, and rebuilding the map each time is pure allocation.
@@ -144,8 +169,10 @@ func Validate(ctx context.Context, expr *scg.Expression, model *Model, provider 
 	}
 
 	return &Result{
-		Valid:  len(v.issues) == 0,
-		Issues: v.issues,
+		Valid:     len(v.issues) == 0,
+		Issues:    v.issues,
+		Complete:  len(v.unchecked) == 0,
+		Unchecked: v.unchecked,
 	}, nil
 }
 
@@ -155,8 +182,12 @@ type validator struct {
 	model    *Model
 	provider ecl.DataProvider
 	issues   []Issue
-	memo     map[string]ecl.Set
-	domains  map[string][]AttributeDomain
+	// unchecked are the values whose range could not be decided; see Result.
+	unchecked []Issue
+	memo      map[string]ecl.Set
+	parsed    map[string]ast.Expression
+	nodes     map[nodeKey]ecl.Set
+	domains   map[string][]AttributeDomain
 }
 
 // validateExpression walks every focus concept and refinement attribute of
@@ -344,6 +375,28 @@ func (v *validator) addIssueOnce(issue Issue) {
 	v.issues = append(v.issues, issue)
 }
 
+// reported reports whether an issue of one kind is already recorded for an
+// attribute at a path.
+func (v *validator) reported(kind, attrID, path string) bool {
+	for _, existing := range v.issues {
+		if existing.Kind == kind && existing.AttributeID == attrID && existing.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+// addUncheckedOnce records an unchecked value once: the range is checked per
+// focus concept of the expression, and does not depend on it.
+func (v *validator) addUncheckedOnce(issue Issue) {
+	for _, existing := range v.unchecked {
+		if existing.Path == issue.Path && existing.AttributeID == issue.AttributeID {
+			return
+		}
+	}
+	v.unchecked = append(v.unchecked, issue)
+}
+
 // cardinalitySummary renders the cardinalities of a rule set for an error message.
 func cardinalitySummary(rules []AttributeDomain) string {
 	out := make([]string, 0, len(rules))
@@ -444,59 +497,235 @@ func (v *validator) validateAttribute(focusID string, attr scg.Attribute, groupe
 		}
 	}
 
-	// Range checks (only for concept-typed values; concrete values are not
-	// subject to ECL ranges in this implementation, and nested expressions
-	// are validated by recursion).
-	if attr.Value.Concept != nil {
-		valueID := attr.Value.Concept.SCTID
+	return v.validateRange(focusID, attr, ranges, path)
+}
 
-		// Range rows are ALTERNATIVES, like domain rows: the MRCM Attribute Range
-		// refset holds one row per contentTypeId, so the value has to satisfy at
-		// least one. Requiring every row reported a spurious range_violation for
-		// each row it did not match.
-		var (
-			checked   int
-			satisfied bool
-			ecls      []string
-		)
-		for _, rule := range ranges {
-			if rule.RuleStrengthID != "" && rule.RuleStrengthID != RuleStrengthMandatory {
-				continue
-			}
-			ok, err := v.eclContains(rule.RangeECL, valueID)
-			if err != nil {
-				if !errors.Is(err, errInvalidRule) {
-					return fmt.Errorf("evaluating range ECL of attribute %s: %w", attrID, err)
-				}
-				v.addIssueOnce(Issue{
-					Kind:        IssueKindInvalidRule,
-					AttributeID: attrID,
-					Message: fmt.Sprintf("range ECL %q of attribute %s could not be evaluated: %v",
-						rule.RangeECL, attrID, err),
-				})
-				continue
-			}
-			checked++
-			ecls = append(ecls, rule.RangeECL)
-			if ok {
-				satisfied = true
-				break
-			}
+// rangeOutcome is what one range rule says about a value.
+type rangeOutcome int
+
+const (
+	rangeSatisfied rangeOutcome = iota
+	rangeViolated
+	rangeUnchecked // the rule applies, and this validator cannot decide it
+)
+
+// validateRange checks an attribute's value against its mandatory range rules.
+//
+// Range rows are ALTERNATIVES, like domain rows: the MRCM Attribute Range
+// refset holds one row per contentTypeId, so the value has to satisfy at least
+// one. Requiring every row reported a spurious range_violation for each row it
+// did not match. A violation is reported only when every rule was decided and
+// none was satisfied; when one could not be decided — the validator cannot
+// tell, or the rule is broken (reported as invalid_rule) — the value is listed
+// in Result.Unchecked instead, since it may be in that rule's range.
+//
+// The range does not depend on the focus concept, which this is called for
+// once each, so a value is reported once whatever the focus.
+func (v *validator) validateRange(focusID string, attr scg.Attribute, ranges []AttributeRange, path string) error {
+	attrID := attr.Name.SCTID
+	if val := attr.Value; val.Concept == nil && val.Concrete == nil && val.Nested == nil {
+		// Only a hand-built expression has an attribute with no value; there
+		// is nothing to check, as before values of every kind were checked.
+		return nil
+	}
+	var decided, unchecked, reasons []string
+	for _, rule := range ranges {
+		if rule.RuleStrengthID != "" && rule.RuleStrengthID != RuleStrengthMandatory {
+			continue
 		}
-		if checked > 0 && !satisfied {
-			v.issues = append(v.issues, Issue{
-				Kind:        IssueKindRangeViolation,
+		outcome, why, err := v.rangeRule(rule, attr.Value)
+		switch {
+		case errors.Is(err, errInvalidRule):
+			v.addIssueOnce(Issue{
+				Kind:        IssueKindInvalidRule,
 				AttributeID: attrID,
-				FocusID:     focusID,
-				ValueID:     valueID,
-				Message: fmt.Sprintf("value %s is not in range (%s) of attribute %s",
-					valueID, strings.Join(ecls, " OR "), attrID),
-				Path: path + ".value",
+				Message:     fmt.Sprintf("range %q of attribute %s could not be evaluated: %v", rule.RangeECL, attrID, err),
 			})
+			unchecked, reasons = append(unchecked, rule.RangeECL), appendNew(reasons, "a rule could not be evaluated")
+			continue
+		case err != nil:
+			return fmt.Errorf("evaluating range %q of attribute %s: %w", rule.RangeECL, attrID, err)
+		}
+		switch outcome {
+		case rangeSatisfied:
+			return nil
+		case rangeViolated:
+			decided = append(decided, rule.RangeECL)
+		case rangeUnchecked:
+			unchecked, reasons = append(unchecked, rule.RangeECL), appendNew(reasons, why)
 		}
 	}
-
+	valueID := valueText(attr.Value)
+	switch {
+	case len(unchecked) > 0:
+		v.addUncheckedOnce(Issue{
+			Kind:        IssueKindUncheckedRange,
+			AttributeID: attrID,
+			FocusID:     focusID,
+			ValueID:     valueID,
+			Message: fmt.Sprintf("value %s of attribute %s was not checked against range (%s): %s",
+				valueID, attrID, strings.Join(unchecked, " OR "), strings.Join(reasons, "; ")),
+			Path: path + ".value",
+		})
+	case len(decided) > 0 && !v.reported(IssueKindRangeViolation, attrID, path+".value"):
+		v.issues = append(v.issues, Issue{
+			Kind:        IssueKindRangeViolation,
+			AttributeID: attrID,
+			FocusID:     focusID,
+			ValueID:     valueID,
+			Message: fmt.Sprintf("value %s is not in range (%s) of attribute %s",
+				valueID, strings.Join(decided, " OR "), attrID),
+			Path: path + ".value",
+		})
+	}
 	return nil
+}
+
+// appendNew appends s unless it is already there.
+func appendNew(list []string, s string) []string {
+	for _, x := range list {
+		if x == s {
+			return list
+		}
+	}
+	return append(list, s)
+}
+
+// rangeRule applies one range rule to a value. An error wrapping
+// errInvalidRule is a broken rule, anything else a failure to check it.
+//
+// A rule is either ECL, which holds concepts, or a concrete range (see
+// parseConcreteRange), which holds values of one type; a value of the other
+// sort is out of range.
+//
+// A nested expression is judged by its focus concepts against a range built
+// from `*`, `<< X` and `< X` with AND and OR (see nestedInRange). Any other
+// range, `X` alone or one with MINUS, a refinement or a member of, is not
+// decided from the focus concepts, and the value is left unchecked.
+func (v *validator) rangeRule(rule AttributeRange, value scg.AttributeValue) (rangeOutcome, string, error) {
+	concrete, isConcrete, err := parseConcreteRange(rule.RangeECL)
+	if err != nil {
+		return 0, "", fmt.Errorf("%w: %w", errInvalidRule, err)
+	}
+	if isConcrete {
+		if value.Concrete == nil {
+			return rangeViolated, "", nil // a concept or an expression where a value is expected
+		}
+		return outcomeOf(concrete.contains(value.Concrete)), "", nil
+	}
+	// An ECL range, parsed first so a broken one is invalid_rule whatever
+	// the value is.
+	parsed, err := v.parseRule(rule.RangeECL)
+	if err != nil {
+		return 0, "", err
+	}
+	switch {
+	case value.Concrete != nil:
+		return rangeViolated, "", nil // a value where a concept is expected
+	case value.Nested != nil:
+		if !climbsHierarchy(parsed) {
+			return rangeUnchecked, "an expression is judged by its focus concepts only against a range of the form *, << X or < X, or their AND and OR", nil
+		}
+		in, err := v.nestedInRange(parsed, value.Nested)
+		if err != nil {
+			return 0, "", err
+		}
+		return outcomeOf(in), "", nil
+	}
+	in, err := v.eclContains(rule.RangeECL, value.Concept.SCTID)
+	if err != nil {
+		return 0, "", err
+	}
+	return outcomeOf(in), "", nil
+}
+
+// nestedInRange reports whether a nested expression is in a range for which
+// climbsHierarchy holds, as the expression is written; this validator does not
+// classify. The expression is below each of its focus concepts, and a
+// refinement makes it strictly below them, so:
+//
+//   - it is in `<< X` when a focus concept is, and in `< X` when a focus
+//     concept is in `<< X` and the expression is refined, or in `< X`. An
+//     unrefined expression of several focus concepts, one of them X, is read
+//     as X: below it only if another focus concept is not above it, which
+//     takes a subsumption test this does not make;
+//   - it is in an AND when it is in each side, which different focus concepts
+//     may satisfy, and in an OR when it is in either.
+func (v *validator) nestedInRange(e ast.Expression, nested *scg.Expression) (bool, error) {
+	switch x := e.(type) {
+	case *ast.Nested:
+		return v.nestedInRange(x.Inner, nested)
+	case *ast.Or:
+		in, err := v.nestedInRange(x.Left, nested)
+		if in || err != nil {
+			return in, err
+		}
+		return v.nestedInRange(x.Right, nested)
+	case *ast.And:
+		in, err := v.nestedInRange(x.Left, nested)
+		if !in || err != nil {
+			return false, err
+		}
+		return v.nestedInRange(x.Right, nested)
+	}
+	_, below := e.(*ast.DescendantOf)
+	set, err := v.evalNode(e, below && len(nested.Refinements) > 0)
+	if err != nil {
+		return false, err
+	}
+	for _, f := range nested.FocusConcepts {
+		if set.Contains(f.SCTID) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func outcomeOf(ok bool) rangeOutcome {
+	if ok {
+		return rangeSatisfied
+	}
+	return rangeViolated
+}
+
+// climbsHierarchy reports whether a range ECL holds, with a concept, every
+// concept below it, so that an expression refining that concept is in it too.
+func climbsHierarchy(e ast.Expression) bool {
+	switch x := e.(type) {
+	case *ast.Any, *ast.DescendantOrSelfOf, *ast.DescendantOf:
+		return true
+	case *ast.Nested:
+		return climbsHierarchy(x.Inner)
+	case *ast.Or:
+		return climbsHierarchy(x.Left) && climbsHierarchy(x.Right)
+	case *ast.And:
+		return climbsHierarchy(x.Left) && climbsHierarchy(x.Right)
+	}
+	return false
+}
+
+// valueText renders an attribute value for an Issue, as SCG writes it.
+func valueText(val scg.AttributeValue) string {
+	switch {
+	case val.Concept != nil:
+		return val.Concept.SCTID
+	case val.Concrete != nil && val.Concrete.Kind == kindString:
+		return strconv.Quote(val.Concrete.String)
+	case val.Concrete != nil && val.Concrete.Kind == kindBoolean:
+		return concreteText(val.Concrete)
+	case val.Concrete != nil:
+		return "#" + concreteText(val.Concrete)
+	case val.Nested != nil:
+		focus := make([]string, 0, len(val.Nested.FocusConcepts))
+		for _, f := range val.Nested.FocusConcepts {
+			focus = append(focus, f.SCTID)
+		}
+		if len(val.Nested.Refinements) > 0 {
+			return "(" + strings.Join(focus, " + ") + " : …)"
+		}
+		return "(" + strings.Join(focus, " + ") + ")"
+	}
+	return ""
 }
 
 // eclContains parses + evaluates the given ECL expression (with memoisation)
@@ -518,21 +747,60 @@ func (v *validator) evalECL(eclExpr string) (ecl.Set, error) {
 	if set, ok := v.memo[eclExpr]; ok {
 		return set, nil
 	}
-	parsed, err := ecl.Parse(eclExpr)
+	parsed, err := v.parseRule(eclExpr)
 	if err != nil {
-		return nil, fmt.Errorf("%w: parse ECL %q: %w", errInvalidRule, eclExpr, err)
+		return nil, err
 	}
-	set, err := ecl.Evaluate(v.ctx, parsed, v.provider)
+	set, err := v.evalNode(parsed, false)
 	if err != nil {
-		// A construct the evaluator does not support is a property of the rule;
-		// anything else (provider failure, cancellation) is not.
-		if errors.Is(err, ecl.ErrUnsupportedFeature) {
-			return nil, fmt.Errorf("%w: evaluate ECL %q: %w", errInvalidRule, eclExpr, err)
-		}
 		return nil, fmt.Errorf("evaluate ECL %q: %w", eclExpr, err)
 	}
 	v.memo[eclExpr] = set
 	return set, nil
+}
+
+// parseRule parses a rule's ECL once per Validate call.
+func (v *validator) parseRule(eclExpr string) (ast.Expression, error) {
+	if parsed, ok := v.parsed[eclExpr]; ok {
+		return parsed, nil
+	}
+	parsed, err := ecl.Parse(eclExpr)
+	if err != nil {
+		return nil, fmt.Errorf("%w: parse ECL %q: %w", errInvalidRule, eclExpr, err)
+	}
+	v.parsed[eclExpr] = parsed
+	return parsed, nil
+}
+
+// evalNode evaluates a node of a parsed rule, memoised by node: a node of a
+// rule parsed by parseRule is the same pointer every time. With orSelf, a
+// `< X` node is evaluated as `<< X`; see nestedInRange.
+func (v *validator) evalNode(e ast.Expression, orSelf bool) (ecl.Set, error) {
+	key := nodeKey{e, orSelf}
+	if set, ok := v.nodes[key]; ok {
+		return set, nil
+	}
+	expr := e
+	if d, ok := e.(*ast.DescendantOf); ok && orSelf {
+		expr = &ast.DescendantOrSelfOf{Operand: d.Operand}
+	}
+	set, err := ecl.Evaluate(v.ctx, expr, v.provider)
+	if err != nil {
+		// A construct the evaluator does not support is a property of the rule;
+		// anything else (provider failure, cancellation) is not.
+		if errors.Is(err, ecl.ErrUnsupportedFeature) {
+			return nil, fmt.Errorf("%w: %w", errInvalidRule, err)
+		}
+		return nil, err
+	}
+	v.nodes[key] = set
+	return set, nil
+}
+
+// nodeKey memoises a node of a parsed rule; see evalNode.
+type nodeKey struct {
+	node   ast.Expression
+	orSelf bool
 }
 
 // joinPath joins two path segments with "." if both are non-empty.
@@ -724,11 +992,11 @@ func valueKey(val scg.AttributeValue) string {
 
 func concreteText(c *scg.ConcreteValue) string {
 	switch c.Kind {
-	case "integer":
+	case kindInteger:
 		return strconv.FormatInt(c.Int, 10)
-	case "decimal":
+	case kindDecimal:
 		return strconv.FormatFloat(c.Float, 'f', -1, 64)
-	case "boolean":
+	case kindBoolean:
 		return strconv.FormatBool(c.Bool)
 	default:
 		return c.String

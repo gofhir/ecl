@@ -225,7 +225,19 @@ The validator reports seven kinds of issue: `domain_violation`,
 `grouped_violation`, `ungrouped_violation`, `unknown_attribute` — plus
 `invalid_rule` for a rule in the *model* that could not be applied, which is an
 issue rather than an error so one broken rule cannot hide the violations already
-found.
+found. A value whose range could not be decided is not an issue: it is listed in
+`res.Unchecked` as `unchecked_range`.
+
+**`Valid` means no rule was found broken, not that every rule was checked.** A
+value is checked against its range whatever its kind: a concept against an ECL
+range, a concrete value against the Template Syntax form the MRCM refset uses
+for concrete attributes (`int(>#0..)`, `dec(#0.5..#10)`, `str("mg")`, `bool`),
+and a value of the other sort is out of range. A nested expression is judged by
+its focus concepts against a range built from `*`, `<< X` and `< X` with `AND` and
+`OR`; against any other range it cannot be decided without classifying it, so it
+is listed in `res.Unchecked` and `res.Complete` is false — as is a value whose
+only remaining rule could not be evaluated. Require `res.Valid && res.Complete`
+to know the expression conforms.
 
 The two cardinalities constrain different things and an expression can satisfy one
 while breaking the other. Three finding sites spread over three groups are fine

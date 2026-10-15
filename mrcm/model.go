@@ -60,7 +60,9 @@ type AttributeRange struct {
 	// AttributeID is the SCTID of the attribute.
 	AttributeID string
 
-	// RangeECL is an ECL expression matching valid values (e.g. "<< 442083009").
+	// RangeECL is an ECL expression matching valid values (e.g. "<< 442083009"),
+	// or, for a concrete attribute, a range in the Template Syntax form the MRCM
+	// refset uses for it (e.g. "dec(>#0..)", "int(#1..#10)", "str(\"mg\")").
 	RangeECL string
 
 	// RangeRuleECL is an alternative form (kept verbatim for tooling).
