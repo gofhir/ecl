@@ -3,6 +3,7 @@ package ecl_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -35,29 +36,28 @@ import (
 // which already wrap. Dropping a marker therefore says that path is fixed; the
 // fix should wrap at one place every call goes through, not per call site.
 //
-// A case marked H5 is a strict expected failure, like those in
-// semantics_test.go: it passes while the cause comes back unwrapped, and fails
-// once ErrProvider is added, so the fix has to drop the marker.
+// Nine of these surfaced unwrapped until every provider error went through
+// providerError; they are ordinary regression cases now.
 func TestEvaluate_EveryProviderFailureIsErrProvider(t *testing.T) {
 	base := standardProvider(t) // read-only, so one copy serves every case
 	for _, tc := range []struct {
-		method, expr, defect string
+		method, expr string
 	}{
-		{method: "Descendants", expr: `< 404684003`, defect: "H5"},
-		{method: "Ancestors", expr: `> 22298006`, defect: "H5"},
-		{method: "Children", expr: `<! 404684003`, defect: "H5"},
-		{method: "Parents", expr: `>! 22298006`, defect: "H5"},
-		{method: "ConceptExists", expr: `22298006`, defect: "H5"},
-		{method: "AllConcepts", expr: `*`, defect: "H5"},
-		{method: "RelationshipTargets", expr: `22298006 . 363698007`, defect: "H5"},
+		{method: "Descendants", expr: `< 404684003`},
+		{method: "Ancestors", expr: `> 22298006`},
+		{method: "Children", expr: `<! 404684003`},
+		{method: "Parents", expr: `>! 22298006`},
+		{method: "ConceptExists", expr: `22298006`},
+		{method: "AllConcepts", expr: `*`},
+		{method: "RelationshipTargets", expr: `22298006 . 363698007`},
 		{method: "ConcreteValues", expr: `<< 404684003 : 1142139005 = #5`},
 		{method: "PropertiesByGroup", expr: `<< 404684003 : 363698007 = 74281007`},
 		{method: "MatchDescription", expr: `<< 404684003 {{ D term = "heart" }}`},
 		{method: "FilterConcepts", expr: `<< 404684003 {{ C active = true }}`},
 		{method: "RefsetMembers", expr: `^ 900000000000497000`},
-		{method: "RefsetsContainingMembers", expr: `^R 22298006`, defect: "H5"},
+		{method: "RefsetsContainingMembers", expr: `^R 22298006`},
 		{method: "HistoricalAssociations", expr: `22298006 {{ +HISTORY }}`},
-		{method: "ResolveIdentifier", expr: `LOINC#1234-5`, defect: "H5"},
+		{method: "ResolveIdentifier", expr: `LOINC#1234-5`},
 		{method: "MatchDialect", expr: `<< 404684003 {{ D dialectId = 900000000000508004 }}`},
 		{method: "RefsetMembersFiltered", expr: `^ 447562003 {{ M mapGroup = "2" }}`},
 	} {
@@ -67,17 +67,65 @@ func TestEvaluate_EveryProviderFailureIsErrProvider(t *testing.T) {
 			require.Truef(t, p.called[tc.method], "%q never called %s, so the case tests nothing; pick an expression that reaches it", tc.expr, tc.method)
 			require.ErrorIsf(t, err, errBackendDown, "%q must keep the provider's own cause", tc.expr)
 
-			wrapped := errors.Is(err, ecl.ErrProvider)
-			switch {
-			case tc.defect == "":
-				require.Truef(t, wrapped, "a failing %s surfaces without ErrProvider: %v", tc.method, err)
-			case wrapped:
-				t.Fatalf("a failing %s now surfaces as ErrProvider, so defect %s looks fixed: drop its marker", tc.method, tc.defect)
-			default:
-				t.Logf("KNOWN DEFECT %s: a failing %s surfaces without ErrProvider: %v", tc.defect, tc.method, err)
-			}
+			require.Truef(t, errors.Is(err, ecl.ErrProvider), "a failing %s surfaces without ErrProvider: %v", tc.method, err)
 		})
 	}
+}
+
+// TestEvaluate_ProviderRefusalsAreNotBackendFailures covers the errors a
+// provider may return that are not a failing backend. A capability refusing a
+// form it cannot answer, and the caller's own cancellation or deadline, keep
+// their identity and do NOT read as ErrProvider: one is a 501, the other is no
+// answer owed at all. A backend's OWN timeout, while the caller's context is
+// still live, is a slow backend, and does read as ErrProvider.
+func TestEvaluate_ProviderRefusalsAreNotBackendFailures(t *testing.T) {
+	base := standardProvider(t)
+	run := func(t *testing.T, p *methodFailingProvider, ctx context.Context) error {
+		t.Helper()
+		_, err := ecl.Evaluate(ctx, mustParse(t, `22298006`), p)
+		require.True(t, p.called["ConceptExists"], "the provider was never asked")
+		return err
+	}
+
+	t.Run("unsupported", func(t *testing.T) {
+		refusal := fmt.Errorf("%w: not here", ecl.ErrUnsupportedFeature)
+		err := run(t, &methodFailingProvider{base: base, fail: "ConceptExists", called: map[string]bool{}, cause: refusal}, context.Background())
+		require.ErrorIs(t, err, ecl.ErrUnsupportedFeature)
+		require.NotErrorIs(t, err, ecl.ErrProvider)
+	})
+	t.Run("caller canceled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		p := &methodFailingProvider{base: base, fail: "ConceptExists", called: map[string]bool{}, onFail: cancel, causeFromCtx: ctx}
+		err := run(t, p, ctx)
+		require.ErrorIs(t, err, context.Canceled)
+		require.NotErrorIs(t, err, ecl.ErrProvider)
+	})
+	t.Run("caller canceled, driver's own error", func(t *testing.T) {
+		// A driver often answers a canceled request with an error of its own
+		// that does not wrap context.Canceled.
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		p := &methodFailingProvider{base: base, fail: "ConceptExists", called: map[string]bool{}, onFail: cancel, cause: errors.New("conn closed")}
+		err := run(t, p, ctx)
+		require.ErrorIs(t, err, context.Canceled)
+		require.NotErrorIs(t, err, ecl.ErrProvider)
+	})
+	t.Run("caller canceled, cause already ErrProvider", func(t *testing.T) {
+		// A composed provider may hand back an error that already carries
+		// ErrProvider; once the caller has given up it must not read as one.
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		p := &methodFailingProvider{base: base, fail: "ConceptExists", called: map[string]bool{}, onFail: cancel, cause: fmt.Errorf("%w: inner", ecl.ErrProvider)}
+		err := run(t, p, ctx)
+		require.ErrorIs(t, err, context.Canceled)
+		require.NotErrorIs(t, err, ecl.ErrProvider)
+	})
+	t.Run("backend timeout, caller live", func(t *testing.T) {
+		err := run(t, &methodFailingProvider{base: base, fail: "ConceptExists", called: map[string]bool{}, cause: context.DeadlineExceeded}, context.Background())
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.ErrorIs(t, err, ecl.ErrProvider, "a backend's own timeout is a slow backend")
+	})
 }
 
 // methodFailingProvider delegates to base and fails the one method named by
@@ -86,14 +134,30 @@ type methodFailingProvider struct {
 	base   ecl.DataProvider
 	fail   string
 	called map[string]bool
+	cause  error // errBackendDown when nil
+
+	// onFail runs before failing, and causeFromCtx, when set, makes the
+	// failure that context's error: together they model a caller canceling
+	// while the provider works.
+	onFail       func()
+	causeFromCtx context.Context
 }
 
 func (f *methodFailingProvider) hit(method string) error {
 	f.called[method] = true
-	if method == f.fail {
-		return errBackendDown
+	if method != f.fail {
+		return nil
 	}
-	return nil
+	if f.onFail != nil {
+		f.onFail()
+	}
+	switch {
+	case f.causeFromCtx != nil:
+		return f.causeFromCtx.Err()
+	case f.cause != nil:
+		return f.cause
+	}
+	return errBackendDown
 }
 
 func (f *methodFailingProvider) Descendants(ctx context.Context, ids []string, self bool) (ecl.Set, error) {

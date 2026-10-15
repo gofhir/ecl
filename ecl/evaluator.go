@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"math/big"
 	"strconv"
 	"strings"
 
@@ -40,6 +42,55 @@ var ErrUnsupportedFeature = errors.New("unsupported ECL feature")
 //
 //	if errors.Is(err, ecl.ErrProvider) { /* the backend is unhealthy */ }
 var ErrProvider = errors.New("data provider error")
+
+// providerError classifies an error a DataProvider returned, at the one place
+// every call goes through. It wraps the cause with ErrProvider and the method,
+// keeping the cause reachable through errors.Is, except for two errors that are
+// not a failing backend: ErrUnsupportedFeature, which a capability returns to
+// refuse a form it cannot answer (501 rather than 503), and the caller's own
+// cancellation or deadline. Those pass through with the method named but no
+// ErrProvider.
+//
+// The second is decided by the caller's ctx, not by the error's identity: a
+// backend's own query timeout also matches context.DeadlineExceeded, and while
+// the caller's ctx is live that is a slow backend, which is exactly what
+// ErrProvider reports; once the caller's ctx is done, any error is the request
+// being abandoned.
+//
+// Before it existed, nine required methods returned their errors unwrapped
+// (H5 in docs/analisis-adversarial-2026-10-12.md), so `errors.Is(err,
+// ErrProvider)` held for some backend failures and not others.
+func providerError(ctx context.Context, method string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrUnsupportedFeature) {
+		return fmt.Errorf("%s: %w", method, err)
+	}
+	if cerr := ctx.Err(); cerr != nil {
+		// The caller gave up, whatever the backend reported for it: a driver
+		// often answers a canceled request with its own error ("conn closed")
+		// rather than one wrapping context.Canceled. Both stay reachable.
+		// The backend's own error is kept as text only: wrapping it as well
+		// could carry an ErrProvider it holds, and the request was abandoned.
+		if errors.Is(err, cerr) {
+			return fmt.Errorf("%s: %w", method, cerr)
+		}
+		return fmt.Errorf("%s: %w (backend reported: %v)", method, cerr, err) //nolint:errorlint // %v on purpose: see above
+	}
+	return fmt.Errorf("%w: %s: %w", ErrProvider, method, err)
+}
+
+// providerSet applies providerError to a provider call that returns a Set, so
+// a call site reads `return providerSet(ctx, "X")(provider.X(…))`.
+func providerSet(ctx context.Context, method string) func(Set, error) (Set, error) {
+	return func(s Set, err error) (Set, error) {
+		if err != nil {
+			return nil, providerError(ctx, method, err)
+		}
+		return s, nil
+	}
+}
 
 // Evaluate evaluates an ECL AST against the given DataProvider and returns
 // the set of matching SNOMED CT concept IDs.
@@ -101,10 +152,10 @@ func evaluateNode(ctx context.Context, expr ast.Expression, provider DataProvide
 	// ── Primitives ───────────────────────────────────────────────────────
 
 	case *ast.ConceptRef:
-		return provider.ConceptExists(ctx, []string{e.ID})
+		return providerSet(ctx, "ConceptExists")(provider.ConceptExists(ctx, []string{e.ID}))
 
 	case *ast.Any:
-		return provider.AllConcepts(ctx)
+		return providerSet(ctx, "AllConcepts")(provider.AllConcepts(ctx))
 
 	case *ast.Nested:
 		return Evaluate(ctx, e.Inner, provider)
@@ -116,56 +167,56 @@ func evaluateNode(ctx context.Context, expr ast.Expression, provider DataProvide
 		if err != nil {
 			return nil, fmt.Errorf("evaluating %T: %w", expr, err)
 		}
-		return provider.Descendants(ctx, toIDSlice(inner), false)
+		return providerSet(ctx, "Descendants")(provider.Descendants(ctx, toIDSlice(inner), false))
 
 	case *ast.DescendantOrSelfOf:
 		inner, err := Evaluate(ctx, e.Operand, provider)
 		if err != nil {
 			return nil, fmt.Errorf("evaluating %T: %w", expr, err)
 		}
-		return provider.Descendants(ctx, toIDSlice(inner), true)
+		return providerSet(ctx, "Descendants")(provider.Descendants(ctx, toIDSlice(inner), true))
 
 	case *ast.ChildOf:
 		inner, err := Evaluate(ctx, e.Operand, provider)
 		if err != nil {
 			return nil, fmt.Errorf("evaluating %T: %w", expr, err)
 		}
-		return provider.Children(ctx, toIDSlice(inner), false)
+		return providerSet(ctx, "Children")(provider.Children(ctx, toIDSlice(inner), false))
 
 	case *ast.ChildOrSelfOf:
 		inner, err := Evaluate(ctx, e.Operand, provider)
 		if err != nil {
 			return nil, fmt.Errorf("evaluating %T: %w", expr, err)
 		}
-		return provider.Children(ctx, toIDSlice(inner), true)
+		return providerSet(ctx, "Children")(provider.Children(ctx, toIDSlice(inner), true))
 
 	case *ast.AncestorOf:
 		inner, err := Evaluate(ctx, e.Operand, provider)
 		if err != nil {
 			return nil, fmt.Errorf("evaluating %T: %w", expr, err)
 		}
-		return provider.Ancestors(ctx, toIDSlice(inner), false)
+		return providerSet(ctx, "Ancestors")(provider.Ancestors(ctx, toIDSlice(inner), false))
 
 	case *ast.AncestorOrSelfOf:
 		inner, err := Evaluate(ctx, e.Operand, provider)
 		if err != nil {
 			return nil, fmt.Errorf("evaluating %T: %w", expr, err)
 		}
-		return provider.Ancestors(ctx, toIDSlice(inner), true)
+		return providerSet(ctx, "Ancestors")(provider.Ancestors(ctx, toIDSlice(inner), true))
 
 	case *ast.ParentOf:
 		inner, err := Evaluate(ctx, e.Operand, provider)
 		if err != nil {
 			return nil, fmt.Errorf("evaluating %T: %w", expr, err)
 		}
-		return provider.Parents(ctx, toIDSlice(inner), false)
+		return providerSet(ctx, "Parents")(provider.Parents(ctx, toIDSlice(inner), false))
 
 	case *ast.ParentOrSelfOf:
 		inner, err := Evaluate(ctx, e.Operand, provider)
 		if err != nil {
 			return nil, fmt.Errorf("evaluating %T: %w", expr, err)
 		}
-		return provider.Parents(ctx, toIDSlice(inner), true)
+		return providerSet(ctx, "Parents")(provider.Parents(ctx, toIDSlice(inner), true))
 
 	// ── Set operators ────────────────────────────────────────────────────
 
@@ -229,7 +280,7 @@ func evaluateNode(ctx context.Context, expr ast.Expression, provider DataProvide
 		if err != nil {
 			return nil, fmt.Errorf("evaluating %T attribute: %w", expr, err)
 		}
-		return provider.RelationshipTargets(ctx, source, typeIDs)
+		return providerSet(ctx, "RelationshipTargets")(provider.RelationshipTargets(ctx, source, typeIDs))
 
 	// ── Filters (Phase 4) ────────────────────────────────────────────────
 
@@ -250,7 +301,7 @@ func evaluateNode(ctx context.Context, expr ast.Expression, provider DataProvide
 		}
 		historical, err := provider.HistoricalAssociations(ctx, base, profile)
 		if err != nil {
-			return nil, fmt.Errorf("%w: HistoricalAssociations: %w", ErrProvider, err)
+			return nil, providerError(ctx, "HistoricalAssociations", err)
 		}
 		if historical == nil {
 			return base, nil
@@ -281,10 +332,10 @@ func evaluateNode(ctx context.Context, expr ast.Expression, provider DataProvide
 		if err != nil {
 			return nil, fmt.Errorf("evaluating %T: %w", expr, err)
 		}
-		return provider.RefsetsContainingMembers(ctx, toIDSlice(operandIDs))
+		return providerSet(ctx, "RefsetsContainingMembers")(provider.RefsetsContainingMembers(ctx, toIDSlice(operandIDs)))
 
 	case *ast.AltIdentifier:
-		return provider.ResolveIdentifier(ctx, e.Scheme, e.Code)
+		return providerSet(ctx, "ResolveIdentifier")(provider.ResolveIdentifier(ctx, e.Scheme, e.Code))
 
 	default:
 		return nil, fmt.Errorf("unsupported AST node type: %T", expr)
@@ -525,7 +576,7 @@ func filterByAttribute(ctx context.Context, focus Set, attr *ast.Attribute, prov
 			inbound, err = provider.RelationshipTargets(ctx, valueSet, typeIDs)
 		}
 		if err != nil {
-			return nil, fmt.Errorf("%w: reverse attribute lookup: %w", ErrProvider, err)
+			return nil, providerError(ctx, "reverse attribute lookup", err)
 		}
 		return focus.Intersect(nonNil(inbound)), nil
 	}
@@ -587,7 +638,7 @@ func filterByReverseCounted(
 ) (Set, error) {
 	inbound, err := provider.InboundRelationships(ctx, focus, typeIDs)
 	if err != nil {
-		return nil, fmt.Errorf("%w: InboundRelationships: %w", ErrProvider, err)
+		return nil, providerError(ctx, "InboundRelationships", err)
 	}
 
 	out := newMapSet()
@@ -648,7 +699,7 @@ func concreteValuesFor(ctx context.Context, provider DataProvider, focus Set, ty
 	if batch, ok := provider.(BatchConcreteValuesProvider); ok {
 		out, err := batch.ConcreteValuesBatch(ctx, ids, typeIDs)
 		if err != nil {
-			return nil, fmt.Errorf("%w: ConcreteValuesBatch: %w", ErrProvider, err)
+			return nil, providerError(ctx, "ConcreteValuesBatch", err)
 		}
 		if out == nil {
 			out = map[string]map[string][]ConcreteValue{}
@@ -664,7 +715,7 @@ func concreteValuesFor(ctx context.Context, provider DataProvider, focus Set, ty
 		for _, typeID := range typeIDs {
 			values, err := provider.ConcreteValues(ctx, id, typeID)
 			if err != nil {
-				return nil, fmt.Errorf("%w: ConcreteValues(%s, %s): %w", ErrProvider, id, typeID, err)
+				return nil, providerError(ctx, fmt.Sprintf("ConcreteValues(%s, %s)", id, typeID), err)
 			}
 			if len(values) == 0 {
 				continue
@@ -694,7 +745,7 @@ func propertiesFor(ctx context.Context, provider DataProvider, focus Set) (map[s
 	if batch, ok := provider.(BatchPropertiesProvider); ok {
 		out, err := batch.PropertiesByGroupBatch(ctx, ids)
 		if err != nil {
-			return nil, fmt.Errorf("%w: PropertiesByGroupBatch: %w", ErrProvider, err)
+			return nil, providerError(ctx, "PropertiesByGroupBatch", err)
 		}
 		if out == nil {
 			out = map[string]map[int][]Relationship{}
@@ -709,7 +760,7 @@ func propertiesFor(ctx context.Context, provider DataProvider, focus Set) (map[s
 		}
 		groups, err := provider.PropertiesByGroup(ctx, id)
 		if err != nil {
-			return nil, fmt.Errorf("%w: PropertiesByGroup(%s): %w", ErrProvider, id, err)
+			return nil, providerError(ctx, fmt.Sprintf("PropertiesByGroup(%s)", id), err)
 		}
 		out[id] = groups
 	}
@@ -829,7 +880,7 @@ type attrClause struct {
 	reverse     bool
 	// Concrete value fields (mutually exclusive with valueSet).
 	isConcrete   bool
-	numericVal   float64
+	numericVal   number
 	stringVal    string
 	boolVal      bool
 	concreteKind string // concreteKindNumeric, concreteKindString, concreteKindBoolean
@@ -961,12 +1012,11 @@ func resolveAttrClause(ctx context.Context, a *ast.Attribute, provider DataProvi
 	if isConcreteValue(a.Value) {
 		c := attrClause{op: a.Op, typeIDs: typeIDs, cardinality: a.Cardinality, isConcrete: true, reverse: a.Reverse}
 		switch v := a.Value.(type) {
-		case *ast.IntegerValue:
+		case *ast.IntegerValue, *ast.DecimalValue:
 			c.concreteKind = concreteKindNumeric
-			c.numericVal = float64(v.Value)
-		case *ast.DecimalValue:
-			c.concreteKind = concreteKindNumeric
-			c.numericVal = v.Value
+			if c.numericVal, err = numericLiteral(v); err != nil {
+				return attrClause{}, err
+			}
 		case *ast.StringValue:
 			c.concreteKind = concreteKindString
 			c.stringVal = v.Value
@@ -1069,11 +1119,11 @@ func matchConcreteValue(cv *ConcreteValue, c attrClause) bool {
 		if cv.Kind != "integer" && cv.Kind != "decimal" {
 			return false
 		}
-		f, err := strconv.ParseFloat(cv.Value, 64)
-		if err != nil {
+		stored, ok := parseNumber(cv.Value)
+		if !ok {
 			return false
 		}
-		return compareFloat(f, c.op, c.numericVal)
+		return compareNumbers(stored, c.op, c.numericVal)
 	case concreteKindString:
 		if cv.Kind != "string" {
 			return false
@@ -1236,7 +1286,7 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 		}
 		matches, err := provider.MatchDialect(ctx, result, dOpts)
 		if err != nil {
-			return nil, fmt.Errorf("%w: MatchDialect: %w", ErrProvider, err)
+			return nil, providerError(ctx, "MatchDialect", err)
 		}
 		if matches == nil {
 			matches = NewSet()
@@ -1270,7 +1320,7 @@ func evaluateFiltered(ctx context.Context, e *ast.Filtered, provider DataProvide
 			for i, opts := range plan.calls {
 				got, err := provider.FilterConcepts(ctx, result, opts)
 				if err != nil {
-					return nil, fmt.Errorf("%w: FilterConcepts: %w", ErrProvider, err)
+					return nil, providerError(ctx, "FilterConcepts", err)
 				}
 				switch {
 				case i == 0:
@@ -1303,7 +1353,7 @@ func anyDescription(ctx context.Context, provider DataProvider) (Set, error) {
 		flag := active
 		got, err := provider.MatchDescription(ctx, DescriptionFilterOpts{Active: &flag})
 		if err != nil {
-			return nil, fmt.Errorf("%w: MatchDescription: %w", ErrProvider, err)
+			return nil, providerError(ctx, "MatchDescription", err)
 		}
 		out = out.Union(nonNil(got))
 	}
@@ -1323,9 +1373,19 @@ func answersDescriptionMetadata(provider DataProvider) bool {
 // moduleId or effectiveTime clause.
 func namesDescriptionMetadata(filters []ast.Filter) bool {
 	for _, f := range filters {
-		switch f.(type) {
-		case *ast.ActiveFilter, *ast.ModuleFilter, *ast.EffectiveTimeFilter:
+		switch x := f.(type) {
+		case *ast.ActiveFilter:
+			// `active = *` too: it is answered through anyDescription, which
+			// asks with the Active field.
 			return true
+		case *ast.ModuleFilter:
+			if moduleConstrains(x) {
+				return true
+			}
+		case *ast.EffectiveTimeFilter:
+			if len(effectiveTimeValues(x)) > 0 {
+				return true
+			}
 		}
 	}
 	return false
@@ -1425,6 +1485,11 @@ func buildConceptFilterClauses(filters []ast.Filter) []conceptFilterClause {
 	for _, f := range filters {
 		if a, ok := f.(*ast.ActiveFilter); ok && a.Any {
 			// Either value: every concept is active or inactive.
+			continue
+		}
+		if m, ok := f.(*ast.ModuleFilter); ok && !moduleConstrains(m) {
+			// Only a hand-built tree names no module; it constrains nothing,
+			// as in the other families.
 			continue
 		}
 		negate := false
@@ -1618,54 +1683,41 @@ func matchDescriptionFilters(ctx context.Context, descFilters []ast.Filter, prov
 			ErrUnsupportedFeature, kind)
 	}
 
-	if idFilter != nil {
+	calls := descriptionCalls(descFilters, opts)
+	switch {
+	case idFilter != nil:
 		// Still one call per term: the id constraint composes with a term set the
 		// same way every sibling clause does.
-		out := NewSet()
-		for i, callOpts := range descriptionCalls(descFilters, opts) {
-			matches, err := idProvider.MatchDescriptionByID(ctx, DescriptionIDFilterOpts{
+		return unionOfCalls(ctx, calls, "MatchDescriptionByID", func(callOpts DescriptionFilterOpts) (Set, error) {
+			return idProvider.MatchDescriptionByID(ctx, DescriptionIDFilterOpts{
 				Opts:           callOpts,
 				DescriptionIDs: idFilter.IDs,
 				Negate:         idFilter.Op == "!=",
 			})
-			if err != nil {
-				return nil, fmt.Errorf("%w: MatchDescriptionByID: %w", ErrProvider, err)
-			}
-			if i == 0 {
-				out = nonNil(matches)
-				continue
-			}
-			out = out.Union(nonNil(matches))
-		}
-		return out, nil
-	}
-
-	if negated {
+		})
+	case negated:
 		// Fanned out like the positive path: a positive set in a sibling clause
 		// is any-of, so the union of one negated call per value is exact. A
 		// single call carried only the first value of the set.
-		out := NewSet()
-		for i, callOpts := range descriptionCalls(descFilters, opts) {
-			matches, err := negatingProvider.MatchDescriptionNegated(ctx, negatedOptsFor(descFilters, callOpts))
-			if err != nil {
-				return nil, fmt.Errorf("%w: MatchDescriptionNegated: %w", ErrProvider, err)
-			}
-			if i == 0 {
-				out = nonNil(matches)
-				continue
-			}
-			out = out.Union(nonNil(matches))
-		}
-		return out, nil
+		return unionOfCalls(ctx, calls, "MatchDescriptionNegated", func(callOpts DescriptionFilterOpts) (Set, error) {
+			return negatingProvider.MatchDescriptionNegated(ctx, negatedOptsFor(descFilters, callOpts))
+		})
 	}
-
 	// One call per term, unioned. A single term — the overwhelmingly common case —
 	// is one call with the same Opts as before.
+	return unionOfCalls(ctx, calls, "MatchDescription", func(callOpts DescriptionFilterOpts) (Set, error) {
+		return provider.MatchDescription(ctx, callOpts)
+	})
+}
+
+// unionOfCalls makes one provider call per DescriptionFilterOpts and unions the
+// results; each set the calls fan out is any-of.
+func unionOfCalls(ctx context.Context, calls []DescriptionFilterOpts, method string, call func(DescriptionFilterOpts) (Set, error)) (Set, error) {
 	out := NewSet()
-	for i, callOpts := range descriptionCalls(descFilters, opts) {
-		matches, err := provider.MatchDescription(ctx, callOpts)
+	for i, callOpts := range calls {
+		matches, err := call(callOpts)
 		if err != nil {
-			return nil, fmt.Errorf("%w: MatchDescription: %w", ErrProvider, err)
+			return nil, providerError(ctx, method, err)
 		}
 		if i == 0 {
 			out = nonNil(matches)
@@ -1682,15 +1734,8 @@ func matchDescriptionFilters(ctx context.Context, descFilters []ast.Filter, prov
 // is exact, and each call keeps the sibling clauses.
 func descriptionCalls(filters []ast.Filter, base DescriptionFilterOpts) []DescriptionFilterOpts {
 	calls := termCalls(filters, base)
-	for _, f := range filters {
-		et, ok := f.(*ast.EffectiveTimeFilter)
-		if !ok {
-			continue
-		}
+	if _, et := fannedOutSets(filters); et != nil {
 		values := effectiveTimeValues(et)
-		if len(values) <= 1 {
-			continue
-		}
 		out := make([]DescriptionFilterOpts, 0, len(calls)*len(values))
 		for _, c := range calls {
 			for _, v := range values {
@@ -1698,10 +1743,34 @@ func descriptionCalls(filters []ast.Filter, base DescriptionFilterOpts) []Descri
 				out = append(out, c)
 			}
 		}
-		return out
+		calls = out
 	}
 	return calls
 }
+
+// checkDescriptionFanOut refuses a block whose term set and effectiveTime set
+// multiply into more than maxDescriptionCalls provider calls. It reads only the
+// AST, so it runs before any operand is resolved through the provider. The
+// product comes from an expression a caller supplies; separate blocks would not
+// be the same query — each would be satisfied on its own — so the advice is a
+// disjunction, which keeps the any-of.
+func checkDescriptionFanOut(filters []ast.Filter) error {
+	tf, et := fannedOutSets(filters)
+	if tf == nil || et == nil {
+		// One set alone is one call per value, as it always was.
+		return nil
+	}
+	terms, times := len(tf.Terms), len(effectiveTimeValues(et))
+	if terms*times > maxDescriptionCalls {
+		return fmt.Errorf("%w: this description filter combines a term set and an effectiveTime set into %d provider calls, above the limit of %d; write it as a disjunction of smaller filtered expressions, (X {{ D … }}) OR (X {{ D … }})",
+			ErrUnsupportedFeature, terms*times, maxDescriptionCalls)
+	}
+	return nil
+}
+
+// maxDescriptionCalls bounds the product of a term set and an effectiveTime set
+// in one block. A term set alone is one call per term, as it always was.
+const maxDescriptionCalls = 256
 
 // termCalls expands a positive term SET into one DescriptionFilterOpts per term.
 //
@@ -1717,11 +1786,7 @@ func descriptionCalls(filters []ast.Filter, base DescriptionFilterOpts) []Descri
 // Each term carries its own match type ("match" or "wild"), so the type travels
 // with its term rather than being taken from the first one.
 func termCalls(filters []ast.Filter, base DescriptionFilterOpts) []DescriptionFilterOpts {
-	for _, f := range filters {
-		tf, ok := f.(*ast.TermFilter)
-		if !ok || len(tf.Terms) <= 1 {
-			continue
-		}
+	if tf, _ := fannedOutSets(filters); tf != nil {
 		out := make([]DescriptionFilterOpts, 0, len(tf.Terms))
 		for _, t := range tf.Terms {
 			opts := base
@@ -1732,6 +1797,26 @@ func termCalls(filters []ast.Filter, base DescriptionFilterOpts) []DescriptionFi
 		return out
 	}
 	return []DescriptionFilterOpts{base}
+}
+
+// fannedOutSets returns the value sets descriptionCalls expands into one call
+// per value: the first term set and the first effectiveTime set of the block,
+// nil where there is none. The fan-out limit asks here too, as termCalls and
+// descriptionCalls do, so it counts the calls actually made.
+func fannedOutSets(filters []ast.Filter) (terms *ast.TermFilter, times *ast.EffectiveTimeFilter) {
+	for _, f := range filters {
+		switch x := f.(type) {
+		case *ast.TermFilter:
+			if terms == nil && len(x.Terms) > 1 {
+				terms = x
+			}
+		case *ast.EffectiveTimeFilter:
+			if times == nil && len(effectiveTimeValues(x)) > 1 {
+				times = x
+			}
+		}
+	}
+	return terms, times
 }
 
 // negatedOptsFor carries each clause's polarity alongside the values, so the
@@ -1828,6 +1913,9 @@ func negatedDescriptionFilter(filters []ast.Filter) (string, bool) {
 // used to widen a query to every descendant, before it was rejected and then
 // given ecl.DescriptionIDProvider.
 func unsupportedDescriptionFilter(filters []ast.Filter) error {
+	if err := checkDescriptionFanOut(filters); err != nil {
+		return err
+	}
 	for _, f := range filters {
 		x, ok := f.(*ast.TermFilter)
 		if ok {
@@ -1993,6 +2081,12 @@ func (b *descriptionOptsBuilder) addActive(x *ast.ActiveFilter) {
 }
 
 func (b *descriptionOptsBuilder) addModule(ctx context.Context, x *ast.ModuleFilter, provider DataProvider) error {
+	if !moduleConstrains(x) {
+		// Only a hand-built tree names no module; it constrains nothing, as in
+		// the other families.
+		b.dropped = true
+		return nil
+	}
 	clause, namesNothing, err := resolveModuleIDs(ctx, x, provider)
 	switch {
 	case err != nil:
@@ -2126,7 +2220,7 @@ func appendAliasDialects(ctx context.Context, opts *DialectFilterOpts, aliases [
 	}
 	resolved, err := resolver.ResolveDialectAliases(ctx, names)
 	if err != nil {
-		return fmt.Errorf("%w: ResolveDialectAliases: %w", ErrProvider, err)
+		return providerError(ctx, "ResolveDialectAliases", err)
 	}
 
 	for _, a := range aliases {
@@ -2161,18 +2255,22 @@ func appendAliasDialects(ctx context.Context, opts *DialectFilterOpts, aliases [
 //
 // Used by member field filters, whose fields hold arbitrary values (map targets,
 // orders, flags) rather than concept IDs.
-func literalText(e ast.Expression) (string, bool) {
+func literalText(e ast.Expression) (text string, ok bool, err error) {
 	switch v := e.(type) {
 	case *ast.StringValue:
-		return v.Value, true
-	case *ast.IntegerValue:
-		return strconv.Itoa(v.Value), true
-	case *ast.DecimalValue:
-		return strconv.FormatFloat(v.Value, 'f', -1, 64), true
+		return v.Value, true, nil
+	case *ast.IntegerValue, *ast.DecimalValue:
+		// Canonical, so a member field compared by text sees "1.5" for #1.50;
+		// validated and read like an attribute comparison's literal.
+		n, err := numericLiteral(v)
+		if err != nil {
+			return "", false, err
+		}
+		return canonicalNumber(n), true, nil
 	case *ast.BooleanValue:
-		return strconv.FormatBool(v.Value), true
+		return strconv.FormatBool(v.Value), true, nil
 	}
-	return "", false
+	return "", false, nil
 }
 
 // isConcreteValue reports whether an Attribute.Value is a concrete literal
@@ -2200,19 +2298,19 @@ func filterByConcreteValue(ctx context.Context, focus Set, attr *ast.Attribute, 
 	// Extract the literal value. Numeric operators require a numeric literal.
 	var (
 		haveNumeric bool
-		numeric     float64
+		numeric     number
 		haveString  bool
 		strVal      string
 		haveBool    bool
 		boolVal     bool
 	)
 	switch v := attr.Value.(type) {
-	case *ast.IntegerValue:
+	case *ast.IntegerValue, *ast.DecimalValue:
 		haveNumeric = true
-		numeric = float64(v.Value)
-	case *ast.DecimalValue:
-		haveNumeric = true
-		numeric = v.Value
+		var err error
+		if numeric, err = numericLiteral(v); err != nil {
+			return nil, err
+		}
 	case *ast.StringValue:
 		haveString = true
 		strVal = v.Value
@@ -2257,11 +2355,11 @@ func filterByConcreteValue(ctx context.Context, focus Set, attr *ast.Attribute, 
 			for _, cv := range valuesByConcept[id][typeID] {
 				switch {
 				case haveNumeric && (cv.Kind == "integer" || cv.Kind == "decimal"):
-					f, parseErr := strconv.ParseFloat(cv.Value, 64)
-					if parseErr != nil {
+					stored, ok := parseNumber(cv.Value)
+					if !ok {
 						continue
 					}
-					if compareFloat(f, attr.Op, numeric) {
+					if compareNumbers(stored, attr.Op, numeric) {
 						matches++
 					}
 				case haveString && cv.Kind == "string":
@@ -2291,21 +2389,348 @@ func filterByConcreteValue(ctx context.Context, focus Set, attr *ast.Attribute, 
 	return out, nil
 }
 
-// compareFloat applies the given operator to a (stored) and b (expected).
-func compareFloat(a float64, op string, b float64) bool {
+// number is an exact numeric value, compared as cheaply as its form allows:
+//
+//   - an integer that fits int64, compared as one;
+//   - a value of at most 15 significant digits, compared as its float64. A
+//     correctly rounded conversion preserves order, and float64 holds 15.95
+//     decimal digits, so two such values convert to floats that compare
+//     exactly as the decimals do;
+//   - two values of different sign or decimal magnitude, compared by those,
+//     which the scan reads off the text without building either number;
+//   - anything else, as an exact rational, built only when a comparison needs
+//     it.
+//
+// Nearly every concrete value is one of the first two, which allocate nothing.
+type number struct {
+	i64     int64
+	isInt64 bool
+	f64     float64
+	isFloat bool // f64 compares exactly (see above)
+
+	// sign is -1, 0 or 1, and mag is floor(log10 |value|) for a non-zero
+	// value, both read off the text.
+	sign int
+	mag  int64
+
+	text string   // for the rational, built on demand
+	r    *big.Rat // the rational, when already built
+}
+
+// rat returns the exact value, or nil for a text big.Rat cannot hold — an
+// exponent beyond int64, which only a stored value can have.
+func (n number) rat() *big.Rat {
+	switch {
+	case n.r != nil:
+		return n.r
+	case n.isInt64:
+		return new(big.Rat).SetInt64(n.i64)
+	}
+	if r, ok := new(big.Rat).SetString(n.text); ok {
+		return r
+	}
+	return nil
+}
+
+// minNormalFloat64 is the smallest positive normal float64.
+const minNormalFloat64 = 2.2250738585072014e-308
+
+// maxNumberDigits bounds the digits and the exponent of a LITERAL, which comes
+// from an expression a caller supplies: an exact rational for 1e1000000 or a
+// 200000-digit fraction costs milliseconds to build and to compare against,
+// once per stored value. No concrete value comes near it.
+const maxNumberDigits = 4000
+
+// maxStoredDigits is the bound for a STORED value, terminology data rather
+// than caller input, beyond which it is not built as a rational up front. It
+// is still compared exactly: by sign and magnitude when those differ, which
+// they do from every literal the literal bound admits whenever the stored
+// exponent is beyond it, and as a rational otherwise.
+const maxStoredDigits = 100000
+
+// exponent is what scanExponent found.
+type exponent int
+
+const (
+	noExponent       exponent = iota
+	exponentOK                // present and within the bound
+	exponentTooLarge          // well formed, beyond the bound
+	exponentBad               // malformed
+)
+
+// scanExponent reads an optional exponent of parseNumber's form starting at i
+// and returns where it ends, what it found and its value, saturated for one
+// too long to hold.
+func scanExponent(s string, i, limit int) (end int, state exponent, value int64) {
+	if i >= len(s) || (s[i] != 'e' && s[i] != 'E') {
+		return i, noExponent, 0
+	}
+	i++
+	neg := false
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		neg = s[i] == '-'
+		i++
+	}
+	start := i
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == start {
+		return i, exponentBad, 0
+	}
+	v, err := strconv.ParseInt(s[start:i], 10, 64)
+	if err != nil || v > math.MaxInt64/4 {
+		v = math.MaxInt64 / 4 // beyond any digit count; sums below stay in range
+	}
+	if neg {
+		v = -v
+	}
+	state = exponentOK
+	if v > int64(limit) || v < -int64(limit) {
+		state = exponentTooLarge
+	}
+	return i, state, v
+}
+
+// mantissa is what scanMantissa found: the digits before the exponent.
+type mantissa struct {
+	end         int  // where the mantissa ends
+	digits      int  // integer and fraction digits
+	significant int  // digits from the first non-zero one
+	fraction    bool // a "." was present
+	negative    bool
+	// lead is the decimal position of the first non-zero digit: 0 for the
+	// units, 1 for the tens, -1 for the tenths; valid when significant > 0.
+	lead int64
+}
+
+// scanMantissa reads the sign, integer part and optional fraction of s.
+func scanMantissa(s string) mantissa {
+	var m mantissa
+	i := 0
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		m.negative = s[i] == '-'
+		i++
+	}
+	intDigits, fracSeen := 0, 0
+	for ; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '.' && !m.fraction:
+			m.fraction = true
+			continue
+		case c < '0' || c > '9':
+			m.end = i
+			return m.withLead(intDigits)
+		}
+		m.digits++
+		if m.fraction {
+			fracSeen++
+		} else {
+			intDigits++
+		}
+		if c != '0' && m.significant == 0 {
+			if m.fraction {
+				m.lead = -int64(fracSeen)
+			} else {
+				m.lead = int64(intDigits) // fixed up once the integer part is known
+			}
+		}
+		if c != '0' || m.significant > 0 {
+			m.significant++
+		}
+	}
+	m.end = i
+	return m.withLead(intDigits)
+}
+
+// withLead turns a lead counted from the left of the integer part into a
+// position counted from the units.
+func (m mantissa) withLead(intDigits int) mantissa {
+	if m.significant > 0 && m.lead > 0 {
+		m.lead = int64(intDigits) - m.lead
+	}
+	return m
+}
+
+// parseNumber reads a STORED decimal number — sign, digits, an optional
+// fraction and an optional exponent, the forms RF2 writes concrete values in —
+// or reports that s is not one. Converting through float64 alone, as this used
+// to, made 2^53+1 equal to 2^53 (H4 in docs/analisis-adversarial-2026-10-12.md).
+// It is a hand-written scan rather than big.Rat.SetString, which also takes
+// fractions ("1/2") and hexadecimal ("0x10"), and rather than a regexp,
+// because it runs once per stored value. A value beyond maxStoredDigits is
+// kept by sign, magnitude and text, and compared exactly all the same.
+func parseNumber(s string) (number, bool) {
+	n, ok, beyond := scanNumber(s, maxStoredDigits)
+	return n, ok || beyond
+}
+
+// parseNumberExact reads a LITERAL: like parseNumber, but a number beyond the
+// bound given is refused.
+func parseNumberExact(s string, limit int) (number, bool) {
+	n, ok, _ := scanNumber(s, limit)
+	return n, ok
+}
+
+// scanNumber reads a decimal number. The beyond result reports one that is well
+// formed but over the bound, which comes back with its sign, magnitude and text
+// only.
+func scanNumber(s string, limit int) (n number, ok, beyond bool) {
+	m := scanMantissa(s)
+	if m.digits == 0 {
+		return number{}, false, false
+	}
+	end, exp, expValue := scanExponent(s, m.end, limit)
+	if end != len(s) || exp == exponentBad {
+		return number{}, false, false
+	}
+	n = number{text: s}
+	if m.significant > 0 {
+		n.sign, n.mag = 1, m.lead+expValue
+		if m.negative {
+			n.sign = -1
+		}
+	}
+	if exp == exponentTooLarge || m.digits > limit {
+		return n, false, true
+	}
+	if !m.fraction && exp == noExponent {
+		if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+			n.i64, n.isInt64 = v, true
+			if v >= -1<<53 && v <= 1<<53 {
+				n.f64, n.isFloat = float64(v), true // exact, no second parse
+				return n, true, false
+			}
+		}
+	}
+	if m.significant <= 15 {
+		// Below the smallest normal float64 the 15-digit guarantee no longer
+		// holds, and a non-zero value may underflow to zero.
+		if f, err := strconv.ParseFloat(s, 64); err == nil && !math.IsInf(f, 0) && (f == 0 && n.sign == 0 || math.Abs(f) >= minNormalFloat64) {
+			n.f64, n.isFloat = f, true
+		}
+	}
+	return n, true, false
+}
+
+// numberText returns a numeric literal's text. Text, as written, wins: it is
+// the exact literal, and a hand-built node may set only Text. The one
+// exception is a node whose Value was edited after parsing — a non-zero Value
+// the Text no longer says — where the new Value is meant.
+func numberText(e ast.Expression) (string, error) {
+	switch v := e.(type) {
+	case *ast.IntegerValue:
+		if v.Text == "" {
+			return strconv.Itoa(v.Value), nil
+		}
+		n, err := strconv.Atoi(v.Text)
+		if agrees := err == nil && n == v.Value; v.Value != 0 && !agrees {
+			return strconv.Itoa(v.Value), nil
+		}
+		return v.Text, nil
+	case *ast.DecimalValue:
+		if v.Text != "" {
+			if f, err := strconv.ParseFloat(v.Text, 64); v.Value == 0 || err == nil && f == v.Value {
+				return v.Text, nil
+			}
+		}
+		if math.IsNaN(v.Value) || math.IsInf(v.Value, 0) {
+			return "", fmt.Errorf("%w: numeric literal %v is not a finite number", ErrUnsupportedFeature, v.Value)
+		}
+		return strconv.FormatFloat(v.Value, 'f', -1, 64), nil
+	}
+	return "", fmt.Errorf("numberText: %T is not a numeric literal", e)
+}
+
+// numericLiteral returns the exact value of an integer or decimal literal.
+func numericLiteral(e ast.Expression) (number, error) {
+	text, err := numberText(e)
+	if err != nil {
+		return number{}, err
+	}
+	// Exact or refused: a literal comes from the expression, so one beyond
+	// the bound is the caller's to shorten, not an approximation to accept.
+	n, ok := parseNumberExact(text, maxNumberDigits)
+	if !ok {
+		return number{}, fmt.Errorf("%w: numeric literal %q is not a decimal number of at most %d digits", ErrUnsupportedFeature, text, maxNumberDigits)
+	}
+	n.r = n.rat() // built once for the clause, not once per stored value
+	return n, nil
+}
+
+// canonicalNumber writes an exact value in canonical decimal form, for a
+// comparison by TEXT: no "+", no trailing zeros, and zero without a sign.
+// `#+1`, `#1.0` and `#-0` reach a member field as "1", "1" and "0", the form a
+// stored value is written in. Every value here is a finite decimal, so its
+// denominator is 2^a·5^b and max(a, b) fraction digits write it exactly.
+func canonicalNumber(n number) string {
+	r := n.rat()
+	if r == nil {
+		return n.text
+	}
+	if r.IsInt() {
+		return r.Num().String()
+	}
+	d := new(big.Int).Set(r.Denom())
+	two, five, zero := big.NewInt(2), big.NewInt(5), new(big.Int)
+	twos, fives := 0, 0
+	for mod := new(big.Int); mod.Mod(d, two).Cmp(zero) == 0; twos++ {
+		d.Quo(d, two)
+	}
+	for mod := new(big.Int); mod.Mod(d, five).Cmp(zero) == 0; fives++ {
+		d.Quo(d, five)
+	}
+	return strings.TrimRight(r.FloatString(max(twos, fives)), "0")
+}
+
+func cmpOrdered[T int64 | float64 | int](a, b T) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
+}
+
+// compareNumbers applies the given operator to a (stored) and b (expected),
+// exactly. Integers and decimals compare by value, as they always have.
+func compareNumbers(a number, op string, b number) bool {
+	var c int
+	switch {
+	case a.isInt64 && b.isInt64:
+		c = cmpOrdered(a.i64, b.i64)
+	case a.isFloat && b.isFloat:
+		c = cmpOrdered(a.f64, b.f64)
+	case a.sign != b.sign:
+		c = cmpOrdered(a.sign, b.sign)
+	case a.sign == 0:
+		// Both zero, whatever their exponents say: 0e99999999999999999999 is 0.
+	case a.mag != b.mag:
+		// Same sign, different decimal magnitude: the larger magnitude is the
+		// larger value for positives and the smaller for negatives.
+		c = a.sign * cmpOrdered(a.mag, b.mag)
+	default:
+		ra, rb := a.rat(), b.rat()
+		if ra == nil || rb == nil {
+			return false // not a number big.Rat can hold; it matches nothing
+		}
+		c = ra.Cmp(rb)
+	}
 	switch op {
 	case "=":
-		return a == b
+		return c == 0
 	case "!=":
-		return a != b
+		return c != 0
 	case "<":
-		return a < b
+		return c < 0
 	case "<=":
-		return a <= b
+		return c <= 0
 	case ">":
-		return a > b
+		return c > 0
 	case ">=":
-		return a >= b
+		return c >= 0
 	}
 	return false
 }
@@ -2360,7 +2785,7 @@ func topOfSet(ctx context.Context, baseSet Set, provider DataProvider) (Set, err
 		}
 		ancestors, err := provider.Ancestors(ctx, []string{id}, false)
 		if err != nil {
-			iterErr = fmt.Errorf("%w: Ancestors(%s): %w", ErrProvider, id, err)
+			iterErr = providerError(ctx, fmt.Sprintf("Ancestors(%s)", id), err)
 			return false
 		}
 		if ancestors == nil || ancestors.Intersect(baseSet).Len() == 0 {
@@ -2395,7 +2820,7 @@ func bottomOfSet(ctx context.Context, baseSet Set, provider DataProvider) (Set, 
 		}
 		descendants, err := provider.Descendants(ctx, []string{id}, false)
 		if err != nil {
-			iterErr = fmt.Errorf("%w: Descendants(%s): %w", ErrProvider, id, err)
+			iterErr = providerError(ctx, fmt.Sprintf("Descendants(%s)", id), err)
 			return false
 		}
 		if descendants == nil || descendants.Intersect(baseSet).Len() == 0 {
@@ -2457,23 +2882,16 @@ func evaluateMemberOf(ctx context.Context, e *ast.MemberOf, filters []MemberFilt
 			Filters:   filters,
 		})
 		if err != nil {
-			// A provider refusing a FIELD is a capability limit, not a backend
-			// failure: only the provider knows which member fields hold component
-			// ids, so "mapTarget cannot be a Set of concept ids" has to come from
-			// there. Wrapping that in ErrProvider as well would make a CLI answer
-			// 503 for an expression that will never work, however healthy the
-			// backend is.
-			if errors.Is(err, ErrUnsupportedFeature) {
-				return nil, fmt.Errorf("ProjectRefsetField: %w", err)
-			}
-			return nil, fmt.Errorf("%w: ProjectRefsetField: %w", ErrProvider, err)
+			// A provider refusing a FIELD wraps ErrUnsupportedFeature, which
+			// providerError passes through without ErrProvider.
+			return nil, providerError(ctx, "ProjectRefsetField", err)
 		}
 		return nonNil(projected), nil
 	}
 
 	members, err := provider.RefsetMembers(ctx, refsetIDs)
 	if err != nil {
-		return nil, fmt.Errorf("%w: RefsetMembers: %w", ErrProvider, err)
+		return nil, providerError(ctx, "RefsetMembers", err)
 	}
 	return nonNil(members), nil
 }
@@ -2578,6 +2996,9 @@ func memberColumnOpts(ctx context.Context, f ast.Filter, provider DataProvider) 
 		}
 		return MemberFilterOpts{FieldName: MemberColumnActive, Op: "=", ValueSet: NewSetFromSlice(values)}, false, false, nil
 	case *ast.ModuleFilter:
+		if !moduleConstrains(x) {
+			return opts, true, false, nil // names no module: no constraint
+		}
 		ids, namesNothing, err := resolveModuleIDs(ctx, x, provider)
 		if err != nil {
 			return opts, false, false, err
@@ -2613,7 +3034,8 @@ func memberColumnOpts(ctx context.Context, f ast.Filter, provider DataProvider) 
 // namesNothing result reports a set whose operands all resolved to no concept, which each family
 // answers in its own terms; an empty slice alone would read as "no filter".
 func resolveModuleIDs(ctx context.Context, x *ast.ModuleFilter, provider DataProvider) (ids []string, namesNothing bool, err error) {
-	for _, mod := range x.Modules {
+	mods := moduleOperands(x)
+	for _, mod := range mods {
 		got, resolved, err := resolveFilterIDs(ctx, mod, provider)
 		if err != nil {
 			return nil, false, fmt.Errorf("evaluating module filter: %w", err)
@@ -2622,7 +3044,22 @@ func resolveModuleIDs(ctx context.Context, x *ast.ModuleFilter, provider DataPro
 			ids = append(ids, got...)
 		}
 	}
-	return ids, len(x.Modules) > 0 && len(ids) == 0, nil
+	return ids, len(mods) > 0 && len(ids) == 0, nil
+}
+
+// moduleConstrains reports whether a module filter names any module. One that
+// names none — only a hand-built tree can — constrains nothing in any family.
+func moduleConstrains(x *ast.ModuleFilter) bool {
+	return len(moduleOperands(x)) > 0
+}
+
+// moduleOperands returns the modules a module filter names, falling back to
+// the deprecated single-module field a hand-built tree may set alone.
+func moduleOperands(x *ast.ModuleFilter) []ast.Expression {
+	if len(x.Modules) == 0 && x.Module != nil { //nolint:staticcheck // hand-built trees may set only the deprecated field
+		return []ast.Expression{x.Module} //nolint:staticcheck // as above
+	}
+	return x.Modules
 }
 
 // effectiveTimeValues returns the times an effectiveTime filter names, falling
@@ -2647,7 +3084,13 @@ func effectiveTimeValues(x *ast.EffectiveTimeFilter) []string {
 func oneMemberFilterOpts(ctx context.Context, field *ast.MemberFieldFilter, provider DataProvider) (MemberFilterOpts, error) {
 	var valueSet Set
 	if field.Value != nil {
-		if lit, ok := literalText(field.Value); ok {
+		lit, ok, err := literalText(field.Value)
+		if err != nil {
+			// A literal that is not a finite number, refused as such rather
+			// than falling through to Evaluate and a generic error.
+			return MemberFilterOpts{}, err
+		}
+		if ok {
 			valueSet = NewSetFromSlice([]string{lit})
 		} else {
 			resolved, err := Evaluate(ctx, field.Value, provider)
@@ -2697,7 +3140,7 @@ func matchMemberFilters(ctx context.Context, refsetIDs []string, clauses []Membe
 	case 1:
 		filtered, err := provider.RefsetMembersFiltered(ctx, refsetIDs, clauses[0])
 		if err != nil {
-			return nil, fmt.Errorf("%w: RefsetMembersFiltered: %w", ErrProvider, err)
+			return nil, providerError(ctx, "RefsetMembersFiltered", err)
 		}
 		return nonNil(filtered), nil
 	}
@@ -2713,10 +3156,7 @@ func matchMemberFilters(ctx context.Context, refsetIDs []string, clauses []Membe
 		Filters:   clauses,
 	})
 	if err != nil {
-		if errors.Is(err, ErrUnsupportedFeature) {
-			return nil, fmt.Errorf("ProjectRefsetField: %w", err)
-		}
-		return nil, fmt.Errorf("%w: ProjectRefsetField: %w", ErrProvider, err)
+		return nil, providerError(ctx, "ProjectRefsetField", err)
 	}
 	return nonNil(matched), nil
 }

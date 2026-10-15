@@ -825,7 +825,7 @@ func checkRefsetFieldProjection(ctx context.Context, t *testing.T, p ecl.DataPro
 		}
 		projected, err := projector.ProjectRefsetField(ctx, ecl.RefsetProjectionOpts{
 			RefsetIDs: []string{refsetID},
-			Field:     "referencedComponentId",
+			Field:     fieldReferencedComponentID,
 		})
 		if err != nil {
 			t.Fatalf("ProjectRefsetField(referencedComponentId): %v", err)
@@ -910,7 +910,7 @@ func checkMemberRowColumns(ctx context.Context, t *testing.T, p ecl.DataProvider
 				t.Fatalf("RefsetMembersFiltered(active = 1): %v", err)
 			}
 			viaProjection, err := projector.ProjectRefsetField(ctx, ecl.RefsetProjectionOpts{
-				RefsetIDs: []string{refsetID}, Field: "referencedComponentId", Filters: []ecl.MemberFilterOpts{activeRow},
+				RefsetIDs: []string{refsetID}, Field: fieldReferencedComponentID, Filters: []ecl.MemberFilterOpts{activeRow},
 			})
 			if err != nil {
 				t.Fatalf("ProjectRefsetField(referencedComponentId, active = 1): %v", err)

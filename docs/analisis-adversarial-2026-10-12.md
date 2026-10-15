@@ -496,6 +496,15 @@ El parser emite un `ast.Filtered` por bloque `{{ D … }}` o `{{ C … }}`, anid
 
 H4, H5 y H6 no cambian.
 
+### 11.8 Estado tras corregir H4, H5 y H6
+
+- **H4 queda corregido.** Las comparaciones numéricas son exactas: el literal guarda su texto (`IntegerValue.Text`, `DecimalValue.Text`). Enteros y decimales se siguen comparando por valor, como antes, pero sin pasar por `float64` cuando la conversión pierde precisión. Un entero que cabe en `int64`, o un valor de hasta 15 dígitos significativos, se compara sin asignar memoria; el resto, con `math/big.Rat`. Los valores guardados se leen sólo como decimal (no `"1/2"` ni `"0x10"`). Un literal de la expresión admite hasta 4000 dígitos y de exponente; un valor guardado, que es dato de la terminología y no entrada del usuario, hasta 100 000, y sólo más allá se compara por su `float64`. En filtros de miembro, un literal viaja en forma canónica (`#1.50` como `"1.5"`, `#+1` como `"1"`). `Text` cuenta mientras coincide con `Value`: si un nodo parseado se edita, manda el `Value` nuevo. Un entero o una cardinalidad que no cabe en `int` es ahora un error de parseo que nombra el literal, en lugar de saturar en silencio. En plataformas de 32 bits ese límite es `MaxInt32`.
+- **H5 queda corregido.** Todo error que devuelve el provider pasa por una única función, `providerError`, que agrega `ErrProvider` y el nombre del método. Las dos excepciones son `ErrUnsupportedFeature`, que una capacidad usa para rechazar una forma, y el contexto de quien llama ya terminado: ninguna de las dos es un backend caído. La segunda se decide por `ctx.Err()`, no por la forma del error: un timeout propio del backend con el contexto vivo sí es `ErrProvider`, y un driver que responde a una cancelación con su propio error no lo es.
+- **Límite nuevo:** un bloque que combina un conjunto de términos con uno de `effectiveTime` se rechaza si el producto supera 256 llamadas al provider. Un conjunto de términos solo sigue sin límite propio.
+- **H6 queda corregido.** El loader de MRCM rechaza datos después del modelo y cualquier `ruleStrengthId` distinto de las dos fuerzas que el validador conoce; `Validate` aplica la misma regla a un modelo construido en Go. `null` sigue abierto como decisión de política.
+
+Quedan abiertos H2 (dos cláusulas `term` en un bloque), H2m y H3, que comparten la necesidad de una capacidad que resuelva un bloque completo sobre una sola descripción o fila, además de H7 y H8.
+
 ## Apéndice A. Reproducción de los hallazgos
 
 Guardar el siguiente programa fuera del paquete, por ejemplo en `/tmp/go-ecl-audit-probe.go`, y ejecutar desde la raíz del repositorio:
